@@ -6,7 +6,7 @@ CineLens is a single-file movie and show discovery app. It helps a user rate tit
 
 ## Current App Shape
 
-- Main app file: `cinelens.html`
+- Main app file: `index.html`
 - App type: static browser app with embedded HTML, CSS, and JavaScript
 - Storage: browser `localStorage`, with optional Google Drive JSON sync
 - External data: Wikipedia API for expanding the title pool
@@ -118,6 +118,7 @@ cinelens_drive_key
 - Added this spec as the project reference document.
 - Captured the current architecture, data model, recommendation rules, persistence behavior, and known notes.
 - Initialized the project for GitHub publishing.
+- Renamed the app entry file from `cinelens.html` to `index.html` so GitHub Pages can serve the app at the repository root URL.
 
 ## Future Iterations
 
