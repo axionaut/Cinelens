@@ -11,20 +11,22 @@ CineLens is a single-file movie and show discovery app. It helps a user rate tit
 - Storage: browser `localStorage`, with optional Google Drive JSON sync
 - External data: Wikipedia API for expanding the title pool
 - Primary UI sections:
-  - `For You`: recommended unrated titles
+  - `For You`: unified discovery surface for recommended/unrated titles
   - `Rated`: titles the user has already rated
-  - `Rate These`: current batch of unrated titles
+  - `Watchlist`: unseen titles the user wants to save
   - `Tag Brain`: tag weights and title/tag exploration
 
 ## Core User Flow
 
 1. The app loads saved local state.
 2. The built-in seed pool is added if missing.
-3. The user rates movies or shows from the rating queue.
-4. Rated titles are tagged.
-5. Tags are converted into taste weights based on rating.
-6. Unrated tagged titles are scored.
-7. The highest-scoring matches appear in `For You`.
+3. The user reviews titles in `For You`.
+4. If the user has seen a title, they rate it directly from the card.
+5. If the user has not seen a title, they add it to `Watchlist`.
+6. Rated titles are tagged from source metadata, plot, story, and synopsis text.
+7. Tags are converted into taste weights based on rating.
+8. Unrated tagged titles are scored.
+9. The highest-scoring matches appear in `For You`.
 
 ## Data Model
 
@@ -36,7 +38,8 @@ The app keeps runtime state in a global `state` object:
   tagWeights: {},
   settings: {
     topN: 10,
-    batchSize: 12
+    batchSize: 12,
+    minYear: 1970
   },
   drive: {
     connected: false,
@@ -62,9 +65,21 @@ Each movie/show record generally contains:
   tags: [],
   rating: 0,
   tagged: false,
+  watchlist: false,
   skipped: false
 }
 ```
+
+## Source And Tagging Rules
+
+Wikipedia expansion pulls candidate titles from language-specific film categories:
+
+- `Category:English-language_films`
+- `Category:Hindi-language_films`
+
+These categories are part of Wikipedia's `Category:Films by language` taxonomy: <https://en.wikipedia.org/wiki/Category:Films_by_language>.
+
+For fetched Wikipedia titles, tags are derived from the page extract, categories, and parsed metadata. The app should keep moving toward source-derived tagging from plot, story, synopsis, category, country, language, year, format, and director signals. Hardcoded seed tags are allowed as startup data, but the expansion brain should not depend on hardcoded per-title tags.
 
 ## Recommendation Rules
 
@@ -83,6 +98,8 @@ An unrated title is recommended when:
 - and its total tag score is positive.
 
 Recommendations are sorted by total score, descending.
+
+Discovery excludes titles older than the selected `Since` year. The default cutoff is `1970`, and the user can adjust it from the settings bar.
 
 ## Persistence
 
@@ -116,6 +133,10 @@ Google Drive sync uses Google Identity Services OAuth with the `drive.file` scop
 - Initialized the project for GitHub publishing.
 - Renamed the app entry file from `cinelens.html` to `index.html` so GitHub Pages can serve the app at the repository root URL.
 - Replaced the old Google Drive API-key dialog with a direct Google OAuth flow using Google Identity Services and bearer-token Drive API requests.
+- Merged `For You` and `Rate These` into a single discovery section where users either rate seen titles or add unseen titles to `Watchlist`.
+- Added a watchlist section, a favicon, and a persisted `Since` year cutoff for discovery recommendations.
+- Capped each pool expansion run at 60 fetch attempts and added background auto-refill when the discovery pool runs low.
+- Changed Wikipedia expansion to source candidate titles from English/Hindi language film categories and keep fetched tags source-derived from page text and metadata.
 
 ## Future Iterations
 

@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CineLens</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230a0a0a'/%3E%3Ccircle cx='32' cy='32' r='21' fill='none' stroke='%23e8c547' stroke-width='6'/%3E%3Ccircle cx='32' cy='32' r='7' fill='%23e8c547'/%3E%3Cpath d='M32 11v10M32 43v10M11 32h10M43 32h10' stroke='%23e8c547' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -198,7 +199,6 @@
       <span id="driveLabel">not connected</span>
     </div>
     <button class="btn btn-sm" onclick="connectDrive()">⚙ Drive</button>
-    <button class="btn btn-sm" onclick="syncDrive(true)">↑↓ Sync</button>
     <button class="btn btn-sm btn-warning" onclick="expandPool()" id="expandBtn">＋ Expand Pool</button>
   </div>
 </header>
@@ -220,8 +220,12 @@
     <span class="val" id="topNVal">10</span>
     <div class="sep-v"></div>
     <label>Batch</label>
-    <input type="range" id="batchSize" min="6" max="24" value="12" oninput="document.getElementById('batchVal').textContent=this.value;renderRateGrid()">
+    <input type="range" id="batchSize" min="6" max="24" value="12" oninput="updateBatchSize(this.value)">
     <span class="val" id="batchVal">12</span>
+    <div class="sep-v"></div>
+    <label>Since</label>
+    <input type="range" id="minYear" min="1940" max="2026" step="1" value="1970" oninput="updateMinYear(this.value)">
+    <span class="val" id="minYearVal">1970</span>
     <div class="sep-v"></div>
     <span id="hkStatus" style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace">tags: 0</span>
   </div>
@@ -255,10 +259,10 @@
   <hr class="sep">
 
   <div class="section-header">
-    <div class="section-title">Rate These</div>
-    <div class="section-count" id="rateCount">loading...</div>
+    <div class="section-title">Watchlist</div>
+    <div class="section-count" id="watchlistCount">nothing saved yet</div>
   </div>
-  <div class="movies-grid" id="rateGrid"></div>
+  <div class="movies-grid" id="watchlistGrid"></div>
 
   <hr class="sep">
 
@@ -287,15 +291,8 @@
 // The API returns page titles which we then individually fetch.
 // ─────────────────────────────────────────────
 const WIKI_SOURCES = {
-  english: [
-    // IMDb top 250 films - Wikipedia category members
-    'https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=Category:Films_considered_the_best&cmlimit=200&cmnamespace=0&format=json&origin=*',
-    'https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=Category:American_films&cmlimit=50&cmsort=sortkey&format=json&origin=*',
-  ],
-  hindi: [
-    'https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=Category:Hindi-language_films&cmlimit=200&cmsort=sortkey&format=json&origin=*',
-    'https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=Category:Indian_films&cmlimit=100&format=json&origin=*',
-  ]
+  english: 'Category:English-language_films',
+  hindi: 'Category:Hindi-language_films'
 };
 
 // Curated expansion packs — well-known films by title, fetched from Wikipedia
@@ -407,10 +404,12 @@ const EXPANSION_HINDI = [
 // ─────────────────────────────────────────────
 let activeTab = 'all';
 let tagFilter = 'all';
+let poolExpansionInProgress = false;
+let lastAutoExpandAt = 0;
 let state = {
   movies: {},
   tagWeights: {},
-  settings: { topN: 10, batchSize: 12 },
+  settings: { topN: 10, batchSize: 12, minYear: 1970 },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '' },
   poolFetched: false
 };
@@ -424,7 +423,7 @@ window.addEventListener('DOMContentLoaded', () => {
   render();
   // Auto-expand if pool is small
   if (Object.keys(state.movies).length < 50) {
-    setTimeout(() => expandPool(), 800);
+    setTimeout(() => expandPool(false), 800);
   }
 });
 
@@ -510,12 +509,27 @@ function seedPool() {
 // ─────────────────────────────────────────────
 // WIKIPEDIA POOL EXPANSION
 // ─────────────────────────────────────────────
-async function expandPool() {
-  const btn = document.getElementById('expandBtn');
-  btn.disabled = true; btn.textContent = '⟳ Fetching...';
-  showFetchProgress('Expanding pool from Wikipedia...', 0, '');
+async function fetchWikiSourceTitles() {
+  const titles = [];
+  for (const category of Object.values(WIKI_SOURCES)) {
+    try {
+      const url = `https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=${encodeURIComponent(category)}&cmlimit=200&cmnamespace=0&cmsort=sortkey&format=json&origin=*`;
+      const data = await (await fetch(url)).json();
+      (data.query?.categorymembers||[]).forEach(item => titles.push(item.title));
+    } catch(e) {}
+  }
+  return [...new Set(titles)];
+}
 
-  const allTitles = [...EXPANSION_ENGLISH, ...EXPANSION_HINDI];
+async function expandPool(manual=true) {
+  if (poolExpansionInProgress) return;
+  poolExpansionInProgress = true;
+  const btn = document.getElementById('expandBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Fetching...'; }
+  if (manual) showFetchProgress('Expanding pool from Wikipedia...', 0, '');
+
+  const sourceTitles = await fetchWikiSourceTitles();
+  const allTitles = [...sourceTitles, ...EXPANSION_ENGLISH, ...EXPANSION_HINDI];
   const existing = new Set(Object.values(state.movies).map(m => m.title.toLowerCase()));
   const toFetch = allTitles.filter(t => {
     const clean = t.replace(/ \(.*\)$/, '').trim().toLowerCase();
@@ -523,31 +537,29 @@ async function expandPool() {
   });
 
   let added = 0;
-  const total = Math.min(toFetch.length, 300);
+  const total = Math.min(toFetch.length, 60);
 
   for (let i = 0; i < total; i++) {
     const title = toFetch[i];
-    showFetchProgress(`Fetching ${i+1}/${total}`, (i/total)*100, title);
+    if (manual) showFetchProgress(`Fetching ${i+1}/${total}`, (i/total)*100, title);
     try {
       const movie = await fetchWikiMovie(title);
       if (movie && !state.movies[movie.id]) {
-        // Only English and Hindi
-        if (movie.language === 'English' || movie.language === 'Hindi') {
+        if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie)) {
           state.movies[movie.id] = movie;
           added++;
         }
       }
     } catch(e) {}
-    // Small delay to be polite to Wikipedia API
     if (i % 10 === 9) await sleep(300);
   }
 
-  hideFetchProgress();
-  btn.disabled = false; btn.textContent = '＋ Expand Pool';
+  if (manual) hideFetchProgress();
+  if (btn) { btn.disabled = false; btn.textContent = 'Expand Pool'; }
+  poolExpansionInProgress = false;
   saveLocalState(); syncDrive(); render();
-  showToast(`Added ${added} new films to pool`, 'success');
+  if (manual || added) showToast(`Added ${added} new films to pool`, 'success');
 }
-
 async function fetchWikiMovie(wikiTitle) {
   // Fetch extract + page props from Wikipedia API
   const url = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|revisions|categories&exintro=1&explaintext=1&rvprop=content&rvsection=0&cllimit=20&format=json&origin=*`;
@@ -833,22 +845,44 @@ function matchesTab(m) {
 // ─────────────────────────────────────────────
 // RENDER
 // ─────────────────────────────────────────────
-function render() { renderRecs(); renderRatedGrid(); renderRateGrid(); renderTagBrain(); updateStats(); }
+function render() { renderRecs(); renderRatedGrid(); renderWatchlist(); renderTagBrain(); updateStats(); maybeAutoExpandPool(); }
+
+function discoveryPool() {
+  return Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && !m.watchlist && matchesTab(m) && meetsYearCutoff(m));
+}
+
+function meetsYearCutoff(m) {
+  return !m.year || m.year >= state.settings.minYear;
+}
+
+function maybeAutoExpandPool() {
+  const available = discoveryPool().length;
+  if (available < 12 && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > 300000) {
+    lastAutoExpandAt = Date.now();
+    setTimeout(() => expandPool(false), 600);
+  }
+}
 
 function renderRecs() {
   const grid = document.getElementById('recsGrid');
+  const batchSize = parseInt(document.getElementById('batchSize').value);
   const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
-  if (ratedTagged.length < 3) {
-    grid.innerHTML = `<div class="empty-state"><div class="icon">🎬</div><h3>Rate Movies First</h3><p>Rate at least 3 movies below.</p></div>`;
-    document.getElementById('recCount').textContent = 'needs 3+ rated & tagged movies';
-    return;
-  }
-  const scored = scoreMovies().filter(x => matchesTab(x.movie));
-  const top = scored.slice(0, state.settings.topN);
-  document.getElementById('recCount').textContent = top.length ? `top ${top.length} matches` : 'no matches yet';
   grid.innerHTML = '';
-  if (!top.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><h3>No Matches Yet</h3><p>Rate more movies to build your taste profile.</p></div>`; return; }
-  top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, maxScore:scored[0]?.score||1 })));
+
+  if (ratedTagged.length >= 3) {
+    const scored = scoreMovies().filter(x => matchesTab(x.movie) && !x.movie.watchlist && meetsYearCutoff(x.movie));
+    const top = scored.slice(0, state.settings.topN);
+    if (top.length) {
+      document.getElementById('recCount').textContent = `top ${top.length} matches`;
+      top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, maxScore:scored[0]?.score||1 })));
+      return;
+    }
+  }
+
+  const batch = discoveryPool().slice(0, batchSize);
+  document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `showing ${batch.length} unrated`;
+  if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expand the pool or switch tabs.</p></div>`; return; }
+  batch.forEach(m => grid.appendChild(buildCard(m, {})));
 }
 
 function renderRatedGrid() {
@@ -857,25 +891,25 @@ function renderRatedGrid() {
   const untaggedCount = Object.values(state.movies).filter(m => m.rating > 0 && !m.tagged).length;
   const btn = document.getElementById('tagUntaggedBtn');
   btn.style.display = untaggedCount > 0 ? 'inline-flex' : 'none';
-  if (untaggedCount > 0) btn.textContent = `⟳ Tag ${untaggedCount} Untagged`;
+  if (untaggedCount > 0) btn.textContent = `Tag ${untaggedCount} Untagged`;
   document.getElementById('ratedCount').textContent = rated.length ? `${rated.length} titles` : 'none yet';
   grid.innerHTML = '';
-  if (!rated.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">★</div><h3>Nothing Rated Yet</h3></div>`; return; }
+  if (!rated.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">*</div><h3>Nothing Rated Yet</h3></div>`; return; }
   rated.forEach(m => grid.appendChild(buildCard(m, { showEdit:true })));
 }
 
-function renderRateGrid() {
-  const grid = document.getElementById('rateGrid');
-  const batchSize = parseInt(document.getElementById('batchSize').value);
-  const unrated = Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && matchesTab(m));
-  const batch = unrated.slice(0, batchSize);
-  document.getElementById('rateCount').textContent = `${unrated.length} unrated · showing ${batch.length}`;
+function renderWatchlist() {
+  const grid = document.getElementById('watchlistGrid');
+  const watchlist = Object.values(state.movies).filter(m => m.rating===0 && m.watchlist && matchesTab(m)).sort((a,b)=>a.title.localeCompare(b.title));
+  document.getElementById('watchlistCount').textContent = watchlist.length ? `${watchlist.length} saved` : 'nothing saved yet';
   grid.innerHTML = '';
-  batch.forEach(m => grid.appendChild(buildCard(m, {})));
+  if (!watchlist.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">+</div><h3>Nothing Saved Yet</h3></div>`; return; }
+  watchlist.forEach(m => grid.appendChild(buildCard(m, { watchlistView:true })));
 }
 
+function renderRateGrid() { renderRecs(); }
 function buildCard(movie, opts={}) {
-  const { rank, score, matchedTags, maxScore, showEdit } = opts;
+  const { rank, score, matchedTags, maxScore, showEdit, watchlistView } = opts;
   const card = document.createElement('div');
   card.className = 'movie-card' + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
@@ -902,7 +936,7 @@ function buildCard(movie, opts={}) {
       <div class="card-actions">
         ${movie.tagged?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ tags'}</button>`:''}
         ${showEdit?`<button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>`:''}
-        ${!showEdit?`<button class="card-act" onclick="skipMovie('${safeId}',event)">${movie.skipped?'↩ restore':'skip'}</button>`:''}
+        ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
         <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
       </div>
     </div>`;
@@ -960,6 +994,7 @@ function rateMovie(id, rating) {
   const movie = state.movies[id];
   if (!movie) return;
   movie.rating = rating;
+  movie.watchlist = false;
   if (!movie.tagged) tagMovie(movie);
   runHousekeeping(false);
   saveLocalState(); syncDrive(); render();
@@ -977,14 +1012,16 @@ function deleteMovie(id, e) {
   saveLocalState(); syncDrive(); render();
   showToast(`Removed "${m.title}"`, '');
 }
-function skipMovie(id, e) {
+function toggleWatchlist(id, e) {
   if (e) e.stopPropagation();
   const m = state.movies[id];
   if (!m) return;
-  m.skipped = !m.skipped;
-  saveLocalState(); renderRateGrid();
-  showToast(m.skipped?`Skipped "${m.title}"`:`Restored "${m.title}"`, '');
+  m.watchlist = !m.watchlist;
+  m.skipped = false;
+  saveLocalState(); syncDrive(); render();
+  showToast(m.watchlist?`Added "${m.title}" to watchlist`:`Removed "${m.title}" from watchlist`, m.watchlist?'success':'');
 }
+function skipMovie(id, e) { toggleWatchlist(id, e); }
 function retagMovie(id, e) {
   if (e) e.stopPropagation();
   const m = state.movies[id];
@@ -1117,7 +1154,9 @@ function updateStats() {
   document.getElementById('statAvg').textContent=avg;
   updateHKStatus('tags: '+countUniqueTags());
 }
-function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); renderRecs(); }
+function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); saveLocalState(); renderRecs(); }
+function updateBatchSize(val) { document.getElementById('batchVal').textContent=val; state.settings.batchSize=parseInt(val); saveLocalState(); renderRecs(); }
+function updateMinYear(val) { document.getElementById('minYearVal').textContent=val; state.settings.minYear=parseInt(val); saveLocalState(); renderRecs(); }
 
 // ─────────────────────────────────────────────
 // PERSISTENCE
@@ -1132,10 +1171,14 @@ function loadLocalState() {
     if (raw) {
       const s=JSON.parse(raw);
       if (s.movies) state.movies=s.movies;
-      if (s.settings) state.settings=s.settings;
+      if (s.settings) state.settings={...state.settings,...s.settings};
       if (s.drive) { state.drive.connected=false; state.drive.folderId=s.drive.folderId||''; state.drive.fileId=s.drive.fileId||''; }
       document.getElementById('topN').value=state.settings.topN;
       document.getElementById('topNVal').textContent=state.settings.topN;
+      document.getElementById('batchSize').value=state.settings.batchSize;
+      document.getElementById('batchVal').textContent=state.settings.batchSize;
+      document.getElementById('minYear').value=state.settings.minYear;
+      document.getElementById('minYearVal').textContent=state.settings.minYear;
     }
   } catch(e) {}
 }
