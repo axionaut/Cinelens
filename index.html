@@ -326,9 +326,6 @@
   .card-act:hover{background:rgba(255,255,255,.08);border-color:rgba(255,204,51,.35);color:var(--text)}
   .card-act.watch:hover{background:rgba(255,204,51,.14);border-color:var(--accent);color:var(--accent)}
   .card-act.del:hover{background:rgba(239,83,80,.12);border-color:var(--danger);color:#ff7c78}
-  .tag.removable{cursor:pointer;display:inline-flex;align-items:center;gap:5px}
-  .tag-remove{font-size:10px;color:var(--danger);opacity:.85}
-  .pool-card-note{font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);margin:0 0 7px}
   .empty-state{background:rgba(255,255,255,.025);border-color:rgba(255,255,255,.1);color:var(--muted)}
   .tag-brain-grid{background:rgba(255,255,255,.025);border-color:rgba(255,255,255,.08)}
   .tb-tag{background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.1);color:#b9ab9a}
@@ -1921,7 +1918,7 @@ function renderRemovableTagChips(tags, movieId) {
   if (!tags || !tags.length) return '';
   const unique = [...new Set(tags)].sort();
   return unique.map(tag => {
-    const safeTag = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    const safeTag = String(tag).replace(/\/g,'\\').replace(/'/g,"\\'");
     return `<span class="tag removable" title="Remove tag" onclick="removeTagFromMovie('${movieId}','${safeTag}',event)">${tag}<span class="tag-remove">×</span></span>`;
   }).join('');
 }
@@ -2329,15 +2326,73 @@ const GOOGLE_CLIENT_ID='984899607223-h5oadg1cfb7o7ksfb4400vhidknk9soc.apps.googl
 const DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
 let driveTokenClient=null;
 let driveRestoreInProgress=false;
+let gisScriptLoading=false;
 
 function openDriveModal() { connectDrive(); }
 function skipDrive() { showToast('Using local storage',''); }
+
+function googleIdentityReady() {
+  return !!window.google?.accounts?.oauth2;
+}
+
+function loadGoogleIdentityScript() {
+  if (googleIdentityReady()) return Promise.resolve();
+  if (gisScriptLoading) return new Promise((resolve,reject) => {
+    let tries=0;
+    const timer=setInterval(() => {
+      tries++;
+      if (googleIdentityReady()) { clearInterval(timer); resolve(); }
+      if (tries > 60) { clearInterval(timer); reject(new Error('Google Identity Services unavailable')); }
+    },100);
+  });
+  gisScriptLoading=true;
+  return new Promise((resolve,reject) => {
+    const existing=[...document.scripts].find(sc => (sc.src||'').includes('accounts.google.com/gsi/client'));
+    if (existing) {
+      existing.addEventListener('load', () => resolve(), {once:true});
+      existing.addEventListener('error', () => reject(new Error('Google Identity Services blocked')), {once:true});
+      setTimeout(() => googleIdentityReady() ? resolve() : reject(new Error('Google Identity Services unavailable')), 6000);
+      return;
+    }
+    const sc=document.createElement('script');
+    sc.src='https://accounts.google.com/gsi/client';
+    sc.async=true;
+    sc.defer=true;
+    sc.onload=() => resolve();
+    sc.onerror=() => reject(new Error('Google Identity Services blocked'));
+    document.head.appendChild(sc);
+  }).finally(() => { gisScriptLoading=false; });
+}
+
+function initDriveTokenClient() {
+  if (driveTokenClient) return driveTokenClient;
+  if (!googleIdentityReady()) throw new Error('Google sign-in script not loaded yet');
+  driveTokenClient=google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: DRIVE_SCOPE,
+    callback: () => {},
+    error_callback: err => console.error('Drive token error', err)
+  });
+  return driveTokenClient;
+}
+
+window.addEventListener('load', () => {
+  loadGoogleIdentityScript().then(() => {
+    try { initDriveTokenClient(); } catch(e) {}
+  }).catch(e => console.warn(e));
+});
 
 async function connectDrive() {
   if (!GOOGLE_CLIENT_ID) { showToast('Missing Google client ID','error'); return; }
   setDriveStatus('syncing');
   try {
-    await requestDriveToken('consent');
+    if (!googleIdentityReady()) {
+      loadGoogleIdentityScript().catch(e => console.warn(e));
+      setDriveStatus('');
+      showToast('Google sign-in loading. Tap Drive again.','error');
+      return;
+    }
+    await requestDriveTokenInteractive();
     state.drive.enabled=true;
     const fileId=state.drive.fileId||await findDriveFile();
     if (fileId) { state.drive.fileId=fileId; await loadFromDrive(); }
@@ -2362,7 +2417,7 @@ async function restoreDriveSession(showFailure=false) {
   driveRestoreInProgress=true;
   setDriveStatus('syncing');
   try {
-    await requestDriveToken('');
+    await requestDriveTokenSilent();
     if (!state.drive.fileId) state.drive.fileId=await findDriveFile();
     if (state.drive.fileId) await loadFromDrive();
     state.drive.connected=true;
@@ -2374,7 +2429,7 @@ async function restoreDriveSession(showFailure=false) {
     state.drive.accessToken='';
     sessionStorage.removeItem('cinelens_drive_token');
     setDriveStatus('');
-    if (showFailure) showToast('Drive reconnect needed','error');
+    if (showFailure) showToast(driveErrorMessage(e),'error');
   } finally {
     driveRestoreInProgress=false;
   }
@@ -2383,32 +2438,28 @@ async function restoreDriveSession(showFailure=false) {
 function setDriveStatus(s) { document.getElementById('driveDot').className='drive-dot '+s; document.getElementById('driveLabel').textContent=s==='connected'?'drive connected':s==='syncing'?'syncing...':'not connected'; }
 function driveErrorMessage(e) {
   const code = e?.error || e?.message || 'unknown';
-  if (String(code).includes('unavailable')) return 'Google sign-in script not loaded';
-  if (code === 'popup_failed_to_open') return 'Allow popups for Drive sign-in';
+  if (String(code).includes('Google sign-in script not loaded')) return 'Google sign-in loading. Tap Drive again.';
+  if (String(code).includes('unavailable')) return 'Google sign-in script unavailable';
+  if (String(code).includes('blocked')) return 'Google sign-in blocked by browser settings';
+  if (String(code).includes('popup')) return 'Allow popups for Drive sign-in';
   if (code === 'access_denied') return 'Drive access was denied';
   if (code === 'idpiframe_initialization_failed') return 'Google sign-in blocked by browser settings';
-  if (code === 'interaction_required') return 'Click Drive once to reconnect';
+  if (code === 'interaction_required') return 'Tap Drive to reconnect';
+  if (code === 'popup_failed_to_open') return 'Allow popups for Drive sign-in';
+  if (code === 'redirect_uri_mismatch' || code === 'origin_mismatch') return 'Google OAuth origin is not allowed for this site';
   return `Drive sign-in failed: ${code}`;
 }
 async function waitForGoogleIdentity() {
-  for (let i=0; i<30; i++) {
-    if (window.google?.accounts?.oauth2) return;
+  if (googleIdentityReady()) return;
+  await loadGoogleIdentityScript();
+  for (let i=0; i<20; i++) {
+    if (googleIdentityReady()) return;
     await sleep(100);
   }
   throw new Error('Google Identity Services unavailable');
 }
-async function requestDriveToken(prompt='consent') {
-  if (state.drive.accessToken) return state.drive.accessToken;
-  const stored=sessionStorage.getItem('cinelens_drive_token');
-  if (stored) { state.drive.accessToken=stored; return stored; }
-  await waitForGoogleIdentity();
-  if (!driveTokenClient) {
-    driveTokenClient=google.accounts.oauth2.initTokenClient({
-      client_id: GOOGLE_CLIENT_ID,
-      scope: DRIVE_SCOPE,
-      callback: () => {}
-    });
-  }
+function tokenRequest(prompt) {
+  initDriveTokenClient();
   return new Promise((resolve,reject) => {
     driveTokenClient.callback = resp => {
       if (resp.error) { reject(resp); return; }
@@ -2420,17 +2471,33 @@ async function requestDriveToken(prompt='consent') {
     catch(e) { reject(e); }
   });
 }
+async function requestDriveTokenInteractive() {
+  const stored=sessionStorage.getItem('cinelens_drive_token');
+  if (stored) { state.drive.accessToken=stored; return stored; }
+  if (!googleIdentityReady()) throw new Error('Google sign-in script not loaded yet');
+  return tokenRequest('consent');
+}
+async function requestDriveTokenSilent() {
+  if (state.drive.accessToken) return state.drive.accessToken;
+  const stored=sessionStorage.getItem('cinelens_drive_token');
+  if (stored) { state.drive.accessToken=stored; return stored; }
+  await waitForGoogleIdentity();
+  return tokenRequest('');
+}
+async function requestDriveToken(prompt='consent') {
+  return prompt === '' ? requestDriveTokenSilent() : requestDriveTokenInteractive();
+}
 function clearDriveToken() {
   state.drive.accessToken='';
   sessionStorage.removeItem('cinelens_drive_token');
 }
 function driveHeaders(extra={}) { return {...extra, Authorization:`Bearer ${state.drive.accessToken}`}; }
 async function driveFetch(url, opts={}) {
-  if (!state.drive.accessToken) await requestDriveToken('');
+  if (!state.drive.accessToken) await requestDriveTokenSilent();
   let resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
   if (resp.status===401) {
     clearDriveToken();
-    await requestDriveToken('');
+    await requestDriveTokenSilent();
     resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
   }
   return resp;
@@ -2486,7 +2553,7 @@ async function syncDrive(manual=false) {
     state.drive.lastConnectedAt=Date.now();
     saveLocalState();
     setDriveStatus('connected'); showToast('Synced to Drive','success');
-  } catch(e){state.drive.connected=false; setDriveStatus(''); showToast('Drive sync failed','error');}
+  } catch(e){state.drive.connected=false; setDriveStatus(''); showToast(driveErrorMessage(e)||'Drive sync failed','error');}
 }
 
 // ─────────────────────────────────────────────
