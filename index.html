@@ -719,7 +719,11 @@ const LOW_CONFIDENCE_PLOT_TAGS = new Set([
   'protagonist-driven','conflict-driven','character-driven','plot-driven','dramatic-stakes',
   'goal-oriented-plot','relationship-conflict','moral-choice','escalating-conflict','personal-cost',
   'turning-point-heavy','dialogue-driven','emotional-stakes','social-context','consequence-driven',
-  'journey-arc','high-stakes','character-growth','world-building','genre-hybrid'
+  'journey-arc','high-stakes','character-growth','world-building','genre-hybrid',
+  'central-conflict','main-character-goal','character-relationships','narrative-stakes','decision-pressure',
+  'setting-driven','identity-pressure','authority-conflict','danger-driven','emotional-pressure',
+  'social-pressure','professional-pressure','family-pressure','survival-pressure','hidden-information',
+  'investigation-thread','personal-history','opposition-force','moral-pressure','resolution-driven'
 ]);
 
 
@@ -1228,8 +1232,7 @@ function ratePendingManualMovie(rating) {
 }
 
 async function fetchWikiMovie(wikiTitle, mode='all') {
-  // Fetch extract + page props from Wikipedia API
-  const url = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories&explaintext=1&exlimit=1&cllimit=50&format=json&origin=*`;
+  const url = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories&explaintext=1&exlimit=1&cllimit=80&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const pages = data.query?.pages;
   if (!pages) return null;
@@ -1237,52 +1240,77 @@ async function fetchWikiMovie(wikiTitle, mode='all') {
   if (!page || page.missing !== undefined) return null;
 
   const extract = page.extract || '';
-  const title = page.title.replace(/ \(.*\)$/, '').trim();
+  const pageTitle = page.title || wikiTitle;
+  const title = pageTitle.replace(/ \(.*\)$/, '').trim();
   const id = 'wiki_' + page.pageid;
-  if (obviousNonMovieTitle(page.title) || /\b(film series|media franchise|shared universe|franchise)\b/i.test(extract.slice(0, 500))) return null;
+  if (obviousNonMovieTitle(pageTitle) || /\b(film series|media franchise|shared universe|franchise)\b/i.test(extract.slice(0, 700))) return null;
 
-  // Parse year from extract
-  const yearMatch = extract.match(/\b(19[3-9]\d|20[012]\d)\b/);
+  const cats = (page.categories || []).map(c => c.title.toLowerCase());
+  const catText = cats.join(' ');
+  const leadText = extract.slice(0, 1400);
+  const storyText = extractStoryText(extract);
+  if (!storyText || storyText.length < 350) return null;
+
+  const yearMatch = leadText.match(/\b(19[3-9]\d|20[012]\d)\b/) || extract.match(/\b(19[3-9]\d|20[012]\d)\b/);
   const year = yearMatch ? parseInt(yearMatch[1]) : null;
 
-  // Detect language from title hint or categories
-  const cats = (page.categories || []).map(c => c.title.toLowerCase());
   let language = 'English';
-  const intro = extract.slice(0, 700);
-  if (cats.some(c => c.includes('hindi-language')) || /\bhindi-language\b/i.test(intro)) language = 'Hindi';
+  if (cats.some(c => c.includes('hindi-language')) || /\bhindi-language\b/i.test(leadText)) language = 'Hindi';
   else if (wikiTitle.toLowerCase().includes('hindi') || EXPANSION_HINDI.includes(wikiTitle)) language = 'Hindi';
 
-  // Detect format
   let format = null;
-  if (cats.some(c => c.includes('television series') || c.includes('tv series'))) format = 'series';
+  if (cats.some(c => c.includes('television series') || c.includes('tv series') || c.includes('web series'))) format = 'series';
   if (cats.some(c => c.includes('miniseries'))) format = 'miniseries';
-  if (!format && /\b(television series|tv series|web series|miniseries|streaming television series)\b/i.test(extract.slice(0, 600))) format = 'series';
+  if (!format && /\b(television series|tv series|web series|miniseries|streaming television series)\b/i.test(leadText)) format = 'series';
   if (cats.some(c => c.includes('film series') || c.includes('media franchise') || c.includes('fictional universes'))) return null;
   if (mode === 'movies' && format) return null;
   if (mode === 'shows' && !format) return null;
 
-  // Country
   let country = 'USA';
   if (language === 'Hindi') country = 'India';
-  else if (mode === 'shows' && (cats.some(c => c.includes('indian television') || c.includes('indian web series')) || /\bindian\b/i.test(intro))) { country = 'India'; language = 'Hindi'; }
-  else if (cats.some(c => c.includes('british film') || c.includes('united kingdom'))) country = 'UK';
+  else if (mode === 'shows' && (cats.some(c => c.includes('indian television') || c.includes('indian web series')) || /\bindian\b/i.test(leadText))) { country = 'India'; language = 'Hindi'; }
+  else if (cats.some(c => c.includes('british film') || c.includes('united kingdom') || c.includes('british television'))) country = 'UK';
+  else if (cats.some(c => c.includes('indian film') || c.includes('indian television'))) { country = 'India'; language = language || 'Hindi'; }
 
-  // Director — try to extract from first sentence
-  const dirMatch = extract.match(/directed by ([A-Z][a-z]+ [A-Z][a-z]+(?:\s[A-Z][a-z]+)?)/);
-  const director = dirMatch ? dirMatch[1] : 'Unknown';
+  const dirMatch = leadText.match(/directed by ([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,3})/);
+  const creatorMatch = leadText.match(/created by ([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,3})/);
+  const director = dirMatch ? dirMatch[1] : (creatorMatch ? creatorMatch[1] : 'Unknown');
 
   if (!year || !title) return null;
 
-  // Generate tags from extract. Core tags drive scoring; plotTags are padded to 20 for audit/detail.
-  const meta = { title, year, language, country, format, director };
-  const rawTags = deriveTagsFromText(extract, meta);
-  const coreTags = recommendationTags(rawTags);
-  const plotTags = ensureMinimumPlotTags(coreTags, extract, meta);
+  const meta = { title, year, language, country, format, director, categories: cats, categoryText: catText, leadText, pageTitle, wikiTitle };
+  const rawTags = deriveTagsFromText(storyText, meta);
+  const coreTags = recommendationTags(rawTags).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t));
+  const plotTags = ensureMinimumPlotTags(rawTags, storyText, meta);
   const tags = [...new Set([...rawTags, ...plotTags])];
-  if (tags.length < 5) return null; // skip if we can't generate meaningful tags
   if (coreTags.length < 2) return null;
 
-  return { id, title, year, director, language, country, format: format||null, tags, coreTags, plotTags, tagged: true, rating: 0, source: 'wikipedia' };
+  return { id, title, year, director, language, country, format: format||null, tags, coreTags, plotTags, tagged: true, rating: 0, source: 'wikipedia', wikiTitle: pageTitle, pageTitle, storyText, leadText };
+}
+
+function extractStoryText(extract) {
+  const text = (extract || '').replace(//g, '').trim();
+  if (!text) return '';
+  const headings = ['Plot', 'Synopsis', 'Premise', 'Story', 'Plot summary', 'Summary', 'Series overview'];
+  const lines = text.split('
+');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (headings.some(h => line.toLowerCase() === h.toLowerCase())) {
+      const out = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const l = lines[j].trim();
+        const current = out.join(' ');
+        const looksLikeNextSection = /^[A-Z][A-Za-z0-9 &,'’():;\-]{1,55}$/.test(l) && !/^(the|a|an)/i.test(l);
+        if (looksLikeNextSection && current.length > 500) break;
+        if (l) out.push(l);
+        if (current.length > 6500) break;
+      }
+      const section = out.join(' ').trim();
+      if (section.length >= 350) return section;
+    }
+  }
+  return '';
 }
 
 // ─────────────────────────────────────────────
@@ -1291,176 +1319,182 @@ async function fetchWikiMovie(wikiTitle, mode='all') {
 // We match plot keywords to a comprehensive tag vocabulary.
 // ─────────────────────────────────────────────
 function deriveTagsFromText(text, meta) {
-  const t = text.toLowerCase();
+  const story = (text || '').toLowerCase();
+  const lead = (meta.leadText || '').toLowerCase();
+  const cat = (meta.categoryText || '').toLowerCase();
+  const all = `${lead} ${story}`;
   const tags = new Set();
+  const add = tag => { if (tag) tags.add(tag); };
+  const has = rx => rx.test(all);
+  const storyHas = rx => rx.test(story);
+  const leadHas = rx => rx.test(lead);
+  const catHas = rx => rx.test(cat);
 
-  // META tags always added
-  const lang = (meta.language||'English').toLowerCase().replace(/\s+/g,'-') + '-language';
-  const country = (meta.country||'usa').toLowerCase().replace(/\s+/g,'-');
+  const lang = (meta.language || 'English').toLowerCase().replace(/\s+/g,'-') + '-language';
+  const country = (meta.country || 'usa').toLowerCase().replace(/\s+/g,'-');
   const decade = meta.year ? Math.floor(meta.year/10)*10 + 's' : '2000s';
   const fmt = meta.format || 'film';
-  tags.add(lang); tags.add(country); tags.add(decade); tags.add(fmt);
-  if (fmt !== 'film') tags.add('prestige-tv');
+  add(lang); add(country); add(decade); add(fmt);
+  if (fmt !== 'film') add('prestige-tv');
 
-  // GENRE / TONE
-  if (/\b(murder|kill|killer|detective|investigat|crime|heist|robbery|gangster|mob|mafia|cartel)\b/.test(t)) tags.add('crime-thriller');
-  if (/\b(serial killer|psychopath|profil)\b/.test(t)) tags.add('serial-killer-thriller');
-  if (/\b(ghost|haunted|supernatural|demon|possession|exorcis)\b/.test(t)) tags.add('supernatural-horror');
-  if (/\b(zombie|undead|apocalypse|pandemic|outbreak)\b/.test(t)) tags.add('apocalyptic');
-  if (/\b(space|spacecraft|astronaut|alien|extraterrestrial|planet|galaxy|nasa)\b/.test(t)) tags.add('space-sci-fi');
-  if (/\b(robot|android|artificial intelligence|ai|machine|cyborg|simulation)\b/.test(t)) tags.add('artificial-intelligence');
-  if (/\b(time travel|time loop|paradox|alternate timeline|future|past)\b/.test(t)) tags.add('time-manipulation');
-  if (/\b(dream|subconscious|surreal|hallucination|psychedelic)\b/.test(t)) tags.add('surreal-dreamlike');
-  if (/\b(war|battle|soldier|military|combat|army|wwii|world war)\b/.test(t)) tags.add('war-drama');
-  if (/\b(prison|inmate|cell|incarcerat|jail)\b/.test(t)) tags.add('prison-setting');
-  if (/\b(court|trial|judge|jury|lawyer|attorney|verdict)\b/.test(t)) tags.add('courtroom-drama');
-  if (/\b(political|government|corruption|election|regime|authoritarian)\b/.test(t)) tags.add('political-thriller');
-  if (/\b(spy|espionage|secret agent|cia|mi6|undercover|surveillance)\b/.test(t)) tags.add('spy-thriller');
-  if (/\b(drug|narcotic|trafficking|cartel|dealer|addiction)\b/.test(t)) tags.add('drug-trade');
-  if (/\b(heist|rob|vault|steal|theft|con artist|grift)\b/.test(t)) tags.add('heist-thriller');
-  if (/\b(western|cowboy|frontier|gunfighter|outlaw|sheriff|saloon)\b/.test(t)) tags.add('western');
-  if (/\b(music|musician|band|concert|rock|jazz|singer|composer)\b/.test(t)) tags.add('music-world');
-  if (/\b(cricket|football|basketball|baseball|tennis|boxing|wrestling|racing|athlete|coach|tournament|championship|world cup|olympics|sports team|hockey|kabaddi)\b/.test(t)) tags.add('sports-drama');
-  if (/\b(comedy|funny|humour|humor|laugh|comedic|farce)\b/.test(t)) tags.add('comedy');
-  if (/\b(romance|love|relationship|couple|affair|heartbreak|wedding)\b/.test(t)) tags.add('romance');
-  if (/\b(horror|terror|fear|scare|monster|creature)\b/.test(t)) tags.add('horror');
-  if (/\b(biography|biopic|based on a true story|based on actual events|true story|real events|historical figure)\b/.test(t)) tags.add('based-on-true-story');
-  if (/\b(animation|animated|cartoon)\b/.test(t)) tags.add('animated');
-  if (/\b(documentary|docu|real footage)\b/.test(t)) tags.add('documentary');
-  if (/\b(superhero|marvel|dc|batman|spider|avenger|x-men)\b/.test(t)) tags.add('superhero');
-  if (/\b(fantasy|magic|wizard|dragon|mytholog|fairy|enchant)\b/.test(t)) tags.add('fantasy');
-  if (/\b(mythology|folklore|legend|ancient|gods|goddess)\b/.test(t)) tags.add('mythology-folklore');
+  // High-confidence genre signals. These are intentionally narrow; one stray word should not hijack a title.
+  if (has(/\b(murder|homicide|detective|investigation|investigates|crime|criminal|heist|robbery|gangster|mob|mafia|cartel|police procedural)\b/)) add('crime-thriller');
+  if (has(/\b(serial killer|psychopath|criminal profiler|profiling unit|fbi profiler)\b/)) add('serial-killer-thriller');
+  if (has(/\b(ghost|haunted|supernatural|demon|possession|exorcism|exorcist|witchcraft|occult)\b/)) add('supernatural-horror');
+  if (has(/\b(zombie|undead|global outbreak|viral outbreak|post-apocalyptic|wasteland)\b/)) add('apocalyptic');
+  if (has(/\b(spacecraft|astronaut|alien|extraterrestrial|interstellar|planetary mission|space mission|nasa|spaceship|space station)\b/)) add('space-sci-fi');
+  if (has(/\b(robot|android|artificial intelligence|\bai\b|sentient machine|cyborg|simulation|virtual reality)\b/)) add('artificial-intelligence');
+  if (has(/\b(time travel|travels? (back|forward) in time|time loop|temporal|paradox|alternate timeline|parallel timeline)\b/)) add('time-manipulation');
+  if (has(/\b(dream world|subconscious|surreal|hallucination|psychedelic|blurs reality|dreams within dreams)\b/)) add('surreal-dreamlike');
+  if (has(/\b(world war|wwii|world war ii|nazi|nazis|soldier|military unit|army officer|battlefield|combat mission|war-torn|wartime)\b/) || catHas(/\bwar films\b|\bworld war ii films\b/)) add('war-drama');
+  if (has(/\b(prison|inmate|incarcerated|jail|penitentiary|wrongfully imprisoned)\b/)) add('prison-setting');
+  if (has(/\b(courtroom|trial|judge|jury|lawyer|attorney|verdict|legal case)\b/)) add('courtroom-drama');
+  if (has(/\b(political conspiracy|government corruption|election campaign|regime|authoritarian government|state corruption)\b/)) add('political-thriller');
+  if (has(/\b(spy|espionage|secret agent|intelligence agency|cia|mi6|undercover agent|surveillance operation)\b/)) add('spy-thriller');
+  if (has(/\b(drug cartel|narcotics|drug trafficking|drug dealer|addiction|heroin|cocaine|methamphetamine)\b/)) add('drug-trade');
+  if (has(/\b(heist|bank robbery|vault|steal|theft|con artist|confidence trick|grift)\b/)) add('heist-thriller');
+  if (has(/\b(western|cowboy|frontier|gunfighter|outlaw|sheriff|saloon)\b/)) add('western');
+  if (has(/\b(musician|band|concert|jazz singer|rock band|composer|music career|recording artist)\b/)) add('music-world');
+  if (has(/\b(cricket|football|basketball|baseball|tennis|boxing|wrestling|racing driver|athlete|sports coach|tournament|championship|world cup|olympics|sports team|hockey|kabaddi)\b/)) add('sports-drama');
+  if (leadHas(/\bcomedy\b/) || catHas(/\bcomedy (films|television series)\b/) || storyHas(/\b(comic misunderstanding|farce|satirical comedy|dark comedy)\b/)) add('comedy');
+  if (leadHas(/\bromantic\b/) || has(/\b(falls in love|love affair|romantic relationship|heartbreak|wedding|marriage proposal)\b/)) add('romance');
+  if (leadHas(/\bhorror\b/) || catHas(/\bhorror films\b/) || has(/\b(terrifying|monster attacks|slasher|haunting|creature stalks)\b/)) add('horror');
+  if (has(/\b(based on a true story|based on actual events|true story|real-life|biographical|biopic|historical figure)\b/) || catHas(/\bbiographical films\b/)) add('based-on-true-story');
+  if (leadHas(/\banimated\b/) || catHas(/\banimated films\b/)) add('animated');
+  if (leadHas(/\bdocumentary\b/) || catHas(/\bdocumentary films\b/)) add('documentary');
+  if (has(/\b(superhero|marvel comics|dc comics|batman|spider-man|avenger|x-men)\b/)) add('superhero');
+  if (has(/\b(magic|wizard|dragon|mythical kingdom|fairy tale|enchanted|fantasy world)\b/) || leadHas(/\bfantasy\b/)) add('fantasy');
+  if (has(/\b(mythology|folklore|legendary creature|ancient legend|gods|goddess)\b/)) add('mythology-folklore');
 
-  // NARRATIVE STRUCTURE
-  if (/\b(twist|revelation|unexpected|shocking ending|turns out|discover)\b/.test(t)) tags.add('twist-ending');
-  if (/\b(flashback|non-linear|told in|parallel|fragmented|interwoven)\b/.test(t)) tags.add('non-linear-narrative');
-  if (/\b(unreliable|memory|perspective|subjective|unclear|ambiguous)\b/.test(t)) tags.add('unreliable-narration');
-  if (/\b(multiple storyline|ensemble|interweav|anthology|several character)\b/.test(t)) tags.add('ensemble-cast');
-  if (/\b(single location|one room|confined|claustrophobic)\b/.test(t)) tags.add('single-location');
-  if (/\b(real time|one day|one night|24 hour)\b/.test(t)) tags.add('compressed-timeline');
+  // Narrative and character tags. These require clear phrases, not generic single words.
+  if (has(/\b(plot twist|twist ending|shocking revelation|final revelation|unexpected revelation)\b/)) add('twist-ending');
+  if (has(/\b(non-linear|nonlinear|flashback sequence|parallel timelines|interwoven storylines|fragmented narrative)\b/)) add('non-linear-narrative');
+  if (has(/\b(unreliable narrator|false memory|subjective reality|ambiguous reality)\b/)) add('unreliable-narration');
+  if (has(/\b(ensemble cast|multiple protagonists|interwoven lives|anthology)\b/)) add('ensemble-cast');
+  if (has(/\b(single location|one room|confined space|trapped in a room|claustrophobic setting)\b/)) add('single-location');
+  if (has(/\b(real time|one night|one day|24 hours|single night)\b/)) add('compressed-timeline');
+  if (has(/\b(anti-hero|antihero|morally ambiguous|morally grey|flawed protagonist)\b/)) add('morally-ambiguous-protagonist');
+  if (has(/\b(main antagonist|ruthless villain|primary villain|crime lord|serial killer)\b/)) add('compelling-villain');
+  if (has(/\b(female protagonist|woman protagonist|female lead|women-led|heroine)\b/)) add('female-lead-protagonist');
+  if (has(/\b(coming of age|teenage protagonist|adolescent protagonist|child protagonist|growing up)\b/)) add('coming-of-age-story');
+  if (has(/\b(father and son|father-son|mother and daughter|mother-daughter|family business|estranged family|dysfunctional family|family conflict)\b/)) add('family-dynamics');
+  if (has(/\b(close friendship|best friends|unlikely friendship|bond between friends|brotherhood|sisterhood)\b/)) add('friendship-bond');
+  if (has(/\b(mentor and student|teacher and student|master and pupil|coach and student)\b/)) add('mentor-student');
+  if (has(/\b(obsessed with|obsession with|becomes obsessed|fixated on)\b/)) add('obsession');
+  if (has(/\b(seeks revenge|takes revenge|vengeance|avenges|payback)\b/)) add('revenge-driven');
+  if (has(/\b(redemption|atone|second chance|seeks forgiveness)\b/)) add('redemption-arc');
+  if (has(/\b(grief|mourning|bereavement|death of his|death of her|widow|widower)\b/)) add('grief-and-loss');
+  if (has(/\b(identity crisis|secret identity|double life|mistaken identity|false identity)\b/)) add('identity-crisis');
+  if (has(/\b(power struggle|political ambition|rises to power|greed|corrupt ambition)\b/)) add('power-and-ambition');
+  if (has(/\b(class divide|poverty|wealth inequality|working class|upper class|rich and poor)\b/)) add('class-divide');
+  if (has(/\b(racism|discrimination|prejudice|segregation|caste discrimination|social stigma)\b/)) add('social-discrimination');
 
-  // CHARACTER / PROTAGONIST
-  if (/\b(anti-hero|morally grey|morally ambiguous|flawed|complex character)\b/.test(t)) tags.add('morally-ambiguous-protagonist');
-  if (/\b(villain|antagonist|evil|ruthless|corrupt)\b/.test(t)) tags.add('compelling-villain');
-  if (/\b(female lead|female protagonist|woman protagonist|protagonist.*woman|heroine|women-led)\b/.test(t)) tags.add('female-lead-protagonist');
-  if (/\b(child|boy|girl|teenager|adolescent|youth|coming of age|grow up)\b/.test(t)) tags.add('coming-of-age-story');
-  if (/\b(father|mother|parent|family|son|daughter|sibling|brother|sister)\b/.test(t)) tags.add('family-dynamics');
-  if (/\b(friendship|friend|bond|loyal|brotherhood|sisterhood)\b/.test(t)) tags.add('friendship-bond');
-  if (/\b(mentor|student|teacher|pupil|master)\b/.test(t)) tags.add('mentor-student');
-  if (/\b(obsession|obsessive|fixated|compulsive)\b/.test(t)) tags.add('obsession');
-  if (/\b(revenge|vengeance|retaliation|payback|grudge)\b/.test(t)) tags.add('revenge-driven');
-  if (/\b(redemption|forgiveness|atone|second chance)\b/.test(t)) tags.add('redemption-arc');
-  if (/\b(grief|loss|death|mourning|bereavement|widow)\b/.test(t)) tags.add('grief-and-loss');
-  if (/\b(identity|who am i|who is|persona|facade|double life)\b/.test(t)) tags.add('identity-crisis');
-  if (/\b(power|ambition|greed|corruption|climb|status)\b/.test(t)) tags.add('power-and-ambition');
-  if (/\b(class|poverty|wealth|rich|poor|inequality|working class)\b/.test(t)) tags.add('class-divide');
-  if (/\b(race|racism|discrimination|prejudice|segregation|caste)\b/.test(t)) tags.add('social-discrimination');
+  // Tone and setting.
+  if (leadHas(/\bneo-noir\b/) || has(/\b(bleak atmosphere|grim world|gritty crime|disturbing events|harrowing ordeal)\b/)) add('dark-tone');
+  if (has(/\b(slow burn|contemplative|meditative|quiet character study|understated drama|atmospheric)\b/)) add('slow-burn');
+  if (leadHas(/\bpsychological\b/) || has(/\b(mental illness|psychiatrist|therapy|psychological manipulation|mind games)\b/)) add('psychological');
+  if (leadHas(/\bsatirical\b/) || has(/\b(satire|satirizes|social satire|political satire|darkly comic)\b/)) add('satirical');
+  if (has(/\b(heartwarming|inspiring|optimistic ending|feel-good|joyful)\b/)) add('uplifting-tone');
+  if (has(/\b(epic scale|sweeping saga|grand spectacle|large-scale battle)\b/)) add('epic-scale');
+  if (has(/\b(intimate portrait|small-scale story|chamber drama|personal story)\b/)) add('intimate-scale');
+  if (has(/\b(visually stunning|beautiful cinematography|striking imagery|visual spectacle)\b/)) add('visually-striking');
+  if (has(/\b(emotionally devastating|deeply moving|heartbreaking|tragic ending)\b/)) add('emotionally-devastating');
 
-  // TONE
-  if (/\b(dark|bleak|grim|gritty|savage|disturbing|harrowing|oppressive)\b/.test(t)) tags.add('dark-tone');
-  if (/\b(slow|contemplative|meditative|quiet|understated|atmospheric)\b/.test(t)) tags.add('slow-burn');
-  if (/\b(psychological|mind|mental|psyche|psychiatr|therapy)\b/.test(t)) tags.add('psychological');
-  if (/\b(satire|satirical|parody|absurd|darkly comic)\b/.test(t)) tags.add('satirical');
-  if (/\b(uplifting|heartwarming|inspiring|optimistic|feel.good|joyful)\b/.test(t)) tags.add('uplifting-tone');
-  if (/\b(epic|sweeping|grand|spectacle|monumental|vast)\b/.test(t)) tags.add('epic-scale');
-  if (/\b(intimate|personal|quiet|small-scale|chamber)\b/.test(t)) tags.add('intimate-scale');
-  if (/\b(visually stunning|beautiful cinematography|gorgeous|visual|imagery)\b/.test(t)) tags.add('visually-striking');
-  if (/\b(emotionally|devastating|tearjerker|deeply moving|wrenching|heartbreaking)\b/.test(t)) tags.add('emotionally-devastating');
+  const cityMatch = all.match(/\b(new york|manhattan|brooklyn|los angeles|chicago|london|paris|berlin|mumbai|delhi|lahore)\b/);
+  if (cityMatch) add(cityMatch[1].replace(/\s/g,'-') + '-setting');
+  if (has(/\b(rural village|small town|remote village|isolated village|countryside)\b/)) add('rural-setting');
+  if (has(/\b(urban crime|city streets|metropolis|downtown|inner city)\b/)) add('urban-setting');
+  if (leadHas(/\bperiod\b/) || has(/\b(19th century|18th century|medieval|ancient kingdom|victorian era|1920s|1930s|1940s|1950s|1960s)\b/)) add('period-drama');
+  if (has(/\b(dystopian|totalitarian state|surveillance state|authoritarian regime)\b/)) add('dystopian');
+  if (has(/\b(post-apocalyptic|after the apocalypse|wasteland|ruined world)\b/)) add('post-apocalyptic');
+  if (meta.country === 'India' || has(/\b(mumbai|delhi|kolkata|chennai|punjab|rajasthan|bengal|maharashtra)\b/)) add('india-setting');
 
-  // SETTING
-  if (/\b(new york|manhattan|brooklyn|los angeles|chicago|london|paris|berlin|mumbai|delhi|lahore)\b/.test(t)) {
-    const cityMatch = t.match(/\b(new york|manhattan|brooklyn|los angeles|chicago|london|paris|berlin|mumbai|delhi|lahore)\b/);
-    if (cityMatch) tags.add(cityMatch[1].replace(/\s/g,'-') + '-setting');
-  }
-  if (/\b(rural|village|countryside|small town|remote|isolated)\b/.test(t)) tags.add('rural-setting');
-  if (/\b(urban|city|metropolis|street|downtown)\b/.test(t)) tags.add('urban-setting');
-  if (/\b(period|historical|19th century|18th century|medieval|ancient|victorian|1920s|1930s|1940s|1950s|1960s)\b/.test(t)) tags.add('period-drama');
-  if (/\b(dystopian|totalitarian|oppressive state|surveillance state|authoritarian regime)\b/.test(t)) tags.add('dystopian');
-  if (/\b(post-apocalyptic|after the war|ruined world|wasteland)\b/.test(t)) tags.add('post-apocalyptic');
-  if (/\b(india|bollywood|indian|hindi|punjab|rajasthan|bengal|maharashtra)\b/.test(t)) tags.add('india-setting');
-
-  // DIRECTOR STYLE (based on known directors)
   if (meta.director) {
     const d = meta.director.toLowerCase();
-    if (/nolan/.test(d)) tags.add('nolan-style');
-    if (/fincher/.test(d)) tags.add('fincher-style');
-    if (/tarantino/.test(d)) tags.add('tarantino-style');
-    if (/villeneuve/.test(d)) tags.add('villeneuve-style');
-    if (/scorsese/.test(d)) tags.add('scorsese-style');
-    if (/kubrick/.test(d)) tags.add('kubrick-style');
-    if (/kurosawa/.test(d)) tags.add('kurosawa-style');
-    if (/anurag kashyap|kashyap/.test(d)) tags.add('anurag-kashyap-style');
-    if (/mani ratnam/.test(d)) tags.add('mani-ratnam-style');
+    if (/nolan/.test(d)) add('nolan-style');
+    if (/fincher/.test(d)) add('fincher-style');
+    if (/tarantino/.test(d)) add('tarantino-style');
+    if (/villeneuve/.test(d)) add('villeneuve-style');
+    if (/scorsese/.test(d)) add('scorsese-style');
+    if (/kubrick/.test(d)) add('kubrick-style');
+    if (/kurosawa/.test(d)) add('kurosawa-style');
+    if (/anurag kashyap|kashyap/.test(d)) add('anurag-kashyap-style');
+    if (/mani ratnam/.test(d)) add('mani-ratnam-style');
   }
 
-
-  // Additional plot and premise signals. These reduce lazy mis-tags and give each title a fuller fingerprint.
-  if (/\b(action|fight|fighting|chase|pursuit|mission|assassin|mercenary|kidnap|rescue|explosion|gunfight|martial arts)\b/.test(t)) tags.add('action-thriller');
-  if (/\b(mystery|secret|missing|disappear|clue|solve|unknown|hidden|investigation)\b/.test(t)) tags.add('mystery-thriller');
-  if (/\b(life of|portrays|biographical|biography|memoir|real-life|true account)\b/.test(t)) tags.add('biographical-drama');
-  if (/\b(adventure|journey|quest|expedition|voyage|escape|treasure|explore)\b/.test(t)) tags.add('adventure');
-  if (/\b(survive|survival|stranded|trapped|endure|escape from)\b/.test(t)) tags.add('survival');
-  if (/\b(conspiracy|cover-up|secret organization|classified|whistleblower)\b/.test(t)) tags.add('conspiracy');
-  if (/\b(betrayal|betrays|traitor|double-cross|deception|deceives)\b/.test(t)) tags.add('betrayal');
-  if (/\b(loyalty|duty|honour|honor|allegiance|sacrifice)\b/.test(t)) tags.add('loyalty-conflict');
-  if (/\b(marriage|husband|wife|wedding|divorce|spouse)\b/.test(t)) tags.add('marriage-family');
-  if (/\b(father.*son|son.*father|father.*daughter|daughter.*father)\b/.test(t)) tags.add('father-child-relationship');
-  if (/\b(mother.*son|son.*mother|mother.*daughter|daughter.*mother)\b/.test(t)) tags.add('mother-child-relationship');
-  if (/\b(school|college|university|student|campus|classroom)\b/.test(t)) tags.add('school-college-setting');
-  if (/\b(office|company|corporate|workplace|employee|boss|business)\b/.test(t)) tags.add('workplace-setting');
-  if (/\b(journalist|newspaper|television station|media|reporter|broadcast)\b/.test(t)) tags.add('media-world');
-  if (/\b(king|queen|prince|princess|royal|throne|palace|empire)\b/.test(t)) tags.add('royal-politics');
-  if (/\b(village council|panchayat|local election|village politics)\b/.test(t)) tags.add('village-politics');
-  if (/\b(underdog|outsider|unlikely hero|against the odds)\b/.test(t)) tags.add('underdog-story');
-  if (/\b(transforms|becomes|turns into|rises from|falls from|arc)\b/.test(t)) tags.add('transformation-arc');
-  if (/\b(moral dilemma|choice|must choose|ethics|conscience)\b/.test(t)) tags.add('moral-dilemma');
-  if (/\b(two families|rival family|feud|clan|dynasty)\b/.test(t)) tags.add('family-dynasty');
-  if (/\b(detective|police officer|cop|inspector|constable)\b/.test(t)) tags.add('detective-protagonist');
-  if (/\b(monster|creature|beast|kaiju)\b/.test(t)) tags.add('creature-feature');
-  if (/\b(planet|future society|space colony|interstellar|spaceship)\b/.test(t)) tags.add('world-building');
+  if (has(/\b(fight sequence|car chase|rescue mission|assassin|mercenary|kidnapping|gunfight|martial arts)\b/) || leadHas(/\baction thriller\b/)) add('action-thriller');
+  if (has(/\b(mystery|missing person|hidden clue|solves the case|unknown killer|secret behind)\b/)) add('mystery-thriller');
+  if (has(/\b(life of|biographical|memoir|real-life account)\b/)) add('biographical-drama');
+  if (has(/\b(expedition|quest|voyage|treasure hunt|dangerous journey|escape across)\b/)) add('adventure');
+  if (has(/\b(stranded|fight for survival|survive in|trapped underground|trapped inside|survival)\b/)) add('survival');
+  if (has(/\b(conspiracy|cover-up|classified secret|whistleblower|secret organization)\b/)) add('conspiracy');
+  if (has(/\b(betrayal|betrays|traitor|double-cross|deception)\b/)) add('betrayal');
+  if (has(/\b(loyalty to|duty to|honour|honor|allegiance)\b/)) add('loyalty-conflict');
+  if (has(/\b(marriage|husband and wife|divorce|spouse|wedding)\b/)) add('marriage-family');
+  if (has(/\b(father.*son|son.*father|father.*daughter|daughter.*father)\b/)) add('father-child-relationship');
+  if (has(/\b(mother.*son|son.*mother|mother.*daughter|daughter.*mother)\b/)) add('mother-child-relationship');
+  if (has(/\b(school|college|university|student life|campus)\b/)) add('school-college-setting');
+  if (has(/\b(office|corporate|workplace|employee|boss|business empire)\b/)) add('workplace-setting');
+  if (has(/\b(journalist|newspaper|reporter|newsroom|broadcast journalist)\b/)) add('media-world');
+  if (has(/\b(king|queen|prince|princess|royal family|throne|palace|empire)\b/)) add('royal-politics');
+  if (has(/\b(village council|panchayat|local election|village politics)\b/)) add('village-politics');
+  if (has(/\b(underdog|outsider|against the odds|unlikely hero)\b/)) add('underdog-story');
+  if (has(/\b(moral dilemma|ethical dilemma|must choose|crisis of conscience)\b/)) add('moral-dilemma');
+  if (has(/\b(two families|rival family|family feud|clan|dynasty)\b/)) add('family-dynasty');
+  if (has(/\b(detective|police officer|cop|inspector|constable)\b/)) add('detective-protagonist');
+  if (has(/\b(monster|creature|beast|kaiju)\b/)) add('creature-feature');
+  if (has(/\b(future society|space colony|fictional world|alternate world)\b/)) add('world-building');
 
   return [...tags];
 }
 
 function ensureMinimumPlotTags(coreTags, text, meta={}) {
   const out = new Set((coreTags || []).filter(t => !isMetaTag(t)));
-  const t = (text || '').toLowerCase();
+  const t = `${meta.leadText || ''} ${text || ''}`.toLowerCase();
+  const addWhen = (tag, rx) => { if (rx.test(t)) out.add(tag); };
 
-  const contextual = [
-    ['protagonist-driven', /\b(protagonist|follows|centres on|centers on|story of|life of)\b/],
-    ['conflict-driven', /\b(conflict|battle|fight|struggle|rival|opposes|against)\b/],
-    ['character-driven', /\b(character|personal|relationship|family|friend|emotion|life)\b/],
-    ['plot-driven', /\b(plot|scheme|plan|mission|case|quest|mystery)\b/],
-    ['dramatic-stakes', /\b(risk|danger|threat|must|forced|faces|attempts)\b/],
-    ['goal-oriented-plot', /\b(tries to|attempts to|sets out|must|plans to|seeks to)\b/],
-    ['relationship-conflict', /\b(relationship|family|marriage|friendship|rivalry|betrayal)\b/],
-    ['moral-choice', /\b(choice|decide|moral|ethical|conscience|justice)\b/],
-    ['escalating-conflict', /\b(escalates|worsens|spiral|increasing|growing|threat)\b/],
-    ['personal-cost', /\b(cost|loss|sacrifice|risk|consequence|price)\b/],
-    ['turning-point-heavy', /\b(reveals|discovers|realizes|learns|turning point|twist)\b/],
-    ['dialogue-driven', /\b(conversation|dialogue|argues|tells|confesses|explains)\b/],
-    ['emotional-stakes', /\b(love|grief|fear|hope|anger|guilt|trauma)\b/],
-    ['social-context', /\b(society|community|class|politics|culture|system)\b/],
-    ['consequence-driven', /\b(consequence|aftermath|result|leads to|causes)\b/],
-    ['journey-arc', /\b(journey|travels|leaves|returns|arrives|escape)\b/],
-    ['high-stakes', /\b(life|death|survival|war|murder|danger|catastrophe)\b/],
-    ['character-growth', /\b(grows|learns|changes|matures|redemption|realizes)\b/],
-    ['genre-hybrid', /\b(comedy|romance|thriller|drama|action|mystery|horror|fantasy|science fiction)\b/]
-  ];
-
-  contextual.forEach(([tag, rx]) => { if (rx.test(t)) out.add(tag); });
+  addWhen('central-conflict', /\b(conflict|opposes|against|threat|rival|case|mission|problem)\b/);
+  addWhen('main-character-goal', /\b(tries to|attempts to|sets out|seeks to|must|plans to|wants to)\b/);
+  addWhen('character-relationships', /\b(family|friend|wife|husband|son|daughter|partner|lover|mentor)\b/);
+  addWhen('narrative-stakes', /\b(danger|risk|threat|death|murder|survive|save|protect)\b/);
+  addWhen('decision-pressure', /\b(choice|decide|decision|forced to|must choose)\b/);
+  addWhen('setting-driven', /\b(city|village|town|country|school|office|prison|court|space|war)\b/);
+  addWhen('identity-pressure', /\b(identity|secret|double life|mistaken|memory|truth)\b/);
+  addWhen('authority-conflict', /\b(police|government|judge|army|boss|king|system|authority)\b/);
+  addWhen('danger-driven', /\b(chase|attack|kidnap|murder|killer|escape|battle)\b/);
+  addWhen('emotional-pressure', /\b(love|grief|fear|guilt|anger|trauma|loss)\b/);
+  addWhen('social-pressure', /\b(class|caste|community|society|racism|poverty|wealth)\b/);
+  addWhen('professional-pressure', /\b(job|career|business|mission|case|reporter|doctor|lawyer|police)\b/);
+  addWhen('family-pressure', /\b(family|father|mother|son|daughter|brother|sister|marriage)\b/);
+  addWhen('survival-pressure', /\b(survival|stranded|trapped|escape|danger|life-threatening)\b/);
+  addWhen('hidden-information', /\b(secret|hidden|reveals|discovers|truth|clue|mystery)\b/);
+  addWhen('investigation-thread', /\b(investigation|detective|case|clue|suspect|evidence)\b/);
+  addWhen('personal-history', /\b(past|childhood|memory|backstory|former|years earlier)\b/);
+  addWhen('opposition-force', /\b(villain|antagonist|rival|enemy|gang|killer|corrupt)\b/);
+  addWhen('moral-pressure', /\b(moral|ethical|justice|conscience|guilt|right thing)\b/);
+  addWhen('resolution-driven', /\b(finally|eventually|ending|climax|confronts|defeats|solves)\b/);
 
   const fallback = [
-    'protagonist-driven','conflict-driven','character-driven','plot-driven','dramatic-stakes',
-    'goal-oriented-plot','relationship-conflict','moral-choice','escalating-conflict','personal-cost',
-    'turning-point-heavy','dialogue-driven','emotional-stakes','social-context','consequence-driven',
-    'journey-arc','high-stakes','character-growth','world-building','genre-hybrid'
+    'central-conflict','main-character-goal','character-relationships','narrative-stakes','decision-pressure',
+    'setting-driven','identity-pressure','authority-conflict','danger-driven','emotional-pressure',
+    'social-pressure','professional-pressure','family-pressure','survival-pressure','hidden-information',
+    'investigation-thread','personal-history','opposition-force','moral-pressure','resolution-driven'
   ];
   for (const tag of fallback) {
     if (out.size >= MIN_PLOT_TAGS) break;
     out.add(tag);
   }
   return [...out].slice(0, Math.max(MIN_PLOT_TAGS, out.size));
+}
+
+function tagEvidenceOk(tag, movie) {
+  if (!movie || movie.source !== 'wikipedia') return true;
+  const t = `${movie.storyText || ''} ${movie.leadText || ''}`.toLowerCase();
+  if (!t.trim()) return !['time-manipulation','sports-drama','war-drama'].includes(tag);
+  if (tag === 'time-manipulation') return /\b(time travel|travels? (back|forward) in time|time loop|temporal|paradox|alternate timeline|parallel timeline)\b/.test(t);
+  if (tag === 'sports-drama') return /\b(cricket|football|basketball|baseball|tennis|boxing|wrestling|racing driver|athlete|sports coach|tournament|championship|world cup|olympics|sports team|hockey|kabaddi)\b/.test(t);
+  if (tag === 'war-drama') return /\b(world war|wwii|world war ii|nazi|nazis|soldier|military unit|army officer|battlefield|combat mission|war-torn|wartime)\b/.test(t);
+  return true;
 }
 
 function scoringTags(movie) {
@@ -1572,9 +1606,9 @@ function tagMovie(movie) {
     movie.tags = [...new Set([...(movie.tags || []), ...movie.plotTags])];
   } else if (movie.source === 'wikipedia' && movie.tags && movie.tags.length > 0) {
     // Already tagged during fetch — housekeeping will normalise
-    movie.coreTags = movie.coreTags && movie.coreTags.length ? movie.coreTags : recommendationTags(movie.tags);
-    movie.plotTags = ensureMinimumPlotTags(movie.coreTags, '', movie);
-    movie.tags = [...new Set([...(movie.tags || []), ...movie.plotTags])];
+    movie.coreTags = movie.coreTags && movie.coreTags.length ? movie.coreTags.filter(t => tagEvidenceOk(t, movie)) : recommendationTags(movie.tags).filter(t => tagEvidenceOk(t, movie));
+    movie.plotTags = ensureMinimumPlotTags(movie.coreTags, movie.storyText || '', movie);
+    movie.tags = [...new Set([...(movie.tags || []).filter(t => tagEvidenceOk(t, movie)), ...movie.plotTags])];
   } else {
     // Fallback: basic meta tags
     movie.tags = deriveTagsFromText('', movie);
@@ -2051,15 +2085,45 @@ async function fetchAvailability(movie) {
   movie.availability.updatedAt = new Date().toISOString();
   return movie.availability;
 }
-function retagMovie(id, e) {
+async function retagMovie(id, e) {
   if (e) e.stopPropagation();
   const m = state.movies[id];
   if (!m) return;
-  m.tagged=false; m.tags=[];
-  tagMovie(m);
+
+  if (m.source === 'wikipedia') {
+    try {
+      showFetchProgress('Re-tagging from Wikipedia plot...', 20, m.wikiTitle || m.pageTitle || m.title);
+      const fresh = await fetchWikiMovie(m.wikiTitle || m.pageTitle || m.title, m.format ? 'shows' : 'movies');
+      hideFetchProgress();
+      if (fresh) {
+        m.tags = fresh.tags;
+        m.coreTags = fresh.coreTags;
+        m.plotTags = fresh.plotTags;
+        m.storyText = fresh.storyText;
+        m.wikiTitle = fresh.wikiTitle;
+        m.pageTitle = fresh.pageTitle;
+        m.director = fresh.director || m.director;
+        m.language = fresh.language || m.language;
+        m.country = fresh.country || m.country;
+        m.format = fresh.format || m.format;
+      } else {
+        m.tags = [];
+        tagMovie(m);
+      }
+    } catch(err) {
+      hideFetchProgress();
+      m.tags = [];
+      tagMovie(m);
+    }
+  } else {
+    m.tagged = false;
+    m.tags = [];
+    tagMovie(m);
+  }
+
   runHousekeeping(false);
   saveLocalState(); syncDrive(); render();
-  showToast(`Re-tagged "${m.title}"`, '');
+  showToast(`Re-tagged "${m.title}"`, 'success');
 }
 function toggleTags(id, e) {
   if (e) e.stopPropagation();
@@ -2106,8 +2170,9 @@ function runHousekeeping(manual=true) {
     m.coreTags = [...new Set(((m.coreTags && m.coreTags.length ? m.coreTags : recommendationTags(m.tags)).map(t => {
       const n=t.toLowerCase().trim().replace(/\s+/g,'-');
       return REMAP[n]||n;
-    })).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)))];
-    m.plotTags = ensureMinimumPlotTags(m.plotTags && m.plotTags.length >= MIN_PLOT_TAGS ? m.plotTags : m.coreTags, '', m);
+    })).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)).filter(t => tagEvidenceOk(t, m)))];
+    m.tags = [...new Set((m.tags || []).filter(t => tagEvidenceOk(t, m)))];
+    m.plotTags = ensureMinimumPlotTags(m.plotTags && m.plotTags.length >= MIN_PLOT_TAGS ? m.plotTags.filter(t => tagEvidenceOk(t, m)) : m.coreTags, m.storyText || '', m);
     m.tags = [...new Set([...m.tags, ...m.plotTags])];
   });
   if (manual) showToast('Tags normalised', 'success');
@@ -2241,8 +2306,11 @@ function loadLocalState() {
     }
   } catch(e) {}
   Object.values(state.movies).forEach(m => {
-    if (m.tags && !m.coreTags) m.coreTags = recommendationTags(m.tags).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t));
-    if (m.tags && (!m.plotTags || m.plotTags.length < MIN_PLOT_TAGS)) m.plotTags = ensureMinimumPlotTags(m.coreTags || recommendationTags(m.tags), '', m);
+    if (m.tags && !m.coreTags) m.coreTags = recommendationTags(m.tags).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)).filter(t => tagEvidenceOk(t, m));
+    if (m.coreTags) m.coreTags = m.coreTags.filter(t => tagEvidenceOk(t, m));
+    if (m.tags) m.tags = m.tags.filter(t => tagEvidenceOk(t, m));
+    if (m.tags && (!m.plotTags || m.plotTags.length < MIN_PLOT_TAGS)) m.plotTags = ensureMinimumPlotTags(m.coreTags || recommendationTags(m.tags), m.storyText || '', m);
+    if (m.plotTags) m.plotTags = m.plotTags.filter(t => tagEvidenceOk(t, m));
     if (m.tags && m.plotTags) m.tags = [...new Set([...m.tags, ...m.plotTags])];
   });
 }
