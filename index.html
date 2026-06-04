@@ -404,6 +404,8 @@
       <button class="tab-btn" onclick="setTab('movie',this)">Movies</button>
       <button class="tab-btn" onclick="setTab('show',this)">Shows</button>
       <button class="tab-btn" onclick="setTab('rated',this)">Rated</button>
+      <button class="tab-btn" onclick="setTab('watchlist',this)">Watchlist</button>
+      <button class="tab-btn" onclick="setTab('tags',this)">Tags</button>
       <button class="tab-btn" onclick="setTab('pool',this)">Pool</button>
       <button class="tab-btn" onclick="setTab('rejected',this)">Rejected</button>
     </div>
@@ -493,13 +495,13 @@
   </div>
   <div class="movies-grid rated-only" id="ratedGrid"></div>
 
-  <hr class="sep normal-only">
+  <hr class="sep watchlist-only" id="watchlistSep">
 
-  <div class="section-header normal-only">
+  <div class="section-header watchlist-only" id="watchlistHeader">
     <div class="section-title">Watchlist</div>
     <div class="section-count" id="watchlistCount">nothing saved yet</div>
   </div>
-  <div class="movies-grid normal-only" id="watchlistGrid"></div>
+  <div class="movies-grid watchlist-only" id="watchlistGrid"></div>
 
 
   <hr class="sep audit-only" id="poolSep">
@@ -519,19 +521,19 @@
   <div class="audit-table audit-only" id="rejectedGrid"></div>
 
 
-  <hr class="sep normal-only">
+  <hr class="sep tag-only" id="tagBrainSep">
 
-  <div class="section-header normal-only">
+  <div class="section-header tag-only" id="tagBrainHeader">
     <div class="section-title">Tag Brain</div>
     <div class="section-count" id="tagBrainCount">rate movies to populate</div>
   </div>
-  <div class="tag-brain-controls normal-only">
+  <div class="tag-brain-controls tag-only">
     <button class="tb-filter-btn active" onclick="setTagFilter('all',this)">All</button>
     <button class="tb-filter-btn" onclick="setTagFilter('positive',this)">You Like</button>
     <button class="tb-filter-btn" onclick="setTagFilter('negative',this)">You Dislike</button>
     <button class="tb-filter-btn" onclick="setTagFilter('neutral',this)">Unweighted</button>
   </div>
-  <div class="tag-brain-grid normal-only" id="tagBrainGrid">
+  <div class="tag-brain-grid tag-only" id="tagBrainGrid">
     <span style="font-size:12px;color:var(--muted)">No tags yet.</span>
   </div>
 
@@ -1608,7 +1610,7 @@ function setTab(tab, btn) {
 }
 function isShow(m) { return !!m.format; }
 function matchesTab(m) {
-  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated') return true;
+  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return true;
   if (activeTab === 'show') return isShow(m);
   if (activeTab === 'movie') return !isShow(m);
   return true;
@@ -1707,7 +1709,7 @@ function maybeAutoExpandPool() {
 }
 
 function renderRecs() {
-  if (activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated') return;
+  if (activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return;
   const grid = document.getElementById('recsGrid');
   const batchSize = parseInt(document.getElementById('batchSize').value);
   const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
@@ -1756,7 +1758,7 @@ function renderRatedGrid() {
 
 function renderWatchlist() {
   const grid = document.getElementById('watchlistGrid');
-  const watchlist = Object.values(state.movies).filter(m => m.rating===0 && m.watchlist && matchesTab(m)).sort((a,b)=>a.title.localeCompare(b.title));
+  const watchlist = Object.values(state.movies).filter(m => m.watchlist && matchesTab(m)).sort((a,b)=>a.title.localeCompare(b.title));
   document.getElementById('watchlistCount').textContent = watchlist.length ? `${watchlist.length} saved` : 'nothing saved yet';
   grid.innerHTML = '';
   if (!watchlist.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">+</div><h3>Nothing Saved Yet</h3></div>`; return; }
@@ -1765,11 +1767,17 @@ function renderWatchlist() {
 
 
 function updateVisibleSections() {
-  const auditMode = activeTab === 'pool' || activeTab === 'rejected';
+  const recMode = activeTab === 'all' || activeTab === 'movie' || activeTab === 'show';
   const ratedMode = activeTab === 'rated';
-  document.querySelectorAll('.normal-only').forEach(el => el.style.display = (auditMode || ratedMode) ? 'none' : '');
+  const watchlistMode = activeTab === 'watchlist';
+  const tagMode = activeTab === 'tags';
+
+  document.querySelectorAll('.normal-only').forEach(el => el.style.display = recMode ? '' : 'none');
   document.querySelectorAll('.rated-only').forEach(el => el.style.display = ratedMode ? '' : 'none');
+  document.querySelectorAll('.watchlist-only').forEach(el => el.style.display = watchlistMode ? '' : 'none');
+  document.querySelectorAll('.tag-only').forEach(el => el.style.display = tagMode ? '' : 'none');
   document.querySelectorAll('.audit-only').forEach(el => el.style.display = 'none');
+
   if (activeTab === 'pool') {
     ['poolSep','poolHeader','poolGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
   }
@@ -1874,7 +1882,7 @@ function buildCard(movie, opts={}) {
       <div class="card-tags" id="tags-${movie.id}">${renderTagChips(movie.plotTags || movie.tags, matchedTags, false)}</div>
       <div class="card-actions">
         ${movie.tagged?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ tags'}</button>`:''}
-        ${showEdit?`<button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>`:''}
+        <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
         ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
         <button class="card-act watch" onclick="checkAvailability('${safeId}',event)">where</button>
         <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
