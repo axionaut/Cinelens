@@ -121,6 +121,11 @@
   .modal input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:9px 13px;font-family:'DM Mono',monospace;font-size:13px;color:var(--text);margin-bottom:10px;outline:none}
   .modal input:focus{border-color:var(--accent)}
   .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
+  .manual-rating-title{font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:1px;color:var(--accent);margin:6px 0 2px}
+  .manual-rating-meta{font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);margin-bottom:14px}
+  .manual-rating-stars{display:flex;gap:8px;margin:12px 0 18px}
+  .manual-rating-stars .star{font-size:28px;color:var(--muted2);cursor:pointer;line-height:1;transition:color .12s,transform .12s}
+  .manual-rating-stars .star:hover{color:var(--accent);transform:scale(1.15)}
 
   .drive-status{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);font-family:'DM Mono',monospace}
   .drive-dot{width:6px;height:6px;border-radius:50%;background:var(--muted2)}
@@ -237,12 +242,15 @@
 
 
   .audit-table{display:flex;flex-direction:column;gap:8px}
-  .audit-row{display:grid;grid-template-columns:2fr .6fr .7fr .8fr 1.2fr 1.6fr auto;gap:10px;align-items:center;background:rgba(18,17,18,.78);border:1px solid rgba(255,255,255,.09);border-radius:8px;padding:10px 12px;color:var(--text);font-family:'DM Mono',monospace;font-size:10px}
+  .audit-row{display:grid;grid-template-columns:2fr .6fr .7fr .8fr .95fr 1.2fr 1.6fr auto;gap:10px;align-items:center;background:rgba(18,17,18,.78);border:1px solid rgba(255,255,255,.09);border-radius:8px;padding:10px 12px;color:var(--text);font-family:'DM Mono',monospace;font-size:10px}
   .audit-row:hover{border-color:rgba(255,208,90,.42)}
   .audit-title{font-family:'DM Sans',sans-serif;font-size:13px;font-weight:600;color:#fff7ec;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .audit-muted{color:var(--muted)}
   .audit-tags{display:flex;flex-wrap:wrap;gap:4px;max-height:44px;overflow:hidden}
   .audit-actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+  .audit-rating{display:flex;gap:3px;align-items:center;white-space:nowrap}
+  .audit-rating .star{font-size:13px;color:#5f5750;cursor:pointer;line-height:1}
+  .audit-rating .star:hover,.audit-rating .star.active{color:var(--accent)}
   .fetch-stop{display:none;margin-top:10px}
   .fetch-progress.visible .fetch-stop{display:inline-flex}
   @media(max-width:900px){.audit-row{grid-template-columns:1fr}.audit-actions{justify-content:flex-start}}
@@ -346,11 +354,38 @@
     .manual-title-input{width:100%;flex:1 1 100%}
     .manual-add-row .platform-btn{width:100%;justify-content:center}
   }
+
+  /* INFINITE RECS + RATED TAB + GO TOP */
+  .rated-only{display:none}
+  .go-top-btn{position:fixed;right:22px;bottom:22px;z-index:1800;display:none;align-items:center;justify-content:center;width:42px;height:42px;border-radius:999px;border:1px solid rgba(255,204,51,.35);background:rgba(17,17,17,.92);color:var(--accent);font-family:'DM Mono',monospace;font-size:16px;cursor:pointer;box-shadow:0 12px 32px rgba(0,0,0,.35);backdrop-filter:blur(10px);transition:transform .15s,border-color .15s,color .15s}
+  .go-top-btn.visible{display:flex}
+  .go-top-btn:hover{transform:translateY(-2px);border-color:var(--accent);color:#fff}
+  @media(max-width:768px){.go-top-btn{right:14px;bottom:14px;width:38px;height:38px}}
+
 </style>
 </head>
 <body>
 
 <div id="toast"></div>
+
+<div class="modal-overlay hidden" id="manualRatingModal">
+  <div class="modal">
+    <h2>Rate this title</h2>
+    <p>You added this manually. Rate it now so recommendations learn from it immediately.</p>
+    <div class="manual-rating-title" id="manualRatingTitle"></div>
+    <div class="manual-rating-meta" id="manualRatingMeta"></div>
+    <div class="manual-rating-stars">
+      <span class="star" onclick="ratePendingManualMovie(1)">★</span>
+      <span class="star" onclick="ratePendingManualMovie(2)">★</span>
+      <span class="star" onclick="ratePendingManualMovie(3)">★</span>
+      <span class="star" onclick="ratePendingManualMovie(4)">★</span>
+      <span class="star" onclick="ratePendingManualMovie(5)">★</span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeManualRatingPrompt()">Rate later</button>
+    </div>
+  </div>
+</div>
 
 <div class="tag-panel" id="tagPanel">
   <div class="tag-panel-header">
@@ -368,6 +403,7 @@
       <button class="tab-btn active" onclick="setTab('all',this)">All</button>
       <button class="tab-btn" onclick="setTab('movie',this)">Movies</button>
       <button class="tab-btn" onclick="setTab('show',this)">Shows</button>
+      <button class="tab-btn" onclick="setTab('rated',this)">Rated</button>
       <button class="tab-btn" onclick="setTab('pool',this)">Pool</button>
       <button class="tab-btn" onclick="setTab('rejected',this)">Rejected</button>
     </div>
@@ -448,14 +484,14 @@
     </div>
   </div>
 
-  <hr class="sep normal-only">
+  <hr class="sep rated-only" id="ratedSep">
 
-  <div class="section-header normal-only">
+  <div class="section-header rated-only" id="ratedHeader">
     <div class="section-title">Rated</div>
     <div class="section-count" id="ratedCount">none yet</div>
     <button class="btn btn-sm btn-warning" id="tagUntaggedBtn" onclick="tagAllUntagged()" style="display:none">⟳ Tag Untagged</button>
   </div>
-  <div class="movies-grid normal-only" id="ratedGrid"></div>
+  <div class="movies-grid rated-only" id="ratedGrid"></div>
 
   <hr class="sep normal-only">
 
@@ -501,6 +537,8 @@
 
 </div>
 </main>
+
+<button class="go-top-btn" id="goTopBtn" onclick="goToTop()" title="Go to top">↑</button>
 
 <script src="https://accounts.google.com/gsi/client"></script>
 <script>
@@ -649,6 +687,8 @@ let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const CARD_REFRESH_BATCH_SIZE = 20;
+const REC_INFINITE_PAGE_SIZE = 20;
+let recVisibleLimit = 10;
 let currentWikiAbortController = null;
 let currentSleepCancel = null;
 let autoFetchPaused = false;
@@ -668,6 +708,8 @@ let state = {
   rejectedWikiTitles: {},
   poolFetched: false
 };
+
+let pendingManualRatingId = '';
 const PERFECT_REC_TARGET = 5;
 const PERFECT_REC_MIN_RATIO = 0.995;
 const MIN_PLOT_TAGS = 20;
@@ -684,6 +726,7 @@ const LOW_CONFIDENCE_PLOT_TAGS = new Set([
 // ─────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   loadLocalState();
+  recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   seedPool();        // always ensure seed movies are present
   render();
   restoreDriveSession();
@@ -691,6 +734,7 @@ window.addEventListener('DOMContentLoaded', () => {
   if (Object.keys(state.movies).length < 50) {
     setTimeout(() => expandPool(false), 800);
   }
+  window.addEventListener('scroll', handleScroll);
 });
 
 // ─────────────────────────────────────────────
@@ -1151,6 +1195,34 @@ async function addManualTitle() {
   if (input) input.value = '';
   saveLocalState(); syncDrive(); render();
   showToast(`Added "${movie.title}"`, 'success');
+  showManualRatingPrompt(movie);
+}
+
+function showManualRatingPrompt(movie) {
+  if (!movie || !movie.id) return;
+  pendingManualRatingId = movie.id;
+  const modal = document.getElementById('manualRatingModal');
+  const title = document.getElementById('manualRatingTitle');
+  const meta = document.getElementById('manualRatingMeta');
+  if (title) title.textContent = movie.title || 'Untitled';
+  if (meta) {
+    const bits = [movie.year || '', movie.format ? 'show' : 'movie', movie.language || '', movie.country || ''].filter(Boolean);
+    meta.textContent = bits.join(' · ');
+  }
+  if (modal) modal.classList.remove('hidden');
+}
+
+function closeManualRatingPrompt() {
+  pendingManualRatingId = '';
+  const modal = document.getElementById('manualRatingModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+function ratePendingManualMovie(rating) {
+  const id = pendingManualRatingId;
+  if (!id) return;
+  closeManualRatingPrompt();
+  rateMovie(id, rating);
 }
 
 async function fetchWikiMovie(wikiTitle, mode='all') {
@@ -1531,11 +1603,12 @@ function setTab(tab, btn) {
   activeTab = tab;
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
+  recVisibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
   render();
 }
 function isShow(m) { return !!m.format; }
 function matchesTab(m) {
-  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'rejected') return true;
+  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated') return true;
   if (activeTab === 'show') return isShow(m);
   if (activeTab === 'movie') return !isShow(m);
   return true;
@@ -1623,7 +1696,7 @@ function needsMorePerfectRecommendations(target=PERFECT_REC_TARGET) {
 }
 
 function maybeAutoExpandPool() {
-  if (activeTab === 'pool' || activeTab === 'rejected' || autoFetchPaused) return;
+  if (activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated' || autoFetchPaused) return;
   const available = discoveryPool().length;
   const needsPerfect = needsMorePerfectRecommendations();
   const gap = needsPerfect ? 2000 : 120000;
@@ -1634,7 +1707,7 @@ function maybeAutoExpandPool() {
 }
 
 function renderRecs() {
-  if (activeTab === 'pool' || activeTab === 'rejected') return;
+  if (activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated') return;
   const grid = document.getElementById('recsGrid');
   const batchSize = parseInt(document.getElementById('batchSize').value);
   const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
@@ -1642,7 +1715,8 @@ function renderRecs() {
 
   if (ratedTagged.length >= 3) {
     const scored = recommendationCandidates();
-    const top = scored.slice(0, state.settings.topN);
+    const visibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10));
+    const top = scored.slice(0, visibleLimit);
     const perfectCount = perfectRecommendationCount(scored);
     if (perfectCount < PERFECT_REC_TARGET && !poolExpansionInProgress && !autoFetchPaused) {
       lastAutoExpandAt = Date.now();
@@ -1650,8 +1724,8 @@ function renderRecs() {
     }
     if (top.length) {
       document.getElementById('recCount').textContent = perfectCount < PERFECT_REC_TARGET
-        ? `finding ${PERFECT_REC_TARGET} × 100% matches · showing best ${top.length}`
-        : `top ${top.length} matches`;
+        ? `finding ${PERFECT_REC_TARGET} × 100% matches · showing ${top.length} of ${scored.length}`
+        : `showing ${top.length} of ${scored.length} matches`;
       top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, maxScore:scored[0]?.score||1 })));
       return;
     }
@@ -1692,7 +1766,9 @@ function renderWatchlist() {
 
 function updateVisibleSections() {
   const auditMode = activeTab === 'pool' || activeTab === 'rejected';
-  document.querySelectorAll('.normal-only').forEach(el => el.style.display = auditMode ? 'none' : '');
+  const ratedMode = activeTab === 'rated';
+  document.querySelectorAll('.normal-only').forEach(el => el.style.display = (auditMode || ratedMode) ? 'none' : '');
+  document.querySelectorAll('.rated-only').forEach(el => el.style.display = ratedMode ? '' : 'none');
   document.querySelectorAll('.audit-only').forEach(el => el.style.display = 'none');
   if (activeTab === 'pool') {
     ['poolSep','poolHeader','poolGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
@@ -1716,11 +1792,13 @@ function renderPoolGrid() {
     const plotList = ensureMinimumPlotTags(m.plotTags || recommendationTags(m.tags), '', m);
     const tags = plotList.slice(0,20).map(t=>`<span class="tag">${t}</span>`).join('');
     const safeId = m.id.replace(/'/g,"\\'");
+    const stars = [1,2,3,4,5].map(star => `<span class="star${(m.rating||0)>=star?' active':''}" onclick="rateMovie('${safeId}',${star})">★</span>`).join('');
     return `<div class="audit-row">
       <div class="audit-title">${m.title}</div>
       <div>${m.year||'?'}</div>
       <div>${m.format?'show':'movie'}</div>
       <div>${m.language||'?'}</div>
+      <div class="audit-rating">${stars}</div>
       <div class="audit-muted">${m.source||'seed'} · ${pct} · ${plotList.length} tags</div>
       <div class="audit-tags">${tags}</div>
       <div class="audit-actions"><button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button><button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button></div>
@@ -2105,7 +2183,7 @@ function updateStats() {
   document.getElementById('statAvg').textContent=avg;
   updateHKStatus('tags: '+countUniqueTags());
 }
-function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); saveLocalState(); renderRecs(); }
+function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveLocalState(); renderRecs(); }
 function updateBatchSize(val) { document.getElementById('batchVal').textContent=val; state.settings.batchSize=parseInt(val); saveLocalState(); renderRecs(); }
 function updateMinYear(val) { document.getElementById('minYearVal').textContent=val; state.settings.minYear=parseInt(val); saveLocalState(); renderRecs(); }
 
@@ -2327,6 +2405,28 @@ async function syncDrive(manual=false) {
     saveLocalState();
     setDriveStatus('connected'); showToast('Synced to Drive','success');
   } catch(e){state.drive.connected=false; setDriveStatus(''); showToast('Drive sync failed','error');}
+}
+
+// ─────────────────────────────────────────────
+// INFINITE RECOMMENDATIONS + GO TO TOP
+// ─────────────────────────────────────────────
+function recommendationPageActive() {
+  return activeTab !== 'pool' && activeTab !== 'rejected' && activeTab !== 'rated';
+}
+
+function handleScroll() {
+  const btn = document.getElementById('goTopBtn');
+  if (btn) btn.classList.toggle('visible', window.scrollY > 520);
+  if (!recommendationPageActive()) return;
+  if (window.innerHeight + window.scrollY < document.documentElement.scrollHeight - 700) return;
+  const total = personalizedEnough() ? recommendationCandidates().length : discoveryPool().length;
+  if (recVisibleLimit >= total) return;
+  recVisibleLimit += REC_INFINITE_PAGE_SIZE;
+  renderRecs();
+}
+
+function goToTop() {
+  window.scrollTo({top:0, behavior:'smooth'});
 }
 
 // ─────────────────────────────────────────────
