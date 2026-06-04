@@ -40,7 +40,7 @@ The app keeps runtime state in a global `state` object:
   },
   drive: {
     connected: false,
-    apiKey: '',
+    accessToken: '',
     folderId: '',
     fileId: ''
   },
@@ -98,17 +98,13 @@ Google Drive sync stores the app data in:
 cinelens_data.json
 ```
 
-The Drive API key is stored separately in:
-
-```txt
-cinelens_drive_key
-```
+Google Drive sync uses Google Identity Services OAuth with the `drive.file` scope. Access tokens are kept only in runtime memory and are not saved to `localStorage`.
 
 ## Known Notes
 
 - The app is currently implemented as one large HTML file.
 - Some symbols appear to have encoding damage in the file, for example stars, arrows, and close icons may show as mojibake in text views.
-- Google Drive sync uses a browser-side API key, which is acceptable for a personal/local tool but not appropriate for a public production app without a safer auth flow.
+- Google Drive sync is configured for the personal GitHub Pages OAuth client and uses browser-side OAuth. This is suitable for the current personal-use app, not a multi-user production service.
 - Wikipedia-derived metadata and tags are heuristic and may be imperfect.
 
 ## Iteration Log
@@ -119,6 +115,7 @@ cinelens_drive_key
 - Captured the current architecture, data model, recommendation rules, persistence behavior, and known notes.
 - Initialized the project for GitHub publishing.
 - Renamed the app entry file from `cinelens.html` to `index.html` so GitHub Pages can serve the app at the repository root URL.
+- Replaced the old Google Drive API-key dialog with a direct Google OAuth flow using Google Identity Services and bearer-token Drive API requests.
 
 ## Future Iterations
 

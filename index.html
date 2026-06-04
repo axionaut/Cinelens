@@ -174,19 +174,6 @@
 
 <div id="toast"></div>
 
-<div class="modal-overlay hidden" id="driveModal">
-  <div class="modal">
-    <h2>Connect Google Drive</h2>
-    <p>CineLens stores your data in a JSON file on your Google Drive. Paste your Google Drive API key and optionally a folder ID.</p>
-    <input type="text" id="driveApiKey" placeholder="Google Drive API Key" autocomplete="off">
-    <input type="text" id="driveFolderId" placeholder="Folder ID (optional)" autocomplete="off">
-    <div class="modal-actions">
-      <button class="btn btn-ghost" onclick="skipDrive()">Local Only</button>
-      <button class="btn btn-primary" onclick="connectDrive()">Connect</button>
-    </div>
-  </div>
-</div>
-
 <div class="tag-panel" id="tagPanel">
   <div class="tag-panel-header">
     <div class="tag-panel-name" id="tagPanelName"></div>
@@ -210,8 +197,8 @@
       <div class="drive-dot" id="driveDot"></div>
       <span id="driveLabel">not connected</span>
     </div>
-    <button class="btn btn-sm" onclick="openDriveModal()">⚙ Drive</button>
-    <button class="btn btn-sm" onclick="syncDrive()">↑↓ Sync</button>
+    <button class="btn btn-sm" onclick="connectDrive()">⚙ Drive</button>
+    <button class="btn btn-sm" onclick="syncDrive(true)">↑↓ Sync</button>
     <button class="btn btn-sm btn-warning" onclick="expandPool()" id="expandBtn">＋ Expand Pool</button>
   </div>
 </header>
@@ -292,6 +279,7 @@
 </div>
 </main>
 
+<script src="https://accounts.google.com/gsi/client"></script>
 <script>
 // ─────────────────────────────────────────────
 // WIKIPEDIA FILM SOURCES
@@ -423,7 +411,7 @@ let state = {
   movies: {},
   tagWeights: {},
   settings: { topN: 10, batchSize: 12 },
-  drive: { connected: false, apiKey: '', folderId: '', fileId: '' },
+  drive: { connected: false, accessToken: '', folderId: '', fileId: '' },
   poolFetched: false
 };
 
@@ -1145,7 +1133,7 @@ function loadLocalState() {
       const s=JSON.parse(raw);
       if (s.movies) state.movies=s.movies;
       if (s.settings) state.settings=s.settings;
-      if (s.drive) { state.drive.connected=s.drive.connected; state.drive.folderId=s.drive.folderId||''; state.drive.fileId=s.drive.fileId||''; }
+      if (s.drive) { state.drive.connected=false; state.drive.folderId=s.drive.folderId||''; state.drive.fileId=s.drive.fileId||''; }
       document.getElementById('topN').value=state.settings.topN;
       document.getElementById('topNVal').textContent=state.settings.topN;
     }
@@ -1156,25 +1144,99 @@ function loadLocalState() {
 // GOOGLE DRIVE
 // ─────────────────────────────────────────────
 const DRIVE_FILE='cinelens_data.json';
-function openDriveModal() { document.getElementById('driveModal').classList.remove('hidden'); const k=localStorage.getItem('cinelens_drive_key'); if(k) document.getElementById('driveApiKey').value=k; document.getElementById('driveFolderId').value=state.drive.folderId; }
-function skipDrive() { document.getElementById('driveModal').classList.add('hidden'); showToast('Using local storage',''); }
+const GOOGLE_CLIENT_ID='984899607223-h5oadg1cfb7o7ksfb4400vhidknk9soc.apps.googleusercontent.com';
+const DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
+let driveTokenClient=null;
+
+function openDriveModal() { connectDrive(); }
+function skipDrive() { showToast('Using local storage',''); }
 async function connectDrive() {
-  const apiKey=document.getElementById('driveApiKey').value.trim();
-  const folderId=document.getElementById('driveFolderId').value.trim();
-  if (!apiKey) { showToast('Enter API key','error'); return; }
-  state.drive.apiKey=apiKey; state.drive.folderId=folderId;
-  localStorage.setItem('cinelens_drive_key',apiKey);
-  document.getElementById('driveModal').classList.add('hidden');
+  if (!GOOGLE_CLIENT_ID) { showToast('Missing Google client ID','error'); return; }
   setDriveStatus('syncing');
-  const fileId=await findDriveFile(apiKey,folderId);
-  if (fileId) { state.drive.fileId=fileId; await loadFromDrive(); } else await createDriveFile();
-  state.drive.connected=true; saveLocalState(); setDriveStatus('connected'); render();
+  try {
+    await requestDriveToken();
+    const fileId=state.drive.fileId||await findDriveFile();
+    if (fileId) { state.drive.fileId=fileId; await loadFromDrive(); }
+    else await createDriveFile();
+    state.drive.connected=true; saveLocalState(); setDriveStatus('connected'); render();
+    showToast('Drive connected','success');
+  } catch(e) {
+    state.drive.connected=false; setDriveStatus(''); showToast('Drive sign-in failed','error');
+  }
 }
 function setDriveStatus(s) { document.getElementById('driveDot').className='drive-dot '+s; document.getElementById('driveLabel').textContent=s==='connected'?'drive connected':s==='syncing'?'syncing...':'not connected'; }
-async function findDriveFile(k,f) { try { const q=f?`name='${DRIVE_FILE}' and '${f}' in parents and trashed=false`:`name='${DRIVE_FILE}' and trashed=false`; const d=await(await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&key=${k}&fields=files(id,name)`)).json(); return d.files?.[0]?.id||null; } catch(e){return null;} }
-async function loadFromDrive() { if(!state.drive.fileId||!state.drive.apiKey)return; try { setDriveStatus('syncing'); const d=await(await fetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media&key=${state.drive.apiKey}`)).json(); if(d.movies){state.movies=d.movies;if(d.settings)state.settings=d.settings;saveLocalState();render();showToast('Loaded from Drive','success');} setDriveStatus('connected'); } catch(e){setDriveStatus('connected');} }
-async function createDriveFile() { if(!state.drive.apiKey)return; try { const meta={name:DRIVE_FILE,mimeType:'application/json',parents:state.drive.folderId?[state.drive.folderId]:undefined}; const form=new FormData(); form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'})); form.append('file',new Blob([JSON.stringify({movies:state.movies,settings:state.settings})],{type:'application/json'})); const d=await(await fetch(`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&key=${state.drive.apiKey}`,{method:'POST',body:form})).json(); state.drive.fileId=d.id; saveLocalState(); } catch(e){} }
-async function syncDrive() { const k=localStorage.getItem('cinelens_drive_key'); if(!k)return; if(!state.drive.apiKey)state.drive.apiKey=k; if(!state.drive.connected||!state.drive.fileId){if(state.drive.connected)await createDriveFile();return;} setDriveStatus('syncing'); try { await fetch(`https://www.googleapis.com/upload/drive/v3/files/${state.drive.fileId}?uploadType=media&key=${state.drive.apiKey}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({movies:state.movies,settings:state.settings})}); setDriveStatus('connected'); } catch(e){setDriveStatus('connected');} }
+async function requestDriveToken(prompt='consent') {
+  if (state.drive.accessToken) return state.drive.accessToken;
+  if (!window.google?.accounts?.oauth2) throw new Error('Google Identity Services unavailable');
+  if (!driveTokenClient) {
+    driveTokenClient=google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE_CLIENT_ID,
+      scope: DRIVE_SCOPE,
+      callback: () => {}
+    });
+  }
+  return new Promise((resolve,reject) => {
+    driveTokenClient.callback = resp => {
+      if (resp.error) { reject(resp); return; }
+      state.drive.accessToken=resp.access_token;
+      resolve(resp.access_token);
+    };
+    driveTokenClient.requestAccessToken({prompt});
+  });
+}
+function driveHeaders(extra={}) { return {...extra, Authorization:`Bearer ${state.drive.accessToken}`}; }
+async function driveFetch(url, opts={}) {
+  if (!state.drive.accessToken) await requestDriveToken('');
+  const resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
+  if (resp.status===401) {
+    state.drive.accessToken='';
+    await requestDriveToken('');
+    return fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
+  }
+  return resp;
+}
+async function findDriveFile() {
+  try {
+    const q=`name='${DRIVE_FILE}' and trashed=false`;
+    const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&fields=files(id,name,modifiedTime)`);
+    const d=await resp.json();
+    return d.files?.[0]?.id||null;
+  } catch(e){return null;}
+}
+async function loadFromDrive() {
+  if(!state.drive.fileId)return;
+  try {
+    setDriveStatus('syncing');
+    const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media`);
+    if (!resp.ok) throw new Error('Drive load failed');
+    const d=await resp.json();
+    if(d.movies){state.movies=d.movies;if(d.settings)state.settings=d.settings;saveLocalState();render();showToast('Loaded from Drive','success');}
+    setDriveStatus('connected');
+  } catch(e){setDriveStatus('connected');}
+}
+async function createDriveFile() {
+  if(!state.drive.accessToken)return;
+  try {
+    const meta={name:DRIVE_FILE,mimeType:'application/json'};
+    const form=new FormData();
+    form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));
+    form.append('file',new Blob([JSON.stringify({movies:state.movies,settings:state.settings})],{type:'application/json'}));
+    const resp=await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',{method:'POST',body:form});
+    if (!resp.ok) throw new Error('Drive create failed');
+    const d=await resp.json();
+    state.drive.fileId=d.id; saveLocalState();
+  } catch(e){showToast('Drive file create failed','error');}
+}
+async function syncDrive(manual=false) {
+  if(!state.drive.connected&&!state.drive.accessToken){ if(manual) await connectDrive(); return; }
+  if(!state.drive.fileId){await createDriveFile(); if(!state.drive.fileId)return;}
+  setDriveStatus('syncing');
+  try {
+    const resp=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${state.drive.fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({movies:state.movies,settings:state.settings})});
+    if (!resp.ok) throw new Error('Drive sync failed');
+    setDriveStatus('connected'); showToast('Synced to Drive','success');
+  } catch(e){setDriveStatus('connected'); showToast('Drive sync failed','error');}
+}
 
 // ─────────────────────────────────────────────
 // TOAST
