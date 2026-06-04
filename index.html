@@ -1917,12 +1917,12 @@ function renderTagChips(tags, matchedTags, expanded) {
 function renderRemovableTagChips(tags, movieId) {
   if (!tags || !tags.length) return '';
   const unique = [...new Set(tags)].sort();
-  const safeMovieId = String(movieId).replace(/\/g,'\\').replace(/'/g,"\'");
   return unique.map(tag => {
-    const safeTag = String(tag).replace(/\/g,'\\').replace(/'/g,"\'");
-    return `<span class="tag removable" title="Remove tag" onclick="removeTagFromMovie('${safeMovieId}','${safeTag}',event)">${tag}<span class="tag-remove">×</span></span>`;
+    const safeTag = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return `<span class="tag removable" title="Remove tag" onclick="removeTagFromMovie('${movieId}','${safeTag}',event)">${tag}<span class="tag-remove">×</span></span>`;
   }).join('');
 }
+
 function removeTagFromMovie(id, tag, event) {
   if (event) event.stopPropagation();
   const movie = state.movies[id];
