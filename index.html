@@ -998,6 +998,7 @@ function render() { renderPlatformBar(); renderRecs(); renderRatedGrid(); render
 function renderPlatformBar() {
   const bar = document.getElementById('platformBar');
   if (!bar) return;
+  state.settings.platforms = state.settings.platforms || [];
   const country = document.getElementById('watchCountry');
   const token = document.getElementById('tmdbToken');
   if (country) country.value = state.settings.watchCountry || 'IN';
@@ -1558,7 +1559,7 @@ async function loadFromDrive() {
     const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media`);
     if (!resp.ok) throw new Error('Drive load failed');
     const d=await resp.json();
-    if(d.movies){state.movies=d.movies;if(d.settings)state.settings=d.settings;saveLocalState();render();showToast('Loaded from Drive','success');}
+    if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};state.settings.platforms=state.settings.platforms||[];state.settings.watchCountry=state.settings.watchCountry||'IN';saveLocalState();render();showToast('Loaded from Drive','success');}
     setDriveStatus('connected');
   } catch(e){setDriveStatus('connected');}
 }
