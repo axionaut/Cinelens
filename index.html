@@ -362,6 +362,38 @@
   .go-top-btn:hover{transform:translateY(-2px);border-color:var(--accent);color:#fff}
   @media(max-width:768px){.go-top-btn{right:14px;bottom:14px;width:38px;height:38px}}
 
+
+
+  /* MOBILE NAV + CONTENT TAB UX FIX */
+  @media(max-width:768px){
+    header{height:auto!important;min-height:0!important;display:flex;flex-direction:column;align-items:stretch;gap:10px;padding:10px 14px!important;overflow:hidden}
+    header>div:first-child{width:100%;min-width:0;display:flex!important;flex-direction:column;align-items:flex-start!important;gap:8px!important}
+    .logo{flex:0 0 auto;white-space:nowrap}
+    .tab-bar{width:100%;max-width:100%;display:flex;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none;white-space:nowrap}
+    .tab-bar::-webkit-scrollbar{display:none}
+    .tab-btn{flex:0 0 auto}
+    .header-right{width:100%;min-width:0;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+    .drive-status{flex:1 1 auto;min-width:130px}
+    .header-right .btn{flex:0 0 auto}
+  }
+  body[data-tab="rated"] .settings-bar,
+  body[data-tab="rated"] .availability-row,
+  body[data-tab="rated"] .manual-add-row,
+  body[data-tab="watchlist"] .settings-bar,
+  body[data-tab="watchlist"] .availability-row,
+  body[data-tab="watchlist"] .manual-add-row,
+  body[data-tab="tags"] .settings-bar,
+  body[data-tab="tags"] .availability-row,
+  body[data-tab="tags"] .manual-add-row,
+  body[data-tab="rejected"] .settings-bar,
+  body[data-tab="rejected"] .availability-row,
+  body[data-tab="rejected"] .manual-add-row{display:none!important}
+  body[data-tab="rated"] .control-deck,
+  body[data-tab="watchlist"] .control-deck,
+  body[data-tab="tags"] .control-deck,
+  body[data-tab="rejected"] .control-deck{padding-bottom:12px}
+  .star.preview{color:var(--accent)}
+
 </style>
 </head>
 <body>
@@ -1664,7 +1696,7 @@ function tagMovie(movie) {
 
 
 function tagAllUntagged() {
-  const untagged = Object.values(state.movies).filter(m => m.rating > 0 && !m.tagged);
+  const untagged = Object.values(state.movies).filter(m => Number(m.rating || 0) > 0 && !m.tagged);
   if (!untagged.length) { showToast('Nothing to tag',''); return; }
   untagged.forEach(m => tagMovie(m));
   runHousekeeping(false);
@@ -1677,6 +1709,7 @@ function tagAllUntagged() {
 // ─────────────────────────────────────────────
 function setTab(tab, btn) {
   activeTab = tab;
+  document.body.dataset.tab = activeTab;
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   recVisibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
@@ -1745,7 +1778,7 @@ function matchesSelectedPlatforms(movie) {
 }
 
 function discoveryPool() {
-  return Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && !m.watchlist && matchesTab(m) && meetsYearCutoff(m) && matchesSelectedPlatforms(m));
+  return Object.values(state.movies).filter(m => Number(m.rating||0)===0 && !m.skipped && !m.watchlist && matchesTab(m) && meetsYearCutoff(m) && matchesSelectedPlatforms(m));
 }
 
 function meetsYearCutoff(m) {
@@ -1753,7 +1786,7 @@ function meetsYearCutoff(m) {
 }
 
 function personalizedEnough() {
-  return Object.values(state.movies).filter(m => m.rating > 0 && m.tagged).length >= 3;
+  return Object.values(state.movies).filter(m => Number(m.rating || 0) > 0 && m.tagged).length >= 3;
 }
 
 function recommendationCandidates() {
@@ -1786,7 +1819,7 @@ function renderRecs() {
   if (activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return;
   const grid = document.getElementById('recsGrid');
   const batchSize = parseInt(document.getElementById('batchSize').value);
-  const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
+  const ratedTagged = Object.values(state.movies).filter(m => Number(m.rating || 0) > 0 && m.tagged);
   grid.innerHTML = '';
 
   if (ratedTagged.length >= 3) {
@@ -1819,8 +1852,8 @@ function renderRecs() {
 
 function renderRatedGrid() {
   const grid = document.getElementById('ratedGrid');
-  const rated = Object.values(state.movies).filter(m => m.rating > 0 && matchesTab(m)).sort((a,b) => b.rating-a.rating||a.title.localeCompare(b.title));
-  const untaggedCount = Object.values(state.movies).filter(m => m.rating > 0 && !m.tagged).length;
+  const rated = Object.values(state.movies).filter(m => Number(m.rating || 0) > 0 && matchesTab(m)).sort((a,b) => b.rating-a.rating||a.title.localeCompare(b.title));
+  const untaggedCount = Object.values(state.movies).filter(m => Number(m.rating || 0) > 0 && !m.tagged).length;
   const btn = document.getElementById('tagUntaggedBtn');
   btn.style.display = untaggedCount > 0 ? 'inline-flex' : 'none';
   if (untaggedCount > 0) btn.textContent = `Tag ${untaggedCount} Untagged`;
@@ -1841,6 +1874,7 @@ function renderWatchlist() {
 
 
 function updateVisibleSections() {
+  document.body.dataset.tab = activeTab;
   const recMode = activeTab === 'all' || activeTab === 'movie' || activeTab === 'show';
   const ratedMode = activeTab === 'rated';
   const watchlistMode = activeTab === 'watchlist';
@@ -1910,10 +1944,28 @@ function forgetRejectedTitle(key, e) {
 }
 
 function renderRateGrid() { renderRecs(); }
+
+function buildRatingStars(movie, safeId) {
+  const current = Math.max(0, Math.min(5, Number(movie.rating || 0)));
+  return `<div class="star-rating" data-rating="${current}">${[1,2,3,4,5].map(s => `<span class="star${current >= s ? ' active' : ''}" data-star="${s}" onclick="rateMovie('${safeId}',${s})" onmouseenter="previewStars(this,${s})" onmouseleave="restoreStars(this)">★</span>`).join('')}</div>`;
+}
+
+function previewStars(el, rating) {
+  const wrap = el.closest('.star-rating');
+  if (!wrap) return;
+  wrap.querySelectorAll('.star').forEach(st => st.classList.toggle('preview', Number(st.dataset.star || 0) <= rating));
+}
+
+function restoreStars(el) {
+  const wrap = el.closest('.star-rating');
+  if (!wrap) return;
+  wrap.querySelectorAll('.star').forEach(st => st.classList.remove('preview'));
+}
+
 function buildCard(movie, opts={}) {
   const { rank, score, matchedTags, maxScore, showEdit, watchlistView, poolView } = opts;
   const card = document.createElement('div');
-  card.className = 'movie-card' + (movie.rating > 0 ? ' rated' : '');
+  card.className = 'movie-card' + (Number(movie.rating || 0) > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
   const matchPct = maxScore ? Math.round((score/maxScore)*100) : 0;
   const safeId = movie.id.replace(/'/g,"\\'");
@@ -1925,15 +1977,14 @@ function buildCard(movie, opts={}) {
         <div class="card-poster-dir">${movie.director||''}</div>
       </div>
       ${rank?`<div class="rank-badge">#${rank}</div>`:''}
-      ${movie.rating>0?`<div class="score-badge">${'★'.repeat(movie.rating)}${'☆'.repeat(5-movie.rating)}</div>`:''}
+      ${Number(movie.rating||0)>0?`<div class="score-badge">${'★'.repeat(Number(movie.rating||0))}${'☆'.repeat(5-Number(movie.rating||0))}</div>`:''}
     </div>
     <div class="card-body">
       <div class="card-title">${movie.title}</div>
       <div class="card-meta">${movie.language}·${movie.country}·${movie.year||'?'}</div>
       ${rank?`<div class="match-label">${matchPct}% match</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}
-      ${!movie.tagged&&movie.rating>0?`<div class="tagging-label">⟳ tagging...</div>`:''}
-      ${(showEdit||poolView)?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star${(movie.rating||0)>=s?' active':''}" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
-      ${(!showEdit&&!poolView&&movie.rating===0)?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
+      ${!movie.tagged&&Number(movie.rating||0)>0?`<div class="tagging-label">⟳ tagging...</div>`:''}
+      ${buildRatingStars(movie, safeId)}
       ${poolView?`<div class="pool-card-note">${wikiVerificationLabel(movie)} · ${meaningfulTagCount(movie)} tags${movie.retagMessage ? ` · ${movie.retagMessage}` : ''}</div>`:''}
       <div class="where-line" id="where-${movie.id}">${renderAvailability(movie)}</div>
       <div class="card-tags" id="tags-${movie.id}">${poolView ? renderRemovableTagChips((movie.coreTags && movie.coreTags.length ? movie.coreTags : (movie.plotTags && movie.plotTags.length ? movie.plotTags : recommendationTags(movie.tags))), safeId) : renderTagChips(movie.plotTags || movie.tags, matchedTags, false)}</div>
@@ -2007,8 +2058,8 @@ function computeTagWeights() {
   const w={};
   Object.values(state.movies).forEach(m => {
     const tags = scoringTags(m);
-    if (m.rating>0&&tags&&tags.length) {
-      const wt = m.rating-3;
+    if (Number(m.rating||0)>0&&tags&&tags.length) {
+      const wt = Number(m.rating||0)-3;
       tags.forEach(t => { w[t]=(w[t]||0)+wt; });
     }
   });
@@ -2018,7 +2069,7 @@ function computeTagWeights() {
 function scoreMovies() {
   computeTagWeights();
   return Object.values(state.movies)
-    .filter(m => m.rating===0&&m.tagged&&((m.plotTags&&m.plotTags.length)||(m.tags&&m.tags.length)))
+    .filter(m => Number(m.rating||0)===0&&m.tagged&&((m.plotTags&&m.plotTags.length)||(m.tags&&m.tags.length)))
     .map(m => {
       let score=0, posOverlap=0, positiveScore=0, negativePenalty=0;
       const matched=new Set();
@@ -2041,6 +2092,7 @@ function scoreMovies() {
 function rateMovie(id, rating) {
   const movie = state.movies[id];
   if (!movie) return;
+  rating = Math.max(1, Math.min(5, Number(rating || 0)));
   movie.rating = rating;
   movie.watchlist = false;
   if (!movie.tagged) tagMovie(movie);
@@ -2255,7 +2307,7 @@ function openTagPanel(tag) {
   const weight=state.tagWeights[tag]||0;
   const ws=weight>0?`+${weight} (you like this)`:weight<0?`${weight} (you dislike this)`:'~ unweighted';
   document.getElementById('tagPanelStat').innerHTML=`weight: <span style="color:var(--accent)">${ws}</span> · ${movies.length} titles`;
-  const rated=movies.filter(m=>m.rating>0).sort((a,b)=>b.rating-a.rating);
+  const rated=movies.filter(m=>Number(m.rating||0)>0).sort((a,b)=>b.rating-a.rating);
   const unrated=movies.filter(m=>m.rating===0);
   let html='';
   if (rated.length) {
@@ -2277,9 +2329,9 @@ function closeTagPanel() { document.getElementById('tagPanel').classList.remove(
 // ─────────────────────────────────────────────
 function updateStats() {
   const movies=Object.values(state.movies);
-  const rated=movies.filter(m=>m.rating>0);
+  const rated=movies.filter(m=>Number(m.rating||0)>0);
   const tagged=movies.filter(m=>m.tagged);
-  const avg=rated.length?(rated.reduce((s,m)=>s+m.rating,0)/rated.length).toFixed(1):'—';
+  const avg=rated.length?(rated.reduce((s,m)=>s+Number(m.rating||0),0)/rated.length).toFixed(1):'—';
   document.getElementById('statRated').textContent=rated.length;
   document.getElementById('statTagged').textContent=tagged.length;
   document.getElementById('statTags').textContent=countUniqueTags();

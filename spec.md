@@ -2,15 +2,30 @@
 
 ## 1. Product Summary
 
-CineLens is a single-file browser app for building a personal movie and TV recommendation engine using Wikipedia as the title and plot source, local browser storage as the primary data store and optional Google Drive sync for persistence across sessions/devices.
+CineLens is a single-file browser app that builds a personal movie/show recommendation engine from verified Wikipedia pages.
 
-The app is designed for Hindi and English movies and shows only. It must collect candidate titles automatically, process them only when a real plot/synopsis/premise/story section exists, derive meaningful plot tags from that story text, learn from the user’s ratings and recommend titles based on the user’s positive and negative taste signals.
+The app now uses a **contrastive descriptor brain**:
 
-The app must behave like a recommendation engine, not like a Wikipedia category browser. Wikipedia collection order is housekeeping. It must not leak into recommendation display order.
+```text
+Wikipedia plot/premise/synopsis/story text
+→ raw descriptor candidates from the actual page wording
+→ cross-title rarity scoring across the saved pool
+→ per-title descriptor set
+→ user rating weights
+→ recommendations
+```
 
-## 2. Current Packaging
+The app must never invent tags. It must never add seed tags, fallback tags, title-specific tags or minimum-count padding. The recommendation brain must grow from text evidence and user ratings only.
 
-The app is currently implemented as one complete HTML file containing:
+## 2. Packaging
+
+The app is currently implemented as one self-contained HTML file:
+
+```text
+index.html
+```
+
+The app contains:
 
 - HTML layout
 - CSS styling
@@ -20,240 +35,317 @@ The app is currently implemented as one complete HTML file containing:
 - Google Drive sync
 - Local storage persistence
 
-Current working file basis used for this specification:
-
-```text
-index_tag_hygiene_fixed.html
-```
-
-The file should remain self-contained unless a deliberate refactor is planned.
-
-## 3. Core User Requirements
+## 3. Core Requirements
 
 ### 3.1 Content Scope
 
-The app must support:
+Supported content:
 
 - Hindi movies
 - English movies
-- Hindi TV shows / series / miniseries
-- English TV shows / series / miniseries
+- Hindi shows / series / miniseries
+- English shows / series / miniseries
 
-The app must reject or skip:
+Rejected/skipped content:
 
-- Non-movie pages
-- Non-TV-show pages
+- Person pages
+- Actor/director pages
 - Franchise pages
-- Actor/person pages
-- Director/person pages
+- Film-series pages
 - Soundtrack pages
 - Category/list/template pages
-- Pages with no real plot/synopsis/premise/story section
-- Pages with only intro/lead text and no usable story section
+- Pages without a usable plot, synopsis, premise, story or series overview section
 - Pages outside Hindi/English scope
 
-### 3.2 Recommendation Goal
+### 3.2 Wikipedia Source Rule
 
-Once the user has rated enough titles, automatic fetching should continue in the background until the app has at least:
+Wikipedia is the only title/story source.
 
-```text
-5 recommendations at 100% match
-```
+The app should fetch real pages from Wikipedia category/list navigation and manual Wikipedia URLs. It should not depend on seed movies or manually written title packs.
 
-A 100% match means the title’s recommendation score equals or nearly equals the current highest recommendation score. The implementation currently uses:
+The current implementation keeps the old expansion arrays present as empty arrays only for compatibility:
 
 ```js
-const PERFECT_REC_TARGET = 5;
-const PERFECT_REC_MIN_RATIO = 0.995;
+EXPANSION_ENGLISH = []
+EXPANSION_HINDI = []
+EXPANSION_SHOWS = []
+SEED = []
+SEED_TAGS = {}
 ```
 
-This is acceptable because floating-point scoring can make exact equality brittle.
+These must remain empty unless a future design deliberately reintroduces non-Wikipedia data. Reintroducing hardcoded seed titles or seed tags violates this spec.
 
-### 3.3 Manual Add
+## 4. Wikipedia Identity and Retagging
 
-Manual add should use a Wikipedia URL, not a typed title.
+### 4.1 Page Identity
 
-The input should accept:
-
-```text
-https://en.wikipedia.org/wiki/Page_Title
-https://en.wikipedia.org/w/index.php?title=Page_Title
-```
-
-The manual add pipeline must be the same as the automatic collection pipeline:
-
-1. Parse Wikipedia page title from URL.
-2. Fetch Wikipedia page.
-3. Confirm usable movie/show identity.
-4. Confirm Hindi/English scope.
-5. Require real plot/synopsis/premise/story section.
-6. Derive tags from story text.
-7. Add to pool.
-8. Prompt the user to rate the newly added title.
-9. Save locally.
-10. Sync to Drive when connected.
-11. Re-render relevant counts/cards.
-
-### 3.4 Pool Visibility
-
-The user must be able to inspect the pool.
-
-Pool must be a full tab, not a hidden internal store.
-
-Pool entries must use the same card design as recommendation/rated/watchlist cards for visual consistency.
-
-Pool cards must support:
-
-- Rating stars
-- Full tag visibility
-- Removable tags
-- Retag button
-- Watchlist button
-- Delete/remove button
-- Availability check where relevant
-
-### 3.5 Rejected Visibility
-
-The user must be able to inspect rejected titles.
-
-Rejected tab must show:
-
-- Rejected title
-- Mode/source
-- Reason
-- Retry action
-- Forget/remove action
-
-Rejected titles should not be silently lost.
-
-### 3.6 Rated Visibility
-
-Rated must be its own tab and must actually show rated cards.
-
-Rated cards must use the same card component as the rest of the app.
-
-Rated tab must show all rated titles that match the selected type context where applicable.
-
-### 3.7 Watchlist Visibility
-
-Watchlist must be its own tab.
-
-Watchlist cards must use the same card component.
-
-### 3.8 Tags / Tag Brain Visibility
-
-Tags must be its own tab.
-
-Tag Brain should show user taste signals derived from ratings.
-
-Tag Brain is secondary to recommendations. It must not crowd the recommendation page.
-
-### 3.9 Infinite Recommendations
-
-Recommendations page should be infinite in the user-facing sense:
-
-- Initial recommendation card count loads first.
-- Scrolling near the bottom loads more cards.
-- Watchlist, Rated and Tags should not sit under recommendations on the same page.
-- Each major view belongs in its own tab.
-
-The implementation currently uses:
+Every successful Wikipedia fetch must store:
 
 ```js
-const REC_INFINITE_PAGE_SIZE = 20;
+wikiPageId
+wikiTitle
+pageTitle
+wikiUrl
+wikiVerified
+storyText
+leadText
 ```
 
-### 3.10 Go to Top
+`wikiPageId` is the trusted identifier. Page title fallback is legacy support only.
 
-A Go to Top button must appear after scrolling down and take the user back to the top smoothly.
+### 4.2 Retagging Priority
 
-### 3.11 Stop Fetching
+Retagging must use this order:
 
-Stop Fetching must stop immediately enough to feel immediate to the user.
+1. Fetch by `wikiPageId`.
+2. Use title fallback only when page ID is unavailable.
+3. Verify that fallback title matches the existing title.
+4. If retagging fails, preserve existing descriptors and ratings.
+5. Mark failed items with `retagStatus = 'failed'` and a useful `retagMessage`.
 
-It must:
+Retagging must never wipe good data because a fetch produced weak descriptors.
 
-- Abort the current Wikipedia request when possible.
-- Cancel pending throttle sleep.
-- Prevent auto-fetch from restarting immediately after render.
-- Restore the manual Expand Pool action as the explicit way to resume fetching.
+## 5. Story Section Extraction
 
-It must not merely say “stopping after current request” while the UI continues crawling.
+Descriptors must be extracted only from plot-like sections:
 
-### 3.12 Dynamic Updates
+- `Plot`
+- `Synopsis`
+- `Premise`
+- `Story`
+- `Plot summary`
+- `Series overview`
 
-The user wants dynamic progress without screen flicker.
+Intro/lead text may help identify title, year, language, country and format, but it must not drive descriptors.
 
-Correct behavior:
+The app must not use these sections for descriptors:
 
-- Stats/counts update immediately during fetching.
-- Cards do not re-render after every title.
-- Cards refresh after a batch, currently every 20 added titles.
-- Cards also refresh immediately when the 5 × 100% target is reached.
-- Final render happens when fetching stops or completes.
+- Cast
+- Production
+- Reception
+- Box office
+- Awards
+- Marketing
+- Music
+- Release
+- Legacy
 
-The implementation currently uses:
+## 6. Contrastive Descriptor Brain
 
-```js
-const CARD_REFRESH_BATCH_SIZE = 20;
-```
+### 6.1 Principle
 
-## 4. UI Specification
-
-### 4.1 Visual Direction
-
-Visual direction is:
+A descriptor should answer:
 
 ```text
-Dark Cinema shell + Dense Analyst cards
+What makes this title different from most other titles in the current pool?
 ```
 
-Do not use the word “Noir” as the product/design name.
+The app must not start from a fixed vocabulary like `time travel`, `royal politics`, `revenge driven` or similar. It must extract candidate phrases from the page text itself.
 
-The interface should feel:
+### 6.2 Raw Candidates
 
-- Dark
-- Compact
-- Film-native
-- Fast to scan
-- Data-rich
-- Consistent
+The app extracts 2–5 word phrases from the title’s `storyText`.
 
-Avoid:
+Candidate phrases are normalized to lower-case phrase form, not hyphen tags:
 
-- White cards
-- Fake poster placeholders taking excessive space
-- Cramped one-row pool tables
-- Alphabetical recommendation dumps
-- Multiple sections stacked under one tab
-- Excessive decorative effects
-
-### 4.2 Layout Width
-
-The app should use the available browser width efficiently.
-
-The previous issue was large empty space on the left and right. The grid should expand responsively across the page.
-
-Recommended behavior:
-
-```css
-.container {
-  max-width: none or very high practical value;
-  width: 100%;
-}
-
-.movies-grid {
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-}
+```text
+time machine
+sent back to 1955
+parents from falling
+wrongful imprisonment
+serial murder investigation
 ```
 
-Card width should remain readable and avoid becoming tiny tiles.
+The engine removes filler words using stopword and weak-word filters. These filters are allowed because they are hygiene filters, not recommendation tags.
 
-### 4.3 Header Tabs
+### 6.3 Cross-Title Contrast
 
-Top tab bar should include:
+Each raw phrase receives a score based on:
 
-- All / Recommendations
+```text
+local phrase quality
+× rarity across the saved pool
+× position weight inside the story text
+```
+
+A phrase appearing in many titles becomes weaker. A phrase that is specific to one or a small number of titles becomes stronger.
+
+For small pools, commonness penalty is softened so the first fetched titles can still receive descriptors.
+
+### 6.4 Stored Descriptor Fields
+
+Each movie/show stores:
+
+```js
+rawDescriptors     // high-volume extracted candidates from the page text
+descriptorTags     // selected contrastive descriptors used by the brain
+tags               // same as descriptorTags for UI compatibility
+coreTags           // same as descriptorTags for scoring compatibility
+plotTags           // same as descriptorTags for audit compatibility
+tagged             // true when descriptorTags exists
+```
+
+The old names remain for compatibility with existing UI functions. Conceptually, the brain now uses descriptors, not old-style tags.
+
+### 6.5 Metadata Separation
+
+Metadata must not be used as taste signal.
+
+These may be displayed as identity/filter information:
+
+- language
+- country
+- decade
+- format
+- year
+
+These must not count as descriptors or scoring tags.
+
+## 7. Removed Systems
+
+The following systems are removed from active logic:
+
+- Seed movies
+- Seed tags
+- Fallback tags
+- Title-specific curated tags
+- Minimum tag count
+- Generic narrative padding
+- Hardcoded title packs for discovery
+
+Old constants may remain empty for compatibility, but they must not contain active data.
+
+## 8. Recommendation Scoring
+
+### 8.1 Rating Weights
+
+Ratings map to descriptor weight as:
+
+```js
+weight = rating - 3
+```
+
+Meaning:
+
+```text
+5 stars → +2
+4 stars → +1
+3 stars →  0
+2 stars → -1
+1 star  → -2
+```
+
+### 8.2 Movie Score
+
+Unrated titles are scored by overlap with positively weighted descriptors, minus a reduced penalty for negatively weighted descriptors.
+
+Only descriptor tags are scored. Metadata is excluded.
+
+### 8.3 Tag Brain / Descriptor Brain
+
+The Tags tab now represents the descriptor brain:
+
+- positive descriptors
+- negative descriptors
+- neutral descriptors
+- title counts
+- rating-driven weights
+
+The UI label has changed from `tags:` to `brain:`.
+
+## 9. Reset Brain
+
+The app includes a `Reset Brain` button.
+
+Reset Brain clears:
+
+- ratings
+- watchlist state
+- skipped state
+- learned tag/descriptor weights
+- retag messages
+- user notes
+
+Reset Brain preserves:
+
+- fetched Wikipedia pool
+- `wikiPageId`
+- `wikiUrl`
+- `storyText`
+- `leadText`
+- Drive connection settings
+- TMDB token/settings
+
+After reset, the app rebuilds descriptors from the existing Wikipedia story text and saves/syncs the clean state.
+
+This allows a fresh recommendation brain without refetching the whole pool.
+
+## 10. Manual URL Add
+
+Manual URL flow:
+
+1. User pastes Wikipedia URL.
+2. App extracts `/wiki/...` page title.
+3. App fetches page through Wikipedia API.
+4. App stores `wikiPageId` and `wikiUrl`.
+5. App extracts story section.
+6. App extracts raw descriptors.
+7. App updates existing title when matching, or creates a new title.
+8. App rebuilds the descriptor brain.
+9. App saves locally and syncs Drive.
+
+Manual URL can repair a title whose earlier page identity was weak.
+
+## 11. Pool Expansion
+
+Automatic expansion uses Wikipedia category/list navigation only.
+
+The app must not use hardcoded title packs as candidate sources.
+
+Candidate title flow:
+
+```text
+Wikipedia category/list pages
+→ candidate page titles
+→ reject obvious non-title pages
+→ fetch page
+→ verify page type and language
+→ extract story section
+→ extract descriptors
+→ save title
+→ rebuild descriptor brain
+```
+
+## 12. Data Persistence
+
+Primary storage:
+
+```text
+localStorage key: cinelens_v2
+```
+
+Optional sync:
+
+```text
+Google Drive file: cinelens_data.json
+```
+
+Saved state includes:
+
+```js
+movies
+settings
+rejectedWikiTitles
+drive metadata
+```
+
+`tagWeights` is computed from ratings and descriptors. It does not need to be treated as permanent truth.
+
+## 13. UI Requirements
+
+Tabs:
+
+- All
 - Movies
 - Shows
 - Rated
@@ -262,992 +354,78 @@ Top tab bar should include:
 - Pool
 - Rejected
 
-Current code uses `activeTab` and `setTab(tab, btn)`.
+Pool cards must show:
 
-Implementation detail: Movies and Shows may remain filters for recommendations rather than full isolated top-level views, but the visible sections must match user expectation:
+- Wikipedia verification status
+- meaningful descriptor count
+- descriptor chips
+- retag button
+- removable chips
 
-- Recommendations tab: only recommendations
-- Rated tab: only rated
-- Watchlist tab: only watchlist
-- Tags tab: only Tag Brain
-- Pool tab: only Pool
-- Rejected tab: only Rejected
+Normal recommendation cards may show a limited descriptor list with expand/collapse.
 
-### 4.4 Control Deck
+## 14. Current Implementation Notes
 
-Controls should be visually separated into readable rows.
+Implemented changes in the current `index.html`:
 
-Recommended grouping:
+1. Seed pool disabled.
+2. Seed tags emptied.
+3. Expansion title packs emptied.
+4. Curated title-specific tags removed.
+5. Fallback tag set emptied.
+6. `deriveTagsFromText()` replaced with contrastive descriptor extraction.
+7. `rebuildDescriptorBrain()` added.
+8. `scoringTags()` now uses descriptor tags only.
+9. `runHousekeeping()` now rebuilds descriptors instead of remapping invented tags.
+10. `Reset Brain` button added.
+11. `resetBrain()` added.
+12. Retagging remains page-ID-first and non-destructive.
+13. JavaScript syntax check passes.
 
-Row 1:
+## 15. Non-Negotiable Tag Hygiene Rules
 
-- Top Recs slider
-- Batch slider
-- Since/year slider
-- Tag count/housekeeping status
+1. Fewer accurate descriptors beat many decorative tags.
+2. Wrong shared descriptors are poison.
+3. Metadata is not taste.
+4. A descriptor must come from the page story text.
+5. A descriptor should be useful because it distinguishes the title from the pool.
+6. Failed retagging must preserve existing data.
+7. No invented title-specific fixes.
+8. No fallback tag stuffing.
+9. No seed brain.
+10. The brain must remain auditable and clean.
 
-Row 2:
+## 16. UI/UX Fixes Added After Mobile Review
 
-- Country selector
-- TMDB token/key input
-- Check Availability button
-- Service filters
+### Mobile header
 
-Row 3:
+The header must not push the page sideways on iPhone-sized screens.
 
-- Add Wikipedia URL input
-- Fetch from URL button
-- Drive status
-- Drive button
-- Expand Pool / Stop Fetching button
+Implemented behaviour:
 
-The previous huddling issue came from cramped flex wrapping. Controls need `row-gap`, `column-gap` and/or dedicated rows.
+- Header stacks into compact mobile rows.
+- The tab bar scrolls horizontally inside its own lane.
+- The page itself must not become wider than the viewport.
+- Drive status and action buttons wrap inside the header instead of forcing horizontal overflow.
 
-### 4.5 Check Availability Button
+### Rated / content tabs
 
-The button previously called `check visible` should be labeled:
+The Rated tab previously looked empty on mobile because the large control deck occupied the first screen even after the user had selected Rated.
 
-```text
-Check Availability
-```
+Implemented behaviour:
 
-Function:
+- Rated, Watchlist, Tags and Rejected hide discovery-only controls.
+- Stats remain visible.
+- The actual tab content appears immediately after the compact stats block.
+- Rated filtering uses numeric rating checks: `Number(m.rating || 0) > 0`.
 
-- Checks streaming/watch availability only for visible cards.
-- Uses TMDB watch providers.
-- Uses the selected country.
-- Does not tag.
-- Does not add recommendations.
-- Does not process the entire pool.
+### Star rating interaction
 
-### 4.6 Cards
+Rating stars must behave like normal rating controls.
 
-All major title displays should use the same card design.
+Implemented behaviour:
 
-Cards should include:
-
-- Title
-- Match % where applicable
-- Year / language / country / format metadata
-- Match bar where applicable
-- Star rating control
-- Availability chips/line
-- Tags
-- Actions
-
-Actions should include, where relevant:
-
-- Re-tag
-- Check Availability
-- Watchlist / Remove from Watchlist
-- Delete/remove title
-- Expand/collapse tags
-
-Every card must have a Retag button, not only Pool entries.
-
-### 4.7 Tags on Cards
-
-Normal cards may show a limited number of tags with expand/collapse.
-
-Pool cards must show all tags because Pool is for auditing.
-
-Pool card tags must be removable with an `×`.
-
-Removing a tag must:
-
-- Remove from `movie.tags`
-- Remove from `movie.plotTags`
-- Remove from `movie.coreTags`
-- Recompute tag weights
-- Save locally
-- Sync to Drive when connected
-- Re-render
-
-### 4.8 Manual Rating Prompt
-
-After manual URL add succeeds, show a rating prompt immediately.
-
-The modal/prompt should show:
-
-- Title
-- Year
-- 1–5 rating stars or buttons
-- Skip/Not now option
-
-Rating from the prompt should use the same `rateMovie()` logic so recommendations update correctly.
-
-## 5. Data Model
-
-### 5.1 Root State
-
-Current state shape:
-
-```js
-state = {
-  movies: {},
-  tagWeights: {},
-  settings: {
-    topN,
-    batchSize,
-    minYear,
-    watchCountry,
-    platforms
-  },
-  drive: {
-    connected,
-    accessToken,
-    folderId,
-    fileId
-  },
-  rejectedWikiTitles: {},
-  poolFetched
-}
-```
-
-### 5.2 Movie Object
-
-A processed title should contain:
-
-```js
-{
-  id,
-  title,
-  year,
-  director,
-  language,
-  country,
-  format,          // absent/undefined for movie, 'series' or 'miniseries' for shows
-  tags,
-  coreTags,
-  plotTags,
-  storyText,
-  leadText,
-  tagged,
-  rating,
-  watchlist,
-  source,
-  wikiTitle,
-  pageTitle,
-  availability
-}
-```
-
-### 5.3 Rejected Title Object
-
-Rejected entries are currently stored in `state.rejectedWikiTitles` using keys such as:
-
-```js
-mode:normalised-title
-```
-
-A rejected item should contain:
-
-```js
-{
-  title,
-  mode,
-  reason,
-  source,
-  at
-}
-```
-
-Reasons should be human-readable enough for the Rejected tab.
-
-Examples:
-
-- no usable plot/synopsis section
-- not Hindi/English
-- not movie/show
-- year before cutoff
-- duplicate
-- Wikipedia URL could not be processed
-- fetch aborted
-
-## 6. Wikipedia Collection Specification
-
-### 6.1 API Discipline
-
-The app must avoid bombarding Wikipedia.
-
-Current throttle settings:
-
-```js
-const WIKI_REQUEST_DELAY_MS = 850;
-const WIKI_BATCH_PAUSE_MS = 2500;
-```
-
-Expected behavior:
-
-- One request at a time.
-- Delay between requests.
-- Batch pause after groups of requests.
-- Cache existing and rejected titles.
-- Never repeatedly fetch the same rejected title in a loop.
-- Stop button aborts active fetch.
-
-### 6.2 Candidate Sources
-
-Automatic candidate discovery should use mixed source lanes, not simple alphabetical category crawl.
-
-Source lanes include:
-
-- Wikipedia film categories
-- Wikipedia TV list pages
-- Wikipedia navigation list pages
-- Curated English movie title list
-- Curated Hindi movie title list
-- Curated show title list
-- Search-related lanes where relevant
-- Manual URL lane
-
-Current constants include:
-
-- `WIKI_SOURCES`
-- `WIKI_LIST_SOURCES`
-- `WIKI_NAVIGATION_LISTS`
-- `EXPANSION_ENGLISH`
-- `EXPANSION_HINDI`
-- `EXPANSION_SHOWS`
-
-The candidate system should:
-
-1. Gather titles from all enabled lanes.
-2. Shuffle each lane.
-3. Round-robin across lanes.
-4. Remove duplicates.
-5. Exclude existing titles.
-6. Exclude rejected titles.
-7. Process candidates through the same validation pipeline as manual URL add.
-
-### 6.3 Fetching a Wikipedia Title
-
-Current function:
-
-```js
-fetchWikiMovie(wikiTitle, mode='all')
-```
-
-Expected behavior:
-
-1. Fetch page extract and categories using Wikipedia API.
-2. Read lead section for identity only.
-3. Extract story text from Plot/Synopsis/Premise/Story/Plot summary/Series overview.
-4. Reject the page if no valid story section exists.
-5. Determine year.
-6. Determine language.
-7. Determine country.
-8. Determine format: movie vs series/miniseries.
-9. Validate against requested mode.
-10. Derive tags from story text.
-11. Return normalized movie object.
-
-### 6.4 Plot Required Rule
-
-This is critical.
-
-No plot/synopsis/premise/story section means skip.
-
-Do not fall back to intro/lead for tagging.
-
-Intro/lead may help identify the page, year, language, country and format, but not tags.
-
-Story headings currently accepted:
-
-```js
-['Plot', 'Synopsis', 'Premise', 'Story', 'Plot summary', 'Series overview']
-```
-
-Acceptable improvement:
-
-- Add `Overview` only if it is clearly story/episode premise text, not generic production overview.
-- Avoid using `Reception`, `Cast`, `Production`, `Music`, `Release`, `Marketing`, `Awards`, `Legacy` for tags.
-
-## 7. Tagging Engine Specification
-
-### 7.1 Purpose
-
-Tags are the brain of CineLens.
-
-The recommendation system is only as good as tag hygiene. A false shared tag makes unrelated titles look similar. A missing tag is a small loss. A wrong tag is poison.
-
-Tagging must therefore follow this rule:
-
-```text
-Fewer verified tags are better than many invented tags.
-```
-
-### 7.2 Tag Groups
-
-The app keeps three tag arrays on each title:
-
-```js
-tags
-coreTags
-plotTags
-```
-
-#### `tags`
-
-The full saved tag set for display and audit.
-
-It may include:
-
-- language tag
-- country tag
-- decade tag
-- format tag
-- genre tags
-- tone tags
-- setting tags
-- plot tags
-- director/style tags
-
-#### `coreTags`
-
-The scoring tag set used by the recommendation engine.
-
-These must be high-confidence and useful for taste matching.
-
-Examples:
-
-- crime-thriller
-- serial-killer-thriller
-- supernatural-horror
-- space-sci-fi
-- artificial-intelligence
-- time-manipulation
-- war-drama
-- prison-setting
-- courtroom-drama
-- political-thriller
-- spy-thriller
-- heist-thriller
-- sports-drama
-- twist-ending
-- non-linear-narrative
-- unreliable-narration
-- morally-ambiguous-protagonist
-- revenge-driven
-- grief-and-loss
-- power-and-ambition
-- slow-burn
-- psychological
-- satirical
-- visually-striking
-
-#### `plotTags`
-
-The audit-facing plot tag set.
-
-It must contain only evidence-backed tags. It must not be padded to a fixed count.
-
-### 7.3 Removed Minimum Tag Padding
-
-The earlier logic used:
-
-```js
-const MIN_PLOT_TAGS = 20;
-```
-
-That caused contamination because `ensureMinimumPlotTags()` added broad fallback tags when a title did not naturally produce enough tags.
-
-The new rule is:
-
-```js
-const MIN_PLOT_TAGS = 0;
-```
-
-`ensureMinimumPlotTags()` must never add generic fallback tags. It now returns cleaned, evidence-backed non-meta tags only.
-
-This is intentional. A movie with 6 accurate tags is better than a movie with 6 accurate tags and 14 fake ones wearing a cheap moustache.
-
-### 7.4 Contaminated Fallback Tags
-
-These tags are treated as contaminated because they were previously used as filler:
-
-```js
-const LOW_CONFIDENCE_PLOT_TAGS = new Set([
-  'protagonist-driven','conflict-driven','character-driven','plot-driven','dramatic-stakes',
-  'goal-oriented-plot','relationship-conflict','moral-choice','escalating-conflict','personal-cost',
-  'turning-point-heavy','dialogue-driven','emotional-stakes','social-context','consequence-driven',
-  'journey-arc','high-stakes','character-growth','world-building','genre-hybrid',
-  'central-conflict','main-character-goal','character-relationships','narrative-stakes','decision-pressure',
-  'setting-driven','identity-pressure','authority-conflict','danger-driven','emotional-pressure',
-  'social-pressure','professional-pressure','family-pressure','survival-pressure','hidden-information',
-  'investigation-thread','personal-history','opposition-force','moral-pressure','resolution-driven'
-]);
-```
-
-The implementation also creates:
-
-```js
-const CONTAMINATED_FALLBACK_TAGS = new Set([...LOW_CONFIDENCE_PLOT_TAGS]);
-```
-
-These tags must be removed from existing data and blocked from future scoring.
-
-### 7.5 Tag Cleaning Helpers
-
-The app must include shared cleaning helpers:
-
-```js
-function normaliseTagName(tag)
-function cleanTagArray(tags, movie=null, keepLowConfidence=false)
-function cleanContaminatedTags(silent=true)
-```
-
-`normaliseTagName()` converts tags to lower-case hyphenated names.
-
-`cleanTagArray()` must:
-
-1. Normalise tag names.
-2. Remove blank tags.
-3. Remove contaminated fallback tags by default.
-4. Apply `tagEvidenceOk()` where movie context exists.
-5. Deduplicate.
-
-`cleanContaminatedTags()` must:
-
-1. Walk every saved title.
-2. Replace seed title tags from `SEED_TAGS` where available.
-3. Rebuild Wikipedia title tags from saved `storyText` where available.
-4. Strip contaminated tags from non-Wikipedia/manual items.
-5. Rebuild `coreTags`.
-6. Rebuild `plotTags` without filler.
-7. Recompute `state.tagWeights`.
-8. Save local state when changes were made.
-
-### 7.6 Existing Data Migration
-
-The app must clean already saved contaminated data automatically.
-
-On app load:
-
-```js
-loadLocalState();
-cleanContaminatedTags(true);
-seedPool();
-```
-
-When Drive data is loaded:
-
-```js
-loadFromDrive()
-```
-
-must call `cleanContaminatedTags(true)` immediately after assigning `state.movies` from Drive.
-
-When Drive data was cleaned, the app must sync the cleaned copy back to Drive so the poisoned version does not return in the next session.
-
-### 7.7 Seed Title Rules
-
-Seed titles must use only their curated `SEED_TAGS`.
-
-Seed titles must not call filler logic.
-
-Correct seed behaviour:
-
-```js
-movie.tags = cleanTagArray(SEED_TAGS[movie.id], movie, false);
-movie.coreTags = cleanTagArray(recommendationTags(movie.tags), movie, false);
-movie.plotTags = [];
-```
-
-This prevents hardcoded seed titles from receiving fake plot tags when no `storyText` exists.
-
-### 7.8 Wikipedia Title Rules
-
-Wikipedia titles must be tagged from the extracted story section.
-
-Correct Wikipedia behaviour:
-
-```js
-const rawTags = cleanTagArray(deriveTagsFromText(storyText, meta), meta, false);
-const coreTags = cleanTagArray(recommendationTags(rawTags), meta, false);
-const plotTags = cleanTagArray(ensureMinimumPlotTags(rawTags, storyText, meta), meta, false);
-const tags = cleanTagArray([...rawTags, ...coreTags, ...plotTags], meta, false);
-```
-
-The `meta` object must include:
-
-```js
-source: 'wikipedia'
-storyText
-leadText
-```
-
-so evidence checks have the page context.
-
-### 7.9 Housekeeping Rules
-
-`runHousekeeping()` must not reintroduce contaminated tags.
-
-For Wikipedia items with `storyText`, housekeeping should rebuild from current tag logic rather than trust old saved tags.
-
-For seed/manual items without story text, housekeeping should clean existing tags and leave `plotTags` empty.
-
-Housekeeping must recompute tag weights after cleanup.
-
-### 7.10 Broad Keyword Trap Prevention
-
-Do not use broad single words as decisive evidence for specific genres.
-
-Known bad examples:
-
-- `match` must not trigger sports-drama.
-- `game` must not trigger sports-drama by itself.
-- `time` must not trigger time-manipulation.
-- `past` must not trigger time-manipulation.
-- `future` must not trigger sci-fi or time-manipulation by itself.
-- `war` must not trigger war-drama when used metaphorically.
-
-### 7.11 Specific Tag Evidence Rules
-
-#### sports-drama
-
-Require sports-specific evidence such as:
-
-```text
-football, cricket, basketball, baseball, tennis, boxing, wrestling, racing driver, athlete, sports coach, tournament, championship, world cup, olympics, sports team, hockey, kabaddi
-```
-
-Avoid triggering from:
-
-```text
-match, game, team, play
-```
-
-unless combined with sport-specific terms.
-
-#### war-drama
-
-Require clear military/war evidence such as:
-
-```text
-world war, wwii, world war ii, nazi, soldier, military unit, army officer, battlefield, combat mission, war-torn, wartime
-```
-
-#### time-manipulation
-
-Require clear evidence such as:
-
-```text
-time travel, time loop, travels back in time, travels forward in time, temporal, paradox, alternate timeline, parallel timeline
-```
-
-Do not trigger from:
-
-```text
-time, past, future, memory, years later
-```
-
-### 7.12 Retagging
-
-Retag must:
-
-1. Refetch the Wikipedia page.
-2. Re-extract mandatory story section.
-3. Rebuild tags from the current tagger.
-4. Rebuild `coreTags` and `plotTags` through `cleanTagArray()`.
-5. Preserve user rating and watchlist status.
-6. Save locally.
-7. Sync Drive when connected.
-8. Re-render.
-
-Retag should fail cleanly when the page no longer passes rules.
-
-## 8. Recommendation Engine Specification
-
-### 8.1 Learning From Ratings
-
-Ratings are 1–5 stars.
-
-Current weight logic:
-
-```js
-weight = rating - 3
-```
-
-Meaning:
-
-- 5 stars = strong positive signal
-- 4 stars = mild positive signal
-- 3 stars = neutral
-- 2 stars = mild negative signal
-- 1 star = strong negative signal
-
-Tags from rated titles update `state.tagWeights`.
-
-### 8.2 Scoring Candidates
-
-Recommendation candidates are unrated titles from the pool that match selected scope and filters.
-
-A candidate score is calculated from scoring tags and tag weights.
-
-Recommendations must be sorted by score, not alphabetically.
-
-Alphabetical order may be used only as a tie-breaker.
-
-### 8.3 100% Match Display
-
-Match percentage is relative to current highest score:
-
-```js
-matchPct = Math.round((score / maxScore) * 100)
-```
-
-The first ranked recommendation will normally show 100%.
-
-The target of 5 × 100% means at least 5 recommendations at or near the top score, using `PERFECT_REC_MIN_RATIO`.
-
-### 8.4 Recommendation Candidate Filters
-
-Candidate must:
-
-- Be unrated
-- Be tagged
-- Meet minimum year cutoff
-- Match selected tab context when applicable
-- Match selected platform availability if platform filtering is active, once availability is known
-
-## 9. Persistence Specification
-
-### 9.1 Local Storage
-
-The app must persist to browser `localStorage` under:
-
-```js
-cinelens_v2
-```
-
-Data saved:
-
-- movies
-- settings
-- rejectedWikiTitles
-
-TMDB token currently stored separately:
-
-```js
-cinelens_tmdb_token
-```
-
-### 9.2 Google Drive Sync
-
-Google Drive file name:
-
-```js
-cinelens_data.json
-```
-
-Drive scope:
-
-```js
-https://www.googleapis.com/auth/drive.file
-```
-
-Drive sync should:
-
-- Find existing `cinelens_data.json`
-- Load it when connected
-- Create it if missing
-- Patch it on sync
-- Store and restore Drive file ID
-- Sync local state after meaningful changes
-
-### 9.3 Drive Token Persistence
-
-Drive token must survive refresh and reopening while valid.
-
-Current token keys:
-
-```js
-cinelens_drive_token_v1
-cinelens_drive_token_expiry_v1
-```
-
-Expected behavior:
-
-- On load, attempt Drive restore if a valid token exists.
-- If token expired, clear it and show not connected.
-- Manual Drive button requests interactive token.
-- Silent token request may be attempted where Google/browser allows.
-- If browser blocks silent auth, manual button must still work.
-
-### 9.4 Critical Drive Rule
-
-A Drive issue must not make the whole app static.
-
-All Drive calls must fail gracefully and never break the global script.
-
-## 10. Error Handling Specification
-
-### 10.1 JavaScript Integrity
-
-A single JS syntax error currently kills all buttons. This is unacceptable.
-
-Before delivering any HTML file:
-
-1. Extract JavaScript from the HTML.
-2. Run syntax check.
-3. Prefer running a basic smoke check for expected functions.
-
-Suggested check:
-
-```bash
-node --check extracted.js
-```
-
-At minimum, verify these functions exist:
-
-```text
-render
-setTab
-connectDrive
-expandPool
-stopFetching
-addManualTitle
-rateMovie
-retagMovie
-renderPoolGrid
-renderRatedGrid
-syncDrive
-```
-
-### 10.2 Fetch Errors
-
-Wikipedia fetch errors should:
-
-- Not crash the app.
-- Record rejected title where appropriate.
-- Respect stop/abort state.
-- Show a toast if manual fetch fails.
-
-### 10.3 Drive Errors
-
-Drive errors should:
-
-- Set Drive status to not connected.
-- Clear token if unauthorized.
-- Keep local state intact.
-- Show a useful toast.
-- Keep all non-Drive app controls usable.
-
-## 11. Current Important Constants
-
-```js
-const WIKI_REQUEST_DELAY_MS = 850;
-const WIKI_BATCH_PAUSE_MS = 2500;
-const CARD_REFRESH_BATCH_SIZE = 20;
-const REC_INFINITE_PAGE_SIZE = 20;
-const PERFECT_REC_TARGET = 5;
-const PERFECT_REC_MIN_RATIO = 0.995;
-const MIN_PLOT_TAGS = 20;
-```
-
-## 12. Known Sensitive Areas in the Code
-
-These areas have caused failures or regressions and require special care:
-
-### 12.1 Escaping in inline HTML handlers
-
-Several buttons use inline `onclick="function('id','tag',event)"` patterns.
-
-Any tag/title containing quotes or backslashes can break JavaScript if not escaped correctly.
-
-Safer future approach:
-
-- Use `data-*` attributes.
-- Attach event listeners after rendering.
-- Avoid inline JS handlers for dynamic strings.
-
-### 12.2 Removable Tag Rendering
-
-This previously produced a broken line like:
-
-```js
-String(tag).replace(/\/g,'\\').replace(/'/g,"\\'")
-```
-
-A malformed escape in this area killed the whole script.
-
-This area must be syntax-checked after every edit.
-
-### 12.3 Pool Grid vs Pool Rows
-
-Pool was requested as same-design cards, not audit table rows.
-
-Do not replace Pool cards with one-line rows.
-
-### 12.4 Rated Tab Rendering
-
-Rated tab must call `renderRatedGrid()` and `updateVisibleSections()` must show the Rated section when `activeTab === 'rated'`.
-
-### 12.5 Plot Fallback
-
-Do not reintroduce fallback from missing story section to intro.
-
-This violates the core collection rule.
-
-## 13. Acceptance Tests
-
-### 13.1 App Loads
-
-Expected:
-
-- Page renders.
-- Buttons respond.
-- Tabs switch.
-- No console syntax errors.
-
-### 13.2 Drive Connect
-
-Expected:
-
-- Click Drive.
-- Google auth opens or restores.
-- Status changes to connected.
-- `cinelens_data.json` is created or loaded.
-- Refresh page: Drive restores while token valid.
-- Close and reopen: Drive restores while token valid.
-- If token expired, Drive button still reconnects interactively.
-
-### 13.3 Manual URL Add
-
-Input:
-
-```text
-https://en.wikipedia.org/wiki/Inglourious_Basterds
-```
-
-Expected:
-
-- Page processed only if plot exists.
-- Title added to Pool.
-- Rating prompt appears.
-- Tags do not include `sports-drama` unless story evidence supports actual sport.
-- Save local and sync Drive when connected.
-
-### 13.4 Automatic Fetch
-
-Expected:
-
-- Expand Pool starts fetching.
-- Stop Fetching aborts promptly.
-- Fetch progress visible.
-- Stats update during fetch.
-- Cards refresh every 20 additions, not every addition.
-- Fetching continues until 5 near-perfect recommendations where possible.
-- Pages without story section are rejected.
-
-### 13.5 Recommendations
-
-Expected:
-
-- Recommendations sort by score.
-- Alphabetical order is not primary.
-- Infinite scroll loads more cards.
-- Recommendations tab shows recommendations only.
-
-### 13.6 Rated Tab
-
-Expected:
-
-- Rate any title.
-- Open Rated tab.
-- Rated title appears as a normal card.
-
-### 13.7 Pool Tab
-
-Expected:
-
-- Open Pool tab.
-- Pool titles appear as normal cards.
-- Rating stars work.
-- All tags visible or expandable as required.
-- Tags can be removed with `×`.
-- Removing a tag updates card and scoring.
-
-### 13.8 Retag
-
-Expected:
-
-- Retag button exists on every title card.
-- Retag refetches Wikipedia.
-- Tags are rebuilt from story section.
-- Rating/watchlist state survives.
-
-### 13.9 Rejected Tab
-
-Expected:
-
-- Rejected title appears with reason.
-- Retry works.
-- Forget works.
-
-## 14. Development Rules For Future Changes
-
-1. Always edit from the latest confirmed working HTML file.
-2. Apply only the requested change unless a dependency requires a small supporting change.
-3. Preserve Drive, sync, ratings, pool, rejected, tabs and fetch controls unless the request explicitly targets them.
-4. Always provide the complete updated HTML file.
-5. Never provide snippets as the final code output.
-6. After every edit, syntax-check the extracted JavaScript.
-7. When fixing bugs, state the exact file used as the base.
-8. Do not silently revert newer features while fixing older ones.
-9. Keep design consistent: same cards across Recommendations, Rated, Watchlist and Pool.
-10. Treat tagging as the core engine, not cosmetic metadata.
-
-## 15. Recommended Future Refactor
-
-The app is now large for a single inline script. A safe future refactor would separate the code into logical modules while keeping deployment simple.
-
-Suggested files:
-
-```text
-index.html
-styles.css
-app.js
-wiki.js
-tagger.js
-recommendations.js
-drive.js
-tmdb.js
-storage.js
-```
-
-Refactor only after a stable working version is preserved.
-
-Before refactor, create a known-good checkpoint and do one module at a time.
-
-## 16. Product Principle
-
-CineLens should collect like a careful librarian, tag like a cautious critic and recommend like it has learned the user’s taste.
-
-Wikipedia order is internal plumbing.
-Recommendations are the product.
-
-## 16. Tag Hygiene Fix Changelog
-
-### 16.1 Problem Fixed
-
-The previous build used a forced 20-tag minimum and generic fallback tags. This contaminated stored title data, inflated tag overlap and damaged recommendation quality.
-
-### 16.2 Implementation Changes
-
-- Set `MIN_PLOT_TAGS` to `0`.
-- Added `CONTAMINATED_FALLBACK_TAGS`.
-- Added `normaliseTagName()`.
-- Added `cleanTagArray()`.
-- Added `cleanContaminatedTags()`.
-- Cleaned local saved data on startup.
-- Cleaned Drive-loaded data before rendering.
-- Synced the cleaned Drive copy back when cleanup changes were detected.
-- Removed plot filler from seed title handling.
-- Rebuilt Wikipedia tags from saved `storyText` during cleanup and housekeeping.
-- Kept recommendation scoring limited to cleaned scoring tags.
-
-### 16.3 Result
-
-The Tag Brain now rewards tag accuracy over tag count. Recommendations are based on cleaner overlap and less fake similarity.
+- Hovering over star 4 previews stars 1-4.
+- Clicking star 5 stores rating 5 and fills stars 1-5.
+- Existing ratings render cumulatively, not as a single isolated star.
+- The same star renderer is used across normal cards, Rated cards and Pool cards.
