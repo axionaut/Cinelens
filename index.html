@@ -326,6 +326,9 @@
   .card-act:hover{background:rgba(255,255,255,.08);border-color:rgba(255,204,51,.35);color:var(--text)}
   .card-act.watch:hover{background:rgba(255,204,51,.14);border-color:var(--accent);color:var(--accent)}
   .card-act.del:hover{background:rgba(239,83,80,.12);border-color:var(--danger);color:#ff7c78}
+  .tag.removable{cursor:pointer;display:inline-flex;align-items:center;gap:5px}
+  .tag-remove{font-size:10px;color:var(--danger);opacity:.85}
+  .pool-card-note{font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);margin:0 0 7px}
   .empty-state{background:rgba(255,255,255,.025);border-color:rgba(255,255,255,.1);color:var(--muted)}
   .tag-brain-grid{background:rgba(255,255,255,.025);border-color:rgba(255,255,255,.08)}
   .tb-tag{background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.1);color:#b9ab9a}
@@ -510,7 +513,7 @@
     <div class="section-title">Pool</div>
     <div class="section-count" id="poolCount">nothing loaded</div>
   </div>
-  <div class="audit-table audit-only" id="poolGrid"></div>
+  <div class="movies-grid audit-only" id="poolGrid"></div>
 
   <hr class="sep audit-only" id="rejectedSep">
 
@@ -1289,25 +1292,22 @@ async function fetchWikiMovie(wikiTitle, mode='all') {
 }
 
 function extractStoryText(extract) {
-  const text = (extract || '').replace(//g, '').trim();
+  const text = (extract || '').replace(/\r/g, '').trim();
   if (!text) return '';
-  const headings = ['Plot', 'Synopsis', 'Premise', 'Story', 'Plot summary', 'Summary', 'Series overview'];
-  const lines = text.split('
-');
+  const headings = ['Plot', 'Synopsis', 'Premise', 'Story', 'Plot summary', 'Series overview'];
+  const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     if (headings.some(h => line.toLowerCase() === h.toLowerCase())) {
       const out = [];
       for (let j = i + 1; j < lines.length; j++) {
         const l = lines[j].trim();
-        const current = out.join(' ');
-        const looksLikeNextSection = /^[A-Z][A-Za-z0-9 &,'’():;\-]{1,55}$/.test(l) && !/^(the|a|an)/i.test(l);
-        if (looksLikeNextSection && current.length > 500) break;
+        if (/^[A-Z][A-Za-z0-9 &,'’():;\-]{1,55}$/.test(l) && !/^(the|a|an)\b/i.test(l) && out.join(' ').length > 500) break;
         if (l) out.push(l);
-        if (current.length > 6500) break;
+        if (out.join(' ').length > 6500) break;
       }
-      const section = out.join(' ').trim();
-      if (section.length >= 350) return section;
+      const section = out.join(' ');
+      if (section.length > 400) return section;
     }
   }
   return '';
@@ -1823,29 +1823,11 @@ function updateVisibleSections() {
 function renderPoolGrid() {
   const grid = document.getElementById('poolGrid');
   if (!grid) return;
-  const scoredMap = new Map(recommendationCandidates().map(x => [x.movie.id, x]));
-  const maxScore = recommendationCandidates()[0]?.score || 1;
   const rows = Object.values(state.movies).filter(matchesTab).sort((a,b)=>(b.rating||0)-(a.rating||0)||a.title.localeCompare(b.title));
   document.getElementById('poolCount').textContent = rows.length ? `${rows.length} titles` : 'nothing loaded';
+  grid.innerHTML = '';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>Pool Empty</h3></div>`; return; }
-  grid.innerHTML = rows.map(m => {
-    const sc = scoredMap.get(m.id);
-    const pct = sc ? Math.round((sc.score / maxScore) * 100) + '%' : '—';
-    const plotList = ensureMinimumPlotTags(m.plotTags || recommendationTags(m.tags), '', m);
-    const tags = plotList.slice(0,20).map(t=>`<span class="tag">${t}</span>`).join('');
-    const safeId = m.id.replace(/'/g,"\\'");
-    const stars = [1,2,3,4,5].map(star => `<span class="star${(m.rating||0)>=star?' active':''}" onclick="rateMovie('${safeId}',${star})">★</span>`).join('');
-    return `<div class="audit-row">
-      <div class="audit-title">${m.title}</div>
-      <div>${m.year||'?'}</div>
-      <div>${m.format?'show':'movie'}</div>
-      <div>${m.language||'?'}</div>
-      <div class="audit-rating">${stars}</div>
-      <div class="audit-muted">${m.source||'seed'} · ${pct} · ${plotList.length} tags</div>
-      <div class="audit-tags">${tags}</div>
-      <div class="audit-actions"><button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button><button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button></div>
-    </div>`;
-  }).join('');
+  rows.forEach(m => grid.appendChild(buildCard(m, { poolView:true })));
 }
 
 function renderRejectedGrid() {
@@ -1889,7 +1871,7 @@ function forgetRejectedTitle(key, e) {
 
 function renderRateGrid() { renderRecs(); }
 function buildCard(movie, opts={}) {
-  const { rank, score, matchedTags, maxScore, showEdit, watchlistView } = opts;
+  const { rank, score, matchedTags, maxScore, showEdit, watchlistView, poolView } = opts;
   const card = document.createElement('div');
   card.className = 'movie-card' + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
@@ -1910,14 +1892,15 @@ function buildCard(movie, opts={}) {
       <div class="card-meta">${movie.language}·${movie.country}·${movie.year||'?'}</div>
       ${rank?`<div class="match-label">${matchPct}% match</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}
       ${!movie.tagged&&movie.rating>0?`<div class="tagging-label">⟳ tagging...</div>`:''}
-      ${showEdit&&movie.rating>0?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star${movie.rating>=s?' active':''}" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
-      ${!showEdit&&movie.rating===0?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
+      ${(showEdit||poolView)?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star${(movie.rating||0)>=s?' active':''}" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
+      ${(!showEdit&&!poolView&&movie.rating===0)?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
+      ${poolView?`<div class="pool-card-note">${movie.source||'seed'} · ${(movie.plotTags||movie.tags||[]).length} tags</div>`:''}
       <div class="where-line" id="where-${movie.id}">${renderAvailability(movie)}</div>
-      <div class="card-tags" id="tags-${movie.id}">${renderTagChips(movie.plotTags || movie.tags, matchedTags, false)}</div>
+      <div class="card-tags" id="tags-${movie.id}">${poolView ? renderRemovableTagChips(movie.tags || movie.plotTags, safeId) : renderTagChips(movie.plotTags || movie.tags, matchedTags, false)}</div>
       <div class="card-actions">
-        ${movie.tagged?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ tags'}</button>`:''}
+        ${movie.tagged&&!poolView?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ tags'}</button>`:''}
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
-        ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
+        ${(!showEdit||poolView)?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
         <button class="card-act watch" onclick="checkAvailability('${safeId}',event)">where</button>
         <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
       </div>
@@ -1932,6 +1915,29 @@ function renderTagChips(tags, matchedTags, expanded) {
   const list = expanded ? ordered : ordered.slice(0,5);
   return list.map(t=>`<span class="tag${matched.has&&matched.has(t)?' matched':''}">${t}</span>`).join('')
     + (tags.length>5&&!expanded?`<span class="tag" style="color:var(--muted2)">+${tags.length-5}</span>`:'');
+}
+
+function renderRemovableTagChips(tags, movieId) {
+  if (!tags || !tags.length) return '';
+  const unique = [...new Set(tags)].sort();
+  return unique.map(tag => {
+    const safeTag = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return `<span class="tag removable" title="Remove tag" onclick="removeTagFromMovie('${movieId}','${safeTag}',event)">${tag}<span class="tag-remove">×</span></span>`;
+  }).join('');
+}
+
+function removeTagFromMovie(id, tag, event) {
+  if (event) event.stopPropagation();
+  const movie = state.movies[id];
+  if (!movie) return;
+  ['tags','coreTags','plotTags'].forEach(key => {
+    if (Array.isArray(movie[key])) movie[key] = movie[key].filter(t => t !== tag);
+  });
+  movie.tagged = (movie.tags && movie.tags.length > 0) || (movie.plotTags && movie.plotTags.length > 0) || (movie.coreTags && movie.coreTags.length > 0);
+  saveLocalState();
+  syncDrive();
+  render();
+  showToast(`Removed tag: ${tag}`, 'success');
 }
 
 function renderAvailability(movie) {
