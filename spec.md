@@ -79,7 +79,7 @@ Wikipedia expansion pulls candidate titles from language-specific film categorie
 
 These categories are part of Wikipedia's `Category:Films by language` taxonomy: <https://en.wikipedia.org/wiki/Category:Films_by_language>.
 
-For fetched Wikipedia titles, tags are derived from the page extract, categories, and parsed metadata. The app should keep moving toward source-derived tagging from plot, story, synopsis, category, country, language, year, format, and director signals. Hardcoded seed tags are allowed as startup data, but the expansion brain should not depend on hardcoded per-title tags.
+For fetched Wikipedia titles, tags are derived from the page extract, categories, and parsed metadata. The app should keep moving toward source-derived tagging from plot, story, synopsis, category, country, language, year, format, and director signals. Hardcoded seed tags are allowed as startup data so the initial local pool can be scoreable immediately, but the expansion brain should not depend on hardcoded per-title tags.
 
 ## Recommendation Rules
 
@@ -97,7 +97,9 @@ An unrated title is recommended when:
 - at least one tag overlaps with a positive user preference,
 - and its total tag score is positive.
 
-Recommendations are sorted by total score, descending.
+Recommendations start once there are at least 3 rated/tagged titles. They are recalculated after each rating, tag update, watchlist change, or pool expansion. Positive tag overlap is the main ranking signal; disliked tags apply a smaller penalty so they push titles down without erasing every useful match.
+
+Recommendations are sorted by score, descending, then by positive tag overlap.
 
 Discovery excludes titles older than the selected `Since` year. The default cutoff is `1970`, and the user can adjust it from the settings bar.
 
@@ -137,6 +139,8 @@ Google Drive sync uses Google Identity Services OAuth with the `drive.file` scop
 - Added a watchlist section, a favicon, and a persisted `Since` year cutoff for discovery recommendations.
 - Capped each pool expansion run at 60 fetch attempts and added background auto-refill when the discovery pool runs low.
 - Changed Wikipedia expansion to source candidate titles from English/Hindi language film categories and keep fetched tags source-derived from page text and metadata.
+- Hydrated existing seed titles with starter tags so recommendations can start immediately from the local pool after enough ratings, while keeping Wikipedia-expanded titles source-derived.
+- Adjusted recommendation scoring to prioritize positive tag overlap and apply disliked tags as a smaller penalty.
 
 ## Future Iterations
 

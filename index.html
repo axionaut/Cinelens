@@ -497,13 +497,20 @@ const SEED = [
 
 function seedPool() {
   let added = 0;
+  let hydrated = 0;
   SEED.forEach(m => {
     if (!state.movies[m.id]) {
-      state.movies[m.id] = { ...m, tags: [], rating: 0, tagged: false };
+      const tags = SEED_TAGS[m.id] || [];
+      state.movies[m.id] = { ...m, tags, rating: 0, tagged: tags.length > 0, source: 'seed' };
       added++;
+    } else if ((!state.movies[m.id].tags || !state.movies[m.id].tags.length) && SEED_TAGS[m.id]) {
+      state.movies[m.id].tags = SEED_TAGS[m.id];
+      state.movies[m.id].tagged = true;
+      state.movies[m.id].source = state.movies[m.id].source || 'seed';
+      hydrated++;
     }
   });
-  if (added) saveLocalState();
+  if (added || hydrated) saveLocalState();
 }
 
 // ─────────────────────────────────────────────
@@ -880,7 +887,7 @@ function renderRecs() {
   }
 
   const batch = discoveryPool().slice(0, batchSize);
-  document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `showing ${batch.length} unrated`;
+  document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building matches · showing ${batch.length} unrated`;
   if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expand the pool or switch tabs.</p></div>`; return; }
   batch.forEach(m => grid.appendChild(buildCard(m, {})));
 }
@@ -975,16 +982,18 @@ function scoreMovies() {
   return Object.values(state.movies)
     .filter(m => m.rating===0&&m.tagged&&m.tags&&m.tags.length)
     .map(m => {
-      let score=0, posOverlap=0;
+      let score=0, posOverlap=0, positiveScore=0, negativePenalty=0;
       const matched=new Set();
       m.tags.forEach(t => {
         const w=state.tagWeights[t];
-        if (w) { score+=w; if (w>0){matched.add(t);posOverlap++;} }
+        if (w>0) { positiveScore+=w; matched.add(t); posOverlap++; }
+        else if (w<0) negativePenalty+=Math.abs(w)*0.5;
       });
-      return { movie:m, score, matchedTags:matched, posOverlap };
+      score = positiveScore - negativePenalty;
+      return { movie:m, score, matchedTags:matched, posOverlap, positiveScore };
     })
-    .filter(x => x.posOverlap>0&&x.score>0)
-    .sort((a,b) => b.score-a.score);
+    .filter(x => x.posOverlap>0&&x.positiveScore>0&&x.score>0)
+    .sort((a,b) => b.score-a.score||b.posOverlap-a.posOverlap);
 }
 
 // ─────────────────────────────────────────────
