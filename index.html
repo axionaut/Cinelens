@@ -424,9 +424,9 @@
   </div>
 
   <div class="platform-bar manual-add-row">
-    <span class="platform-label">Add Title</span>
-    <input class="manual-title-input" id="manualTitle" type="text" placeholder="type exact movie/show title" onkeydown="handleManualTitleKey(event)">
-    <button class="platform-btn" onclick="addManualTitle()" id="manualAddBtn">add from Wikipedia</button>
+    <span class="platform-label">Add Wikipedia URL</span>
+    <input class="manual-title-input" id="manualTitle" type="text" placeholder="paste Wikipedia movie/show URL" onkeydown="handleManualTitleKey(event)">
+    <button class="platform-btn" onclick="addManualTitle()" id="manualAddBtn">fetch from URL</button>
   </div>
   </div>
 
@@ -1101,35 +1101,48 @@ function handleManualTitleKey(e) {
   if (e.key === 'Enter') addManualTitle();
 }
 
+function wikipediaTitleFromUrl(value) {
+  const raw = (value || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase().replace(/^m\./, '');
+    if (!host.endsWith('wikipedia.org')) return '';
+
+    if (url.pathname.startsWith('/wiki/')) {
+      const slug = url.pathname.replace(/^\/wiki\//, '').split('/')[0];
+      if (!slug) return '';
+      return decodeURIComponent(slug).replace(/_/g, ' ').trim();
+    }
+
+    const title = url.searchParams.get('title');
+    if (title) return decodeURIComponent(title).replace(/_/g, ' ').trim();
+  } catch(e) {}
+  return '';
+}
+
 async function addManualTitle() {
   const input = document.getElementById('manualTitle');
   const btn = document.getElementById('manualAddBtn');
-  const rawTitle = (input?.value || '').trim();
-  if (!rawTitle) { showToast('Type a title first','error'); return; }
+  const rawUrl = (input?.value || '').trim();
+  if (!rawUrl) { showToast('Paste a Wikipedia URL first','error'); return; }
+
+  const wikiTitle = wikipediaTitleFromUrl(rawUrl);
+  if (!wikiTitle) { showToast('Use a valid Wikipedia page URL','error'); return; }
+
   const mode = expansionMode();
-  const existing = Object.values(state.movies).find(m => normaliseTitleKey(m.title) === normaliseTitleKey(rawTitle));
+  const existing = Object.values(state.movies).find(m => normaliseTitleKey(m.title) === normaliseTitleKey(wikiTitle));
   if (existing) { showToast(`Already in pool: "${existing.title}"`, ''); return; }
 
-  if (btn) { btn.disabled = true; btn.textContent = 'searching...'; }
-  showFetchProgress('Adding title from Wikipedia...', 8, rawTitle);
+  if (btn) { btn.disabled = true; btn.textContent = 'fetching...'; }
+  showFetchProgress('Fetching Wikipedia URL...', 8, wikiTitle);
 
-  let movie = null;
-  const candidates = [rawTitle, ...(await fetchWikiSearchTitles(rawTitle))];
-  const seen = new Set();
-  for (let i = 0; i < candidates.length; i++) {
-    const title = candidates[i];
-    const key = normaliseTitleKey(title);
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    showFetchProgress('Adding title from Wikipedia...', Math.min(92, 12 + i * 12), title);
-    movie = await fetchWikiMovie(title, mode);
-    if (movie) break;
-  }
+  const movie = await fetchWikiMovie(wikiTitle, mode);
 
   hideFetchProgress();
-  if (btn) { btn.disabled = false; btn.textContent = 'add from Wikipedia'; }
+  if (btn) { btn.disabled = false; btn.textContent = 'fetch from URL'; }
 
-  if (!movie) { recordRejectedTitle(rawTitle, mode, 'manual add could not be processed', 'manual'); saveLocalState(); render(); showToast(`Could not process "${rawTitle}"`, 'error'); return; }
+  if (!movie) { recordRejectedTitle(wikiTitle, mode, 'Wikipedia URL could not be processed', 'manual-url'); saveLocalState(); render(); showToast(`Could not process "${wikiTitle}"`, 'error'); return; }
   if (state.movies[movie.id]) { showToast(`Already in pool: "${state.movies[movie.id].title}"`, ''); return; }
 
   state.movies[movie.id] = movie;
