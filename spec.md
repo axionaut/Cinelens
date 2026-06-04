@@ -88,7 +88,7 @@ Wikipedia expansion pulls candidate titles from language-specific film categorie
 
 These categories are part of Wikipedia's `Category:Films by language` taxonomy: <https://en.wikipedia.org/wiki/Category:Films_by_language>.
 
-When the active tab is `Shows`, expansion switches to television-specific sources, including television show categories and list pages navigated from Wikipedia's `Lists of television programs`: <https://en.wikipedia.org/wiki/Lists_of_television_programs>. When the active tab is `Movies`, expansion rejects TV/web-series pages. When the active tab is `All`, expansion can use both movie and show sources.
+When the active tab is `Shows`, expansion switches to television-specific list-page sources navigated from Wikipedia's `Lists of television programs`: <https://en.wikipedia.org/wiki/Lists_of_television_programs>. It does not rely on language-specific TV categories. When the active tab is `Movies`, expansion rejects TV/web-series pages. When the active tab is `All`, expansion can use both movie and show sources.
 
 For fetched Wikipedia titles, tags are derived from the page extract, categories, and parsed metadata. The app should keep moving toward source-derived tagging from plot, story, synopsis, category, country, language, year, format, and director signals. Hardcoded seed tags are allowed as startup data so the initial local pool can be scoreable immediately, but the expansion brain should not depend on hardcoded per-title tags.
 
@@ -171,6 +171,8 @@ The app uses TMDB search plus movie/TV watch provider endpoints to cache provide
 - Added selected OTT platform controls, selected country, optional free TMDB token storage, per-title availability lookup/cache, and JustWatch fallback search links without adding paid API dependencies.
 - Redesigned the interface around a clearer control deck, compact recommendation rows, reduced per-card tag clutter, warmer cinema colors, and a contained Tag Brain panel.
 - Made `Expand Pool` respect the active tab: Movies fetches films, Shows fetches television/web-series sources, and All fetches both.
+- Reworked Shows expansion to discover show list pages from `Lists of television programs` rather than relying on unavailable/incomplete TV language categories.
+- Switched the visual direction to a black app background with white movie cards and selective color accents.
 
 ## Future Iterations
 
