@@ -164,6 +164,71 @@
   .fetch-fill{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:2px;transition:width .3s ease}
   .fetch-sub{font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
+  /* VISUAL REFRESH */
+  body{background:
+    radial-gradient(circle at 18% 0%,rgba(154,58,38,.35),transparent 32%),
+    radial-gradient(circle at 82% 8%,rgba(242,193,78,.16),transparent 28%),
+    linear-gradient(180deg,#140f12 0%,#0b0b0d 52%,#080808 100%);
+  }
+  body::before{opacity:.22}
+  header{height:64px;padding:0 32px;background:rgba(13,12,13,.86);border-bottom:1px solid rgba(242,193,78,.14)}
+  .logo{font-size:28px;letter-spacing:0;color:#ffd05a;text-shadow:0 0 22px rgba(242,193,78,.18)}
+  .logo span,.section-title,.stat-label,.tab-btn,.section-count,.platform-label,.card-meta,.tag,.tb-tag{letter-spacing:0}
+  .container{max-width:1180px;padding:0 32px}
+  main{padding:28px 0 90px}
+  .control-deck{background:linear-gradient(180deg,rgba(255,255,255,.055),rgba(255,255,255,.025));border:1px solid rgba(242,193,78,.12);border-radius:8px;padding:18px 18px 14px;margin-bottom:26px;box-shadow:0 18px 60px rgba(0,0,0,.28)}
+  .stats-bar{border-bottom:1px solid rgba(242,193,78,.12);margin:0 0 16px;padding:0 0 15px;gap:36px}
+  .stat-val{font-size:30px;color:#ffd05a}
+  .stat-label{font-size:10px;color:#b6a08d}
+  .settings-bar{background:transparent;border:0;border-radius:0;padding:0;margin:0 0 12px;gap:12px}
+  .settings-bar label{color:#d3bca4;font-size:11px}
+  .settings-bar input[type=range]{width:112px}
+  .platform-bar{margin:0;gap:8px}
+  .platform-btn,.platform-select,.tmdb-token,.btn{border-color:rgba(242,193,78,.14);background:rgba(255,255,255,.045);border-radius:5px}
+  .platform-btn.active,.tab-btn.active{background:#ffd05a;color:#17100b;border-color:#ffd05a}
+  .tab-bar{background:rgba(255,255,255,.055);border-color:rgba(242,193,78,.14);border-radius:6px}
+  .tab-btn{padding:5px 12px;border-radius:4px}
+  .section-header{margin:34px 0 14px;align-items:center}
+  .section-title{font-size:24px;color:#fff2df}
+  .section-count{color:#b6a08d}
+  hr.sep{border-top-color:rgba(242,193,78,.1);margin:26px 0 6px}
+  .movies-grid{grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:10px}
+  .movie-card{background:rgba(18,17,18,.78);border-color:rgba(255,255,255,.09);border-radius:8px;box-shadow:0 12px 34px rgba(0,0,0,.18)}
+  .movie-card:hover{border-color:rgba(255,208,90,.42);background:rgba(28,24,22,.9)}
+  .movie-card.rated{background:rgba(21,20,21,.82)}
+  .card-body{padding:12px 13px}
+  .card-title{font-size:15px;color:#fff7ec;font-weight:600;margin-bottom:3px;padding-right:54px}
+  .card-meta{font-size:10px;color:#b79d88;margin-bottom:8px}
+  .rank-badge{left:auto;right:10px;top:10px;border-radius:999px;background:#ffd05a;color:#17100b;font-family:'DM Mono',monospace;font-size:10px;padding:3px 7px}
+  .score-badge{right:10px;top:10px;border-radius:999px;background:rgba(255,208,90,.13);border-color:rgba(255,208,90,.45);font-size:10px}
+  .match-label{color:#ffd05a;font-size:10px;margin-bottom:5px}
+  .match-bar{height:4px;background:rgba(255,255,255,.08);border-radius:999px;margin-bottom:8px}
+  .match-fill{background:linear-gradient(90deg,#e35d46,#ffd05a)}
+  .star-rating{gap:4px;margin:4px 0 8px}
+  .star{font-size:16px;color:#5d5552}
+  .star:hover,.star.active{color:#ffd05a}
+  .where-line{margin:6px 0 7px;color:#a99380}
+  .where-chip{border-color:rgba(255,255,255,.11);background:rgba(255,255,255,.045);color:#cdb9a5}
+  .where-chip.selected{background:rgba(255,208,90,.12);border-color:rgba(255,208,90,.5);color:#ffd05a}
+  .card-tags{gap:4px;margin-top:6px}
+  .tag{font-size:9px;border-radius:999px;padding:3px 7px;background:rgba(255,255,255,.045);border-color:rgba(255,255,255,.09);color:#bca895}
+  .tag.matched{border-color:rgba(255,208,90,.56);color:#ffd05a;background:rgba(255,208,90,.1)}
+  .card-actions{gap:6px;margin-top:10px}
+  .card-act{font-size:10px;border-radius:5px;padding:5px 8px;background:rgba(255,255,255,.035)}
+  .empty-state{padding:56px 20px;border:1px dashed rgba(255,255,255,.1);border-radius:8px;background:rgba(255,255,255,.025)}
+  .tag-brain-grid{max-height:260px;overflow:auto;padding:12px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);border-radius:8px}
+  .tb-tag{border-radius:999px}
+  @media(max-width:768px){
+    header{height:auto;min-height:60px;padding:10px 14px;gap:10px;align-items:flex-start}
+    header,.header-right{flex-wrap:wrap}
+    .container{padding:0 14px}
+    .control-deck{padding:14px}
+    .movies-grid{grid-template-columns:1fr}
+    .settings-bar input[type=range]{width:92px}
+    .logo span{display:none}
+    .tab-btn{padding:4px 9px;font-size:10px}
+  }
+
   ::-webkit-scrollbar{width:4px;height:4px}
   ::-webkit-scrollbar-track{background:transparent}
   ::-webkit-scrollbar-thumb{background:var(--muted2);border-radius:2px}
@@ -217,6 +282,7 @@
 <main>
 <div class="container">
 
+  <div class="control-deck">
   <div class="stats-bar">
     <div class="stat"><div class="stat-val" id="statRated">0</div><div class="stat-label">Rated</div></div>
     <div class="stat"><div class="stat-val" id="statTagged">0</div><div class="stat-label">Tagged</div></div>
@@ -252,6 +318,7 @@
     <button class="platform-btn" onclick="refreshVisibleAvailability()">check visible</button>
     <span class="platform-label">Services</span>
     <span id="platformBar"></span>
+  </div>
   </div>
 
   <div class="fetch-progress" id="fetchProgress">
@@ -1062,7 +1129,7 @@ function buildCard(movie, opts={}) {
       ${showEdit&&movie.rating>0?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star${movie.rating>=s?' active':''}" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
       ${!showEdit&&movie.rating===0?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
       <div class="where-line" id="where-${movie.id}">${renderAvailability(movie)}</div>
-      <div class="card-tags" id="tags-${movie.id}">${renderTagChips(movie.tags, matchedTags, false)}</div>
+      <div class="card-tags" id="tags-${movie.id}">${renderTagChips(movie.plotTags || movie.tags, matchedTags, false)}</div>
       <div class="card-actions">
         ${movie.tagged?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ tags'}</button>`:''}
         ${showEdit?`<button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>`:''}
@@ -1077,9 +1144,10 @@ function buildCard(movie, opts={}) {
 function renderTagChips(tags, matchedTags, expanded) {
   if (!tags||!tags.length) return '';
   const matched = matchedTags||new Set();
-  const list = expanded ? tags : tags.slice(0,10);
+  const ordered = [...tags].sort((a,b)=>(matched.has&&matched.has(b)?1:0)-(matched.has&&matched.has(a)?1:0));
+  const list = expanded ? ordered : ordered.slice(0,5);
   return list.map(t=>`<span class="tag${matched.has&&matched.has(t)?' matched':''}">${t}</span>`).join('')
-    + (tags.length>10&&!expanded?`<span class="tag" style="color:var(--muted2)">+${tags.length-10}</span>`:'');
+    + (tags.length>5&&!expanded?`<span class="tag" style="color:var(--muted2)">+${tags.length-5}</span>`:'');
 }
 
 function renderAvailability(movie) {
@@ -1093,7 +1161,8 @@ function renderAvailability(movie) {
 }
 
 function justWatchUrl(movie) {
-  return `https://www.justwatch.com/in/search?q=${encodeURIComponent(movie.title + ' ' + (movie.year||''))}`;
+  const paths = {IN:'in', US:'us', GB:'uk'};
+  return `https://www.justwatch.com/${paths[state.settings.watchCountry]||'in'}/search?q=${encodeURIComponent(movie.title + ' ' + (movie.year||''))}`;
 }
 
 function posterGrad(title) {
@@ -1245,10 +1314,12 @@ function retagMovie(id, e) {
 function toggleTags(id, e) {
   if (e) e.stopPropagation();
   const m = state.movies[id];
-  if (!m||!m.tags||!m.tags.length) return;
+  if (!m) return;
+  const tags = m.plotTags || m.tags;
+  if (!tags||!tags.length) return;
   m._expanded = !m._expanded;
   const el = document.getElementById('tags-'+id);
-  if (el) el.innerHTML = renderTagChips(m.tags, new Set(), m._expanded);
+  if (el) el.innerHTML = renderTagChips(tags, new Set(), m._expanded);
   const card = document.getElementById('card-'+id);
   if (card) { const b=card.querySelector('.card-act'); if(b&&(b.textContent.includes('tags')||b.textContent.includes('less'))) b.textContent=m._expanded?'▲ less':'▼ tags'; }
 }
@@ -1421,13 +1492,29 @@ async function connectDrive() {
     state.drive.connected=true; saveLocalState(); setDriveStatus('connected'); render();
     showToast('Drive connected','success');
   } catch(e) {
-    state.drive.connected=false; setDriveStatus(''); showToast('Drive sign-in failed','error');
+    console.error('Drive sign-in failed', e);
+    state.drive.connected=false; setDriveStatus(''); showToast(driveErrorMessage(e),'error');
   }
 }
 function setDriveStatus(s) { document.getElementById('driveDot').className='drive-dot '+s; document.getElementById('driveLabel').textContent=s==='connected'?'drive connected':s==='syncing'?'syncing...':'not connected'; }
+function driveErrorMessage(e) {
+  const code = e?.error || e?.message || 'unknown';
+  if (String(code).includes('unavailable')) return 'Google sign-in script not loaded';
+  if (code === 'popup_failed_to_open') return 'Allow popups for Drive sign-in';
+  if (code === 'access_denied') return 'Drive access was denied';
+  if (code === 'idpiframe_initialization_failed') return 'Google sign-in blocked by browser settings';
+  return `Drive sign-in failed: ${code}`;
+}
+async function waitForGoogleIdentity() {
+  for (let i=0; i<30; i++) {
+    if (window.google?.accounts?.oauth2) return;
+    await sleep(100);
+  }
+  throw new Error('Google Identity Services unavailable');
+}
 async function requestDriveToken(prompt='consent') {
   if (state.drive.accessToken) return state.drive.accessToken;
-  if (!window.google?.accounts?.oauth2) throw new Error('Google Identity Services unavailable');
+  await waitForGoogleIdentity();
   if (!driveTokenClient) {
     driveTokenClient=google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
@@ -1441,7 +1528,8 @@ async function requestDriveToken(prompt='consent') {
       state.drive.accessToken=resp.access_token;
       resolve(resp.access_token);
     };
-    driveTokenClient.requestAccessToken({prompt});
+    try { driveTokenClient.requestAccessToken({prompt}); }
+    catch(e) { reject(e); }
   });
 }
 function driveHeaders(extra={}) { return {...extra, Authorization:`Bearer ${state.drive.accessToken}`}; }

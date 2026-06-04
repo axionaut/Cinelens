@@ -167,6 +167,7 @@ The app uses TMDB search plus movie/TV watch provider endpoints to cache provide
 - Increased background auto-refill to trigger below 30 available discovery titles with a 2-minute cooldown; manual Expand remains a force-fetch action.
 - Simplified movie cards into compact rows and warmed the visual theme with richer cinema-like colors.
 - Added selected OTT platform controls, selected country, optional free TMDB token storage, per-title availability lookup/cache, and JustWatch fallback search links without adding paid API dependencies.
+- Redesigned the interface around a clearer control deck, compact recommendation rows, reduced per-card tag clutter, warmer cinema colors, and a contained Tag Brain panel.
 
 ## Future Iterations
 
