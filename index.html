@@ -1917,12 +1917,12 @@ function renderTagChips(tags, matchedTags, expanded) {
 function renderRemovableTagChips(tags, movieId) {
   if (!tags || !tags.length) return '';
   const unique = [...new Set(tags)].sort();
+  const safeMovieId = String(movieId).replace(/\/g,'\\').replace(/'/g,"\'");
   return unique.map(tag => {
-    const safeTag = String(tag).replace(/\/g,'\\').replace(/'/g,"\\'");
-    return `<span class="tag removable" title="Remove tag" onclick="removeTagFromMovie('${movieId}','${safeTag}',event)">${tag}<span class="tag-remove">×</span></span>`;
+    const safeTag = String(tag).replace(/\/g,'\\').replace(/'/g,"\'");
+    return `<span class="tag removable" title="Remove tag" onclick="removeTagFromMovie('${safeMovieId}','${safeTag}',event)">${tag}<span class="tag-remove">×</span></span>`;
   }).join('');
 }
-
 function removeTagFromMovie(id, tag, event) {
   if (event) event.stopPropagation();
   const movie = state.movies[id];
@@ -2297,7 +2297,7 @@ function loadLocalState() {
         state.drive.fileId=s.drive.fileId||'';
         state.drive.lastConnectedAt=s.drive.lastConnectedAt||0;
       }
-      state.drive.accessToken=sessionStorage.getItem('cinelens_drive_token')||'';
+      state.drive.accessToken=getStoredDriveToken()||'';
       document.getElementById('topN').value=state.settings.topN;
       document.getElementById('topNVal').textContent=state.settings.topN;
       document.getElementById('batchSize').value=state.settings.batchSize;
@@ -2327,6 +2327,43 @@ const DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
 let driveTokenClient=null;
 let driveRestoreInProgress=false;
 let gisScriptLoading=false;
+const DRIVE_TOKEN_KEY='cinelens_drive_token_v1';
+const DRIVE_TOKEN_EXPIRY_KEY='cinelens_drive_token_expiry_v1';
+
+
+function rememberDriveToken(token, expiresInSeconds=3300) {
+  if (!token) return;
+  const expiry=Date.now()+Math.max(60, Number(expiresInSeconds)||3300)*1000;
+  try {
+    sessionStorage.setItem('cinelens_drive_token', token);
+    sessionStorage.setItem('cinelens_drive_token_expiry', String(expiry));
+    localStorage.setItem(DRIVE_TOKEN_KEY, token);
+    localStorage.setItem(DRIVE_TOKEN_EXPIRY_KEY, String(expiry));
+  } catch(e) {}
+}
+function getStoredDriveToken() {
+  try {
+    const sessionToken=sessionStorage.getItem('cinelens_drive_token')||'';
+    const sessionExpiry=parseInt(sessionStorage.getItem('cinelens_drive_token_expiry')||'0',10);
+    if (sessionToken && sessionExpiry>Date.now()+30000) return sessionToken;
+    const localToken=localStorage.getItem(DRIVE_TOKEN_KEY)||'';
+    const localExpiry=parseInt(localStorage.getItem(DRIVE_TOKEN_EXPIRY_KEY)||'0',10);
+    if (localToken && localExpiry>Date.now()+30000) {
+      sessionStorage.setItem('cinelens_drive_token', localToken);
+      sessionStorage.setItem('cinelens_drive_token_expiry', String(localExpiry));
+      return localToken;
+    }
+  } catch(e) {}
+  return '';
+}
+function clearStoredDriveToken() {
+  try {
+    sessionStorage.removeItem('cinelens_drive_token');
+    sessionStorage.removeItem('cinelens_drive_token_expiry');
+    localStorage.removeItem(DRIVE_TOKEN_KEY);
+    localStorage.removeItem(DRIVE_TOKEN_EXPIRY_KEY);
+  } catch(e) {}
+}
 
 function openDriveModal() { connectDrive(); }
 function skipDrive() { showToast('Using local storage',''); }
@@ -2386,12 +2423,7 @@ async function connectDrive() {
   if (!GOOGLE_CLIENT_ID) { showToast('Missing Google client ID','error'); return; }
   setDriveStatus('syncing');
   try {
-    if (!googleIdentityReady()) {
-      loadGoogleIdentityScript().catch(e => console.warn(e));
-      setDriveStatus('');
-      showToast('Google sign-in loading. Tap Drive again.','error');
-      return;
-    }
+    if (!googleIdentityReady()) await waitForGoogleIdentity();
     await requestDriveTokenInteractive();
     state.drive.enabled=true;
     const fileId=state.drive.fileId||await findDriveFile();
@@ -2427,7 +2459,7 @@ async function restoreDriveSession(showFailure=false) {
   } catch(e) {
     state.drive.connected=false;
     state.drive.accessToken='';
-    sessionStorage.removeItem('cinelens_drive_token');
+    clearStoredDriveToken();
     setDriveStatus('');
     if (showFailure) showToast(driveErrorMessage(e),'error');
   } finally {
@@ -2464,7 +2496,7 @@ function tokenRequest(prompt) {
     driveTokenClient.callback = resp => {
       if (resp.error) { reject(resp); return; }
       state.drive.accessToken=resp.access_token;
-      sessionStorage.setItem('cinelens_drive_token', resp.access_token);
+      rememberDriveToken(resp.access_token, resp.expires_in || 3300);
       resolve(resp.access_token);
     };
     try { driveTokenClient.requestAccessToken({prompt}); }
@@ -2472,14 +2504,14 @@ function tokenRequest(prompt) {
   });
 }
 async function requestDriveTokenInteractive() {
-  const stored=sessionStorage.getItem('cinelens_drive_token');
+  const stored=getStoredDriveToken();
   if (stored) { state.drive.accessToken=stored; return stored; }
-  if (!googleIdentityReady()) throw new Error('Google sign-in script not loaded yet');
+  await waitForGoogleIdentity();
   return tokenRequest('consent');
 }
 async function requestDriveTokenSilent() {
   if (state.drive.accessToken) return state.drive.accessToken;
-  const stored=sessionStorage.getItem('cinelens_drive_token');
+  const stored=getStoredDriveToken();
   if (stored) { state.drive.accessToken=stored; return stored; }
   await waitForGoogleIdentity();
   return tokenRequest('');
@@ -2489,7 +2521,7 @@ async function requestDriveToken(prompt='consent') {
 }
 function clearDriveToken() {
   state.drive.accessToken='';
-  sessionStorage.removeItem('cinelens_drive_token');
+  clearStoredDriveToken();
 }
 function driveHeaders(extra={}) { return {...extra, Authorization:`Bearer ${state.drive.accessToken}`}; }
 async function driveFetch(url, opts={}) {
