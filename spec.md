@@ -39,8 +39,11 @@ The app keeps runtime state in a global `state` object:
   settings: {
     topN: 10,
     batchSize: 12,
-    minYear: 1970
+    minYear: 1970,
+    watchCountry: 'IN',
+    platforms: ['Netflix', 'Prime Video', 'Hotstar']
   },
+  rejectedWikiTitles: {},
   drive: {
     connected: false,
     accessToken: '',
@@ -63,9 +66,15 @@ Each movie/show record generally contains:
   country: 'USA',
   format: 'series', // optional
   tags: [],
+  plotTags: [],
   rating: 0,
   tagged: false,
   watchlist: false,
+  availability: {
+    tmdbId: 123,
+    tmdbType: 'movie',
+    countries: {}
+  },
   skipped: false
 }
 ```
@@ -97,7 +106,7 @@ An unrated title is recommended when:
 - at least one tag overlaps with a positive user preference,
 - and its total tag score is positive.
 
-Recommendations start once there are at least 3 rated/tagged titles. They are recalculated after each rating, tag update, watchlist change, or pool expansion. Positive tag overlap is the main ranking signal; disliked tags apply a smaller penalty so they push titles down without erasing every useful match.
+Recommendations start once there are at least 3 rated/tagged titles. They are recalculated after each rating, tag update, watchlist change, or pool expansion. Positive plot/story tag overlap is the main ranking signal; disliked plot/story tags apply a smaller penalty so they push titles down without erasing every useful match. Metadata tags such as language, country, decade, and format are not used for recommendations.
 
 Recommendations are sorted by score, descending, then by positive tag overlap.
 
@@ -118,6 +127,18 @@ cinelens_data.json
 ```
 
 Google Drive sync uses Google Identity Services OAuth with the `drive.file` scope. Access tokens are kept only in runtime memory and are not saved to `localStorage`.
+
+## Availability
+
+No paid availability API is required or planned for the personal app.
+
+Where-to-watch data is exact only when a free TMDB API key or v4 read token is saved locally in the browser under:
+
+```txt
+cinelens_tmdb_token
+```
+
+The app uses TMDB search plus movie/TV watch provider endpoints to cache provider availability by selected country on each movie record. Without a free TMDB token, the `where` action opens a JustWatch title search as a no-API fallback. Selected OTT platforms are stored in settings and are used to highlight/filter titles once availability is known.
 
 ## Known Notes
 
@@ -141,6 +162,11 @@ Google Drive sync uses Google Identity Services OAuth with the `drive.file` scop
 - Changed Wikipedia expansion to source candidate titles from English/Hindi language film categories and keep fetched tags source-derived from page text and metadata.
 - Hydrated existing seed titles with starter tags so recommendations can start immediately from the local pool after enough ratings, while keeping Wikipedia-expanded titles source-derived.
 - Adjusted recommendation scoring to prioritize positive tag overlap and apply disliked tags as a smaller penalty.
+- Split recommendation tags into `plotTags` so scoring ignores metadata tags such as language, country, year, and format.
+- Improved pool expansion to remember rejected Wikipedia titles, fetch deeper category pages, and reject obvious franchises/lists/universes instead of retrying them every run.
+- Increased background auto-refill to trigger below 30 available discovery titles with a 2-minute cooldown; manual Expand remains a force-fetch action.
+- Simplified movie cards into compact rows and warmed the visual theme with richer cinema-like colors.
+- Added selected OTT platform controls, selected country, optional free TMDB token storage, per-title availability lookup/cache, and JustWatch fallback search links without adding paid API dependencies.
 
 ## Future Iterations
 

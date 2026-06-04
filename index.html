@@ -8,17 +8,17 @@
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg:#0a0a0a; --surface:#111; --surface2:#1a1a1a; --border:#222;
-    --accent:#e8c547; --accent2:#c49b2e; --text:#e8e8e8;
-    --muted:#666; --muted2:#444; --danger:#e05252; --green:#52c087;
-    --tag-bg:#1e1e1e; --tag-border:#2a2a2a;
+    --bg:#100d0b; --surface:#181310; --surface2:#241c17; --border:#342720;
+    --accent:#f2c14e; --accent2:#d88a36; --text:#f4ece2;
+    --muted:#9a8170; --muted2:#5c483d; --danger:#e06a5f; --green:#62c596;
+    --tag-bg:#241b16; --tag-border:#3a2a22;
   }
   *{margin:0;padding:0;box-sizing:border-box}
   html{scroll-behavior:smooth}
-  body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;font-weight:300;min-height:100vh;overflow-x:hidden}
+  body{background:radial-gradient(circle at 50% -20%,#2a1812 0,#100d0b 42%,#080706 100%);color:var(--text);font-family:'DM Sans',sans-serif;font-weight:300;min-height:100vh;overflow-x:hidden}
   body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");pointer-events:none;z-index:9999;opacity:.4}
 
-  header{position:sticky;top:0;z-index:100;background:rgba(10,10,10,.93);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:0 28px;height:54px;display:flex;align-items:center;justify-content:space-between}
+  header{position:sticky;top:0;z-index:100;background:rgba(16,13,11,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:0 28px;height:54px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 8px 28px rgba(0,0,0,.22)}
   .logo{font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:3px;color:var(--accent);line-height:1}
   .logo span{color:var(--muted);font-size:12px;font-family:'DM Mono',monospace;letter-spacing:1px;margin-left:8px;vertical-align:middle}
   .header-right{display:flex;align-items:center;gap:8px}
@@ -56,30 +56,40 @@
   .settings-bar input[type=range]{width:80px;accent-color:var(--accent)}
   .settings-bar .val{font-family:'DM Mono',monospace;font-size:12px;color:var(--accent);min-width:22px}
   .sep-v{width:1px;height:18px;background:var(--border)}
+  .platform-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:-10px 0 22px}
+  .platform-label{font-size:11px;color:var(--muted);font-family:'DM Mono',monospace;margin-right:4px}
+  .platform-btn{padding:4px 8px;border-radius:3px;font-size:10px;font-family:'DM Mono',monospace;border:1px solid var(--border);background:rgba(36,28,23,.72);color:var(--muted);cursor:pointer;transition:all .15s}
+  .platform-btn.active{border-color:var(--accent2);color:var(--accent);background:rgba(242,193,78,.08)}
+  .platform-btn:hover{border-color:var(--muted2);color:var(--text)}
+  .platform-select,.tmdb-token{background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:'DM Mono',monospace;font-size:10px;padding:4px 7px;outline:none}
+  .tmdb-token{width:170px}
+  .where-line{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px;font-family:'DM Mono',monospace;font-size:9px;color:var(--muted)}
+  .where-chip{border:1px solid var(--tag-border);background:rgba(255,255,255,.03);border-radius:3px;padding:2px 5px}
+  .where-chip.selected{border-color:var(--accent2);color:var(--accent);background:rgba(242,193,78,.07)}
 
-  .movies-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:13px}
+  .movies-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:7px}
 
-  .movie-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;overflow:hidden;transition:border-color .2s,transform .2s;position:relative}
-  .movie-card:hover{border-color:var(--muted2);transform:translateY(-2px)}
+  .movie-card{background:linear-gradient(180deg,rgba(36,28,23,.96),rgba(20,16,14,.96));border:1px solid var(--border);border-radius:4px;overflow:hidden;transition:border-color .2s,background .2s;position:relative}
+  .movie-card:hover{border-color:var(--muted2)}
   .movie-card.rated:hover{border-color:var(--accent2)}
-  .card-poster{width:100%;aspect-ratio:2/3;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+  .card-poster{display:none}
   .card-poster-inner{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;width:100%;height:100%;padding:14px}
   .card-poster-year{font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)}
   .card-poster-title{font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:1px;color:var(--text);text-align:center;line-height:1.2}
   .card-poster-dir{font-size:10px;color:var(--muted);text-align:center}
   .score-badge{position:absolute;top:7px;right:7px;background:rgba(0,0,0,.85);border:1px solid var(--accent);border-radius:3px;padding:2px 6px;font-family:'DM Mono',monospace;font-size:10px;color:var(--accent)}
-  .rank-badge{position:absolute;top:7px;left:7px;background:var(--accent);border-radius:3px;padding:2px 6px;font-family:'Bebas Neue',sans-serif;font-size:13px;color:#000;letter-spacing:1px}
+  .rank-badge{position:absolute;top:7px;right:7px;background:var(--accent);border-radius:3px;padding:2px 6px;font-family:'Bebas Neue',sans-serif;font-size:13px;color:#000;letter-spacing:1px}
   .format-badge{position:absolute;bottom:7px;left:7px;background:rgba(0,0,0,.75);border:1px solid var(--border);border-radius:3px;padding:2px 5px;font-size:9px;font-family:'DM Mono',monospace;color:var(--muted);letter-spacing:.5px;text-transform:uppercase}
-  .card-body{padding:9px 11px 11px}
-  .card-title{font-size:12px;font-weight:500;line-height:1.3;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card-body{padding:8px 10px}
+  .card-title{font-size:13px;font-weight:500;line-height:1.3;margin-bottom:2px;padding-right:30px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .card-meta{font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;margin-bottom:7px}
 
-  .star-rating{display:flex;gap:3px;margin-bottom:6px}
-  .star{font-size:15px;cursor:pointer;color:var(--muted2);transition:color .1s,transform .1s;line-height:1}
+  .star-rating{display:flex;gap:3px;margin-bottom:5px}
+  .star{font-size:14px;cursor:pointer;color:var(--muted2);transition:color .1s,transform .1s;line-height:1}
   .star:hover,.star.active{color:var(--accent)}
   .star:hover{transform:scale(1.2)}
 
-  .card-tags{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px}
+  .card-tags{display:flex;flex-wrap:wrap;gap:3px;margin-top:4px}
   .tag{background:var(--tag-bg);border:1px solid var(--tag-border);border-radius:3px;padding:2px 5px;font-size:9px;color:var(--muted);font-family:'DM Mono',monospace;letter-spacing:.2px}
   .tag.matched{border-color:var(--accent2);color:var(--accent);background:rgba(232,197,71,.06)}
 
@@ -90,11 +100,12 @@
   .tagging-label{font-size:9px;color:var(--accent);font-family:'DM Mono',monospace;animation:pulse 1s ease infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 
-  .card-actions{display:flex;gap:3px;margin-top:7px;flex-wrap:wrap}
+  .card-actions{display:flex;gap:3px;margin-top:6px;flex-wrap:wrap}
   .card-act{padding:3px 7px;border-radius:3px;font-size:9px;font-family:'DM Mono',monospace;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--muted);transition:all .15s}
   .card-act:hover{color:var(--text);border-color:var(--muted2)}
   .card-act.del:hover{color:var(--danger);border-color:var(--danger)}
   .card-act.retag:hover{color:var(--accent);border-color:var(--accent2)}
+  .card-act.watch:hover{color:var(--accent);border-color:var(--accent2)}
 
   #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:9px 18px;font-size:13px;color:var(--text);z-index:2000;transition:transform .3s ease;white-space:nowrap}
   #toast.show{transform:translateX(-50%) translateY(0)}
@@ -228,6 +239,19 @@
     <span class="val" id="minYearVal">1970</span>
     <div class="sep-v"></div>
     <span id="hkStatus" style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace">tags: 0</span>
+  </div>
+
+  <div class="platform-bar">
+    <span class="platform-label">Country</span>
+    <select class="platform-select" id="watchCountry" onchange="updateWatchCountry(this.value)">
+      <option value="IN">India</option>
+      <option value="US">United States</option>
+      <option value="GB">United Kingdom</option>
+    </select>
+    <input class="tmdb-token" id="tmdbToken" type="password" placeholder="free TMDB token/key" onchange="saveTmdbToken(this.value)">
+    <button class="platform-btn" onclick="refreshVisibleAvailability()">check visible</button>
+    <span class="platform-label">Services</span>
+    <span id="platformBar"></span>
   </div>
 
   <div class="fetch-progress" id="fetchProgress">
@@ -406,11 +430,20 @@ let activeTab = 'all';
 let tagFilter = 'all';
 let poolExpansionInProgress = false;
 let lastAutoExpandAt = 0;
+const OTT_PLATFORMS = ['Netflix','Prime Video','Hotstar','JioCinema','SonyLIV','ZEE5','Apple TV+','YouTube'];
+const PROVIDER_ALIASES = {
+  'Prime Video':['Prime Video','Amazon Prime Video'],
+  'Hotstar':['Hotstar','Disney Plus Hotstar','Disney+ Hotstar'],
+  'JioCinema':['JioCinema','Jio Cinema'],
+  'Apple TV+':['Apple TV Plus','Apple TV+'],
+  'YouTube':['YouTube','YouTube Premium']
+};
 let state = {
   movies: {},
   tagWeights: {},
-  settings: { topN: 10, batchSize: 12, minYear: 1970 },
+  settings: { topN: 10, batchSize: 12, minYear: 1970, watchCountry: 'IN', platforms: ['Netflix','Prime Video','Hotstar'] },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '' },
+  rejectedWikiTitles: {},
   poolFetched: false
 };
 
@@ -501,12 +534,16 @@ function seedPool() {
   SEED.forEach(m => {
     if (!state.movies[m.id]) {
       const tags = SEED_TAGS[m.id] || [];
-      state.movies[m.id] = { ...m, tags, rating: 0, tagged: tags.length > 0, source: 'seed' };
+      state.movies[m.id] = { ...m, tags, plotTags: recommendationTags(tags), rating: 0, tagged: tags.length > 0, source: 'seed' };
       added++;
     } else if ((!state.movies[m.id].tags || !state.movies[m.id].tags.length) && SEED_TAGS[m.id]) {
       state.movies[m.id].tags = SEED_TAGS[m.id];
+      state.movies[m.id].plotTags = recommendationTags(SEED_TAGS[m.id]);
       state.movies[m.id].tagged = true;
       state.movies[m.id].source = state.movies[m.id].source || 'seed';
+      hydrated++;
+    } else if (state.movies[m.id].tags && !state.movies[m.id].plotTags) {
+      state.movies[m.id].plotTags = recommendationTags(state.movies[m.id].tags);
       hydrated++;
     }
   });
@@ -516,13 +553,38 @@ function seedPool() {
 // ─────────────────────────────────────────────
 // WIKIPEDIA POOL EXPANSION
 // ─────────────────────────────────────────────
-async function fetchWikiSourceTitles() {
+function normaliseTitleKey(title) {
+  return (title||'').replace(/^Category:/,'').replace(/\s+\(.*?\)$/,'').trim().toLowerCase();
+}
+
+function obviousNonMovieTitle(title) {
+  return /^(list of|category:|template:|wikipedia:|portal:)/i.test(title)
+    || /\b(film series|media franchise|franchise|universe|timeline|soundtrack|discography|filmography|list)\b/i.test(title);
+}
+
+function isMetaTag(tag) {
+  return /^(english-language|hindi-language|usa|uk|india|south-korea|brazil|poland|germany|japan|film|series|miniseries|prestige-tv|\d{4}s)$/.test(tag);
+}
+
+function recommendationTags(tags) {
+  return [...new Set((tags||[]).filter(t => !isMetaTag(t)))];
+}
+
+async function fetchWikiSourceTitles(pagesPerCategory=4) {
   const titles = [];
   for (const category of Object.values(WIKI_SOURCES)) {
+    let cmcontinue = '';
     try {
-      const url = `https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=${encodeURIComponent(category)}&cmlimit=200&cmnamespace=0&cmsort=sortkey&format=json&origin=*`;
-      const data = await (await fetch(url)).json();
-      (data.query?.categorymembers||[]).forEach(item => titles.push(item.title));
+      for (let page = 0; page < pagesPerCategory; page++) {
+        const cont = cmcontinue ? `&cmcontinue=${encodeURIComponent(cmcontinue)}` : '';
+        const url = `https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=${encodeURIComponent(category)}&cmlimit=200&cmnamespace=0&cmsort=sortkey&format=json&origin=*${cont}`;
+        const data = await (await fetch(url)).json();
+        (data.query?.categorymembers||[]).forEach(item => {
+          if (!obviousNonMovieTitle(item.title)) titles.push(item.title);
+        });
+        cmcontinue = data.continue?.cmcontinue || '';
+        if (!cmcontinue) break;
+      }
     } catch(e) {}
   }
   return [...new Set(titles)];
@@ -535,28 +597,33 @@ async function expandPool(manual=true) {
   if (btn) { btn.disabled = true; btn.textContent = 'Fetching...'; }
   if (manual) showFetchProgress('Expanding pool from Wikipedia...', 0, '');
 
-  const sourceTitles = await fetchWikiSourceTitles();
+  const sourceTitles = await fetchWikiSourceTitles(manual ? 6 : 3);
   const allTitles = [...sourceTitles, ...EXPANSION_ENGLISH, ...EXPANSION_HINDI];
-  const existing = new Set(Object.values(state.movies).map(m => m.title.toLowerCase()));
+  const existing = new Set(Object.values(state.movies).map(m => normaliseTitleKey(m.title)));
   const toFetch = allTitles.filter(t => {
-    const clean = t.replace(/ \(.*\)$/, '').trim().toLowerCase();
-    return !existing.has(clean);
+    const clean = normaliseTitleKey(t);
+    return clean && !existing.has(clean) && !state.rejectedWikiTitles[clean] && !obviousNonMovieTitle(t);
   });
 
   let added = 0;
-  const total = Math.min(toFetch.length, 60);
+  let attempts = 0;
+  const target = manual ? 60 : 24;
+  const maxAttempts = Math.min(toFetch.length, manual ? 180 : 80);
 
-  for (let i = 0; i < total; i++) {
+  for (let i = 0; i < maxAttempts && added < target; i++) {
     const title = toFetch[i];
-    if (manual) showFetchProgress(`Fetching ${i+1}/${total}`, (i/total)*100, title);
+    attempts++;
+    if (manual) showFetchProgress(`Finding new movies ${added}/${target}`, (i/maxAttempts)*100, title);
     try {
       const movie = await fetchWikiMovie(title);
       if (movie && !state.movies[movie.id]) {
         if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie)) {
           state.movies[movie.id] = movie;
           added++;
+        } else {
+          state.rejectedWikiTitles[normaliseTitleKey(title)] = true;
         }
-      }
+      } else state.rejectedWikiTitles[normaliseTitleKey(title)] = true;
     } catch(e) {}
     if (i % 10 === 9) await sleep(300);
   }
@@ -565,7 +632,7 @@ async function expandPool(manual=true) {
   if (btn) { btn.disabled = false; btn.textContent = 'Expand Pool'; }
   poolExpansionInProgress = false;
   saveLocalState(); syncDrive(); render();
-  if (manual || added) showToast(`Added ${added} new films to pool`, 'success');
+  if (manual || added) showToast(`Added ${added} new movies to pool`, added?'success':'');
 }
 async function fetchWikiMovie(wikiTitle) {
   // Fetch extract + page props from Wikipedia API
@@ -580,6 +647,7 @@ async function fetchWikiMovie(wikiTitle) {
   const extract = page.extract || '';
   const title = page.title.replace(/ \(.*\)$/, '').trim();
   const id = 'wiki_' + page.pageid;
+  if (obviousNonMovieTitle(page.title) || /\b(film series|media franchise|shared universe|franchise|television series|web series)\b/i.test(extract.slice(0, 500))) return null;
 
   // Parse year from extract
   const yearMatch = extract.match(/\b(19[3-9]\d|20[012]\d)\b/);
@@ -595,6 +663,7 @@ async function fetchWikiMovie(wikiTitle) {
   let format = null;
   if (cats.some(c => c.includes('television series') || c.includes('tv series'))) format = 'series';
   if (cats.some(c => c.includes('miniseries'))) format = 'miniseries';
+  if (cats.some(c => c.includes('film series') || c.includes('media franchise') || c.includes('fictional universes'))) return null;
 
   // Country
   let country = 'USA';
@@ -609,9 +678,11 @@ async function fetchWikiMovie(wikiTitle) {
 
   // Generate tags from extract
   const tags = deriveTagsFromText(extract, { title, year, language, country, format, director });
+  const plotTags = recommendationTags(tags);
   if (tags.length < 5) return null; // skip if we can't generate meaningful tags
+  if (plotTags.length < 2) return null;
 
-  return { id, title, year, director, language, country, format: format||null, tags, tagged: true, rating: 0, source: 'wikipedia' };
+  return { id, title, year, director, language, country, format: format||null, tags, plotTags, tagged: true, rating: 0, source: 'wikipedia' };
 }
 
 // ─────────────────────────────────────────────
@@ -810,11 +881,14 @@ function tagMovie(movie) {
   // Use hardcoded tags for seed movies, derived tags for wiki movies
   if (SEED_TAGS[movie.id]) {
     movie.tags = SEED_TAGS[movie.id];
+    movie.plotTags = recommendationTags(movie.tags);
   } else if (movie.source === 'wikipedia' && movie.tags && movie.tags.length > 0) {
     // Already tagged during fetch — housekeeping will normalise
+    movie.plotTags = recommendationTags(movie.tags);
   } else {
     // Fallback: basic meta tags
     movie.tags = deriveTagsFromText('', movie);
+    movie.plotTags = recommendationTags(movie.tags);
   }
   movie.tagged = true;
   const card = document.getElementById('card-' + movie.id);
@@ -852,10 +926,58 @@ function matchesTab(m) {
 // ─────────────────────────────────────────────
 // RENDER
 // ─────────────────────────────────────────────
-function render() { renderRecs(); renderRatedGrid(); renderWatchlist(); renderTagBrain(); updateStats(); maybeAutoExpandPool(); }
+function render() { renderPlatformBar(); renderRecs(); renderRatedGrid(); renderWatchlist(); renderTagBrain(); updateStats(); maybeAutoExpandPool(); }
+
+function renderPlatformBar() {
+  const bar = document.getElementById('platformBar');
+  if (!bar) return;
+  const country = document.getElementById('watchCountry');
+  const token = document.getElementById('tmdbToken');
+  if (country) country.value = state.settings.watchCountry || 'IN';
+  if (token && !token.value) token.value = localStorage.getItem('cinelens_tmdb_token') || '';
+  bar.innerHTML = OTT_PLATFORMS.map(p => `<button class="platform-btn ${state.settings.platforms.includes(p)?'active':''}" onclick="togglePlatform('${p.replace(/'/g,"\\'")}')">${p}</button>`).join('');
+}
+
+function togglePlatform(platform) {
+  const set = new Set(state.settings.platforms||[]);
+  if (set.has(platform)) set.delete(platform); else set.add(platform);
+  state.settings.platforms = [...set];
+  saveLocalState(); render();
+}
+
+function updateWatchCountry(country) {
+  state.settings.watchCountry = country;
+  saveLocalState(); render();
+}
+
+function saveTmdbToken(token) {
+  const clean = token.trim();
+  if (clean) localStorage.setItem('cinelens_tmdb_token', clean);
+  else localStorage.removeItem('cinelens_tmdb_token');
+  showToast(clean?'TMDB token saved':'TMDB token cleared', clean?'success':'');
+}
+
+function providerAliases(platform) { return PROVIDER_ALIASES[platform] || [platform]; }
+function providerMatchesPlatform(providerName, platform) {
+  return providerAliases(platform).some(alias => providerName.toLowerCase().includes(alias.toLowerCase()));
+}
+
+function availabilityProviders(movie, country=state.settings.watchCountry) {
+  const data = movie.availability?.countries?.[country];
+  if (!data) return [];
+  return [...(data.flatrate||[]), ...(data.free||[]), ...(data.ads||[])].map(p => p.provider_name || p.name).filter(Boolean);
+}
+
+function matchesSelectedPlatforms(movie) {
+  const selected = state.settings.platforms || [];
+  if (!selected.length) return true;
+  const providers = availabilityProviders(movie);
+  if (!providers.length) return true;
+  return selected.some(platform => providers.some(provider => providerMatchesPlatform(provider, platform)));
+}
 
 function discoveryPool() {
-  return Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && !m.watchlist && matchesTab(m) && meetsYearCutoff(m));
+  return Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && !m.watchlist && matchesTab(m) && meetsYearCutoff(m) && matchesSelectedPlatforms(m));
 }
 
 function meetsYearCutoff(m) {
@@ -864,7 +986,7 @@ function meetsYearCutoff(m) {
 
 function maybeAutoExpandPool() {
   const available = discoveryPool().length;
-  if (available < 12 && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > 300000) {
+  if (available < 30 && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > 120000) {
     lastAutoExpandAt = Date.now();
     setTimeout(() => expandPool(false), 600);
   }
@@ -877,7 +999,7 @@ function renderRecs() {
   grid.innerHTML = '';
 
   if (ratedTagged.length >= 3) {
-    const scored = scoreMovies().filter(x => matchesTab(x.movie) && !x.movie.watchlist && meetsYearCutoff(x.movie));
+    const scored = scoreMovies().filter(x => matchesTab(x.movie) && !x.movie.watchlist && meetsYearCutoff(x.movie) && matchesSelectedPlatforms(x.movie));
     const top = scored.slice(0, state.settings.topN);
     if (top.length) {
       document.getElementById('recCount').textContent = `top ${top.length} matches`;
@@ -939,11 +1061,13 @@ function buildCard(movie, opts={}) {
       ${!movie.tagged&&movie.rating>0?`<div class="tagging-label">⟳ tagging...</div>`:''}
       ${showEdit&&movie.rating>0?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star${movie.rating>=s?' active':''}" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
       ${!showEdit&&movie.rating===0?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
+      <div class="where-line" id="where-${movie.id}">${renderAvailability(movie)}</div>
       <div class="card-tags" id="tags-${movie.id}">${renderTagChips(movie.tags, matchedTags, false)}</div>
       <div class="card-actions">
         ${movie.tagged?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ tags'}</button>`:''}
         ${showEdit?`<button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>`:''}
         ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
+        <button class="card-act watch" onclick="checkAvailability('${safeId}',event)">where</button>
         <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
       </div>
     </div>`;
@@ -958,6 +1082,20 @@ function renderTagChips(tags, matchedTags, expanded) {
     + (tags.length>10&&!expanded?`<span class="tag" style="color:var(--muted2)">+${tags.length-10}</span>`:'');
 }
 
+function renderAvailability(movie) {
+  const country = state.settings.watchCountry || 'IN';
+  const providers = availabilityProviders(movie, country);
+  if (!providers.length) return `<span>where: unknown · ${country}</span>`;
+  return providers.slice(0,5).map(p => {
+    const selected = (state.settings.platforms||[]).some(platform => providerMatchesPlatform(p, platform));
+    return `<span class="where-chip ${selected?'selected':''}">${p}</span>`;
+  }).join('') + `<span>${country}</span>`;
+}
+
+function justWatchUrl(movie) {
+  return `https://www.justwatch.com/in/search?q=${encodeURIComponent(movie.title + ' ' + (movie.year||''))}`;
+}
+
 function posterGrad(title) {
   const h=[...title].reduce((a,c)=>a+c.charCodeAt(0),0);
   return `linear-gradient(135deg,hsl(${h%360},15%,10%) 0%,hsl(${(h*7)%360},20%,16%) 100%)`;
@@ -969,9 +1107,10 @@ function posterGrad(title) {
 function computeTagWeights() {
   const w={};
   Object.values(state.movies).forEach(m => {
-    if (m.rating>0&&m.tags&&m.tags.length) {
+    const tags = m.plotTags || recommendationTags(m.tags);
+    if (m.rating>0&&tags&&tags.length) {
       const wt = m.rating-3;
-      m.tags.forEach(t => { w[t]=(w[t]||0)+wt; });
+      tags.forEach(t => { w[t]=(w[t]||0)+wt; });
     }
   });
   state.tagWeights=w;
@@ -980,11 +1119,12 @@ function computeTagWeights() {
 function scoreMovies() {
   computeTagWeights();
   return Object.values(state.movies)
-    .filter(m => m.rating===0&&m.tagged&&m.tags&&m.tags.length)
+    .filter(m => m.rating===0&&m.tagged&&((m.plotTags&&m.plotTags.length)||(m.tags&&m.tags.length)))
     .map(m => {
       let score=0, posOverlap=0, positiveScore=0, negativePenalty=0;
       const matched=new Set();
-      m.tags.forEach(t => {
+      const tags = m.plotTags || recommendationTags(m.tags);
+      tags.forEach(t => {
         const w=state.tagWeights[t];
         if (w>0) { positiveScore+=w; matched.add(t); posOverlap++; }
         else if (w<0) negativePenalty+=Math.abs(w)*0.5;
@@ -1031,6 +1171,67 @@ function toggleWatchlist(id, e) {
   showToast(m.watchlist?`Added "${m.title}" to watchlist`:`Removed "${m.title}" from watchlist`, m.watchlist?'success':'');
 }
 function skipMovie(id, e) { toggleWatchlist(id, e); }
+
+function tmdbToken() { return localStorage.getItem('cinelens_tmdb_token') || ''; }
+function tmdbUrl(path, params={}) {
+  const token = tmdbToken();
+  const qs = new URLSearchParams(params);
+  if (token && !token.startsWith('ey')) qs.set('api_key', token);
+  return `https://api.themoviedb.org/3${path}?${qs.toString()}`;
+}
+function tmdbHeaders() {
+  const token = tmdbToken();
+  return token && token.startsWith('ey') ? {Authorization:`Bearer ${token}`} : {};
+}
+async function tmdbFetch(path, params={}) {
+  const resp = await fetch(tmdbUrl(path, params), {headers: tmdbHeaders()});
+  if (!resp.ok) throw new Error('TMDB request failed');
+  return resp.json();
+}
+async function checkAvailability(id, e) {
+  if (e) e.stopPropagation();
+  const movie = state.movies[id];
+  if (!movie) return;
+  const token = tmdbToken();
+  if (!token) { window.open(justWatchUrl(movie), '_blank', 'noopener'); return; }
+  const el = document.getElementById('where-'+id);
+  if (el) el.textContent = 'checking...';
+  try {
+    await fetchAvailability(movie);
+    saveLocalState(); render();
+    showToast('Availability updated','success');
+  } catch(err) {
+    if (el) el.textContent = 'where: unavailable';
+    showToast('Availability lookup failed','error');
+  }
+}
+async function refreshVisibleAvailability() {
+  if (!tmdbToken()) { showToast('Add TMDB token first','error'); return; }
+  const visible = [...document.querySelectorAll('.movie-card')].map(el => state.movies[el.id.replace('card-','')]).filter(Boolean).slice(0,12);
+  for (const movie of visible) {
+    try { await fetchAvailability(movie); } catch(e) {}
+  }
+  saveLocalState(); render();
+  showToast('Checked visible titles','success');
+}
+async function fetchAvailability(movie) {
+  const country = state.settings.watchCountry || 'IN';
+  if (movie.availability?.countries?.[country]) return movie.availability;
+  const isTv = !!movie.format;
+  const searchPath = isTv ? '/search/tv' : '/search/movie';
+  const searchParams = isTv ? {query: movie.title, first_air_date_year: movie.year||''} : {query: movie.title, year: movie.year||''};
+  const search = await tmdbFetch(searchPath, searchParams);
+  const best = (search.results||[])[0];
+  if (!best) throw new Error('No TMDB match');
+  const id = best.id;
+  const providers = await tmdbFetch(isTv ? `/tv/${id}/watch/providers` : `/movie/${id}/watch/providers`);
+  movie.availability = movie.availability || {countries:{}};
+  movie.availability.tmdbId = id;
+  movie.availability.tmdbType = isTv ? 'tv' : 'movie';
+  movie.availability.countries[country] = providers.results?.[country] || {flatrate:[],free:[],ads:[],rent:[],buy:[]};
+  movie.availability.updatedAt = new Date().toISOString();
+  return movie.availability;
+}
 function retagMovie(id, e) {
   if (e) e.stopPropagation();
   const m = state.movies[id];
@@ -1081,6 +1282,7 @@ function runHousekeeping(manual=true) {
       const n=t.toLowerCase().trim().replace(/\s+/g,'-');
       return REMAP[n]||n;
     }))];
+    m.plotTags = recommendationTags(m.tags);
   });
   if (manual) showToast('Tags normalised', 'success');
   updateHKStatus('tags: '+countUniqueTags());
@@ -1171,7 +1373,7 @@ function updateMinYear(val) { document.getElementById('minYearVal').textContent=
 // PERSISTENCE
 // ─────────────────────────────────────────────
 function saveLocalState() {
-  try { localStorage.setItem('cinelens_v2',JSON.stringify({movies:state.movies,settings:state.settings,drive:{connected:state.drive.connected,folderId:state.drive.folderId,fileId:state.drive.fileId}})); } catch(e) {}
+  try { localStorage.setItem('cinelens_v2',JSON.stringify({movies:state.movies,settings:state.settings,rejectedWikiTitles:state.rejectedWikiTitles,drive:{connected:state.drive.connected,folderId:state.drive.folderId,fileId:state.drive.fileId}})); } catch(e) {}
   updateStats();
 }
 function loadLocalState() {
@@ -1181,6 +1383,7 @@ function loadLocalState() {
       const s=JSON.parse(raw);
       if (s.movies) state.movies=s.movies;
       if (s.settings) state.settings={...state.settings,...s.settings};
+      if (s.rejectedWikiTitles) state.rejectedWikiTitles=s.rejectedWikiTitles;
       if (s.drive) { state.drive.connected=false; state.drive.folderId=s.drive.folderId||''; state.drive.fileId=s.drive.fileId||''; }
       document.getElementById('topN').value=state.settings.topN;
       document.getElementById('topNVal').textContent=state.settings.topN;
@@ -1188,8 +1391,13 @@ function loadLocalState() {
       document.getElementById('batchVal').textContent=state.settings.batchSize;
       document.getElementById('minYear').value=state.settings.minYear;
       document.getElementById('minYearVal').textContent=state.settings.minYear;
+      document.getElementById('watchCountry').value=state.settings.watchCountry||'IN';
+      const t=localStorage.getItem('cinelens_tmdb_token'); if(t) document.getElementById('tmdbToken').value=t;
     }
   } catch(e) {}
+  Object.values(state.movies).forEach(m => {
+    if (m.tags && !m.plotTags) m.plotTags = recommendationTags(m.tags);
+  });
 }
 
 // ─────────────────────────────────────────────
