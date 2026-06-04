@@ -593,6 +593,9 @@ let state = {
   rejectedWikiTitles: {},
   poolFetched: false
 };
+const PERFECT_REC_TARGET = 5;
+const PERFECT_REC_MIN_RATIO = 0.995;
+
 
 // ─────────────────────────────────────────────
 // INIT
@@ -823,8 +826,9 @@ async function expandPool(manual=true) {
 
   let added = 0;
   let attempts = 0;
-  const target = manual ? 60 : 24;
-  const maxAttempts = Math.min(toFetch.length, manual ? 180 : 80);
+  const chasingPerfect = !manual && needsMorePerfectRecommendations();
+  const target = manual ? 60 : (chasingPerfect ? Number.POSITIVE_INFINITY : 24);
+  const maxAttempts = Math.min(toFetch.length, manual ? 180 : (chasingPerfect ? 500 : 80));
 
   for (let i = 0; i < maxAttempts && added < target; i++) {
     const title = toFetch[i];
@@ -836,11 +840,14 @@ async function expandPool(manual=true) {
         if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, mode)) {
           state.movies[movie.id] = movie;
           added++;
+          if (!manual && chasingPerfect && added % 5 === 0) render();
+          if (chasingPerfect && !needsMorePerfectRecommendations()) break;
         } else {
           state.rejectedWikiTitles[rejectKey(title, mode)] = true;
         }
       } else state.rejectedWikiTitles[rejectKey(title, mode)] = true;
     } catch(e) {}
+    if (chasingPerfect && !needsMorePerfectRecommendations()) break;
     if (i % 10 === 9) await sleep(300);
   }
 
@@ -1206,9 +1213,29 @@ function meetsYearCutoff(m) {
   return !m.year || m.year >= state.settings.minYear;
 }
 
+function personalizedEnough() {
+  return Object.values(state.movies).filter(m => m.rating > 0 && m.tagged).length >= 3;
+}
+
+function recommendationCandidates() {
+  return scoreMovies().filter(x => matchesTab(x.movie) && !x.movie.watchlist && meetsYearCutoff(x.movie) && matchesSelectedPlatforms(x.movie));
+}
+
+function perfectRecommendationCount(scored) {
+  if (!scored || !scored.length) return 0;
+  const maxScore = scored[0].score || 1;
+  return scored.filter(x => x.score / maxScore >= PERFECT_REC_MIN_RATIO).length;
+}
+
+function needsMorePerfectRecommendations(target=PERFECT_REC_TARGET) {
+  if (!personalizedEnough()) return false;
+  return perfectRecommendationCount(recommendationCandidates()) < target;
+}
+
 function maybeAutoExpandPool() {
   const available = discoveryPool().length;
-  if (available < 30 && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > 120000) {
+  const needsPerfect = needsMorePerfectRecommendations();
+  if ((available < 30 || needsPerfect) && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > 120000) {
     lastAutoExpandAt = Date.now();
     setTimeout(() => expandPool(false), 600);
   }
@@ -1221,18 +1248,29 @@ function renderRecs() {
   grid.innerHTML = '';
 
   if (ratedTagged.length >= 3) {
-    const scored = scoreMovies().filter(x => matchesTab(x.movie) && !x.movie.watchlist && meetsYearCutoff(x.movie) && matchesSelectedPlatforms(x.movie));
+    const scored = recommendationCandidates();
     const top = scored.slice(0, state.settings.topN);
+    const perfectCount = perfectRecommendationCount(scored);
+    if (perfectCount < PERFECT_REC_TARGET && !poolExpansionInProgress) {
+      lastAutoExpandAt = Date.now();
+      setTimeout(() => expandPool(false), 100);
+    }
     if (top.length) {
-      document.getElementById('recCount').textContent = `top ${top.length} matches`;
+      document.getElementById('recCount').textContent = perfectCount < PERFECT_REC_TARGET
+        ? `finding ${PERFECT_REC_TARGET} × 100% matches · showing best ${top.length}`
+        : `top ${top.length} matches`;
       top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, maxScore:scored[0]?.score||1 })));
       return;
     }
   }
 
   const batch = discoveryPool().slice(0, batchSize);
-  document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building matches · showing ${batch.length} unrated`;
-  if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expand the pool or switch tabs.</p></div>`; return; }
+  if (ratedTagged.length >= 3 && !poolExpansionInProgress) {
+    lastAutoExpandAt = Date.now();
+    setTimeout(() => expandPool(false), 100);
+  }
+  document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building 100% matches · showing ${batch.length} unrated`;
+  if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expanding the pool in the background.</p></div>`; return; }
   batch.forEach(m => grid.appendChild(buildCard(m, {})));
 }
 
