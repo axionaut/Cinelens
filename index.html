@@ -329,6 +329,23 @@
     .card-body{padding:10px}
     .card-title{font-size:13px;padding-right:42px}
   }
+
+
+  /* CONTROL ROW SPACING FIX */
+  .control-deck{display:flex;flex-direction:column;gap:14px}
+  .settings-bar{margin:0!important;row-gap:12px;column-gap:14px;align-items:center}
+  .platform-bar{margin:0!important;gap:10px 12px;align-items:center;min-height:30px}
+  .availability-row{padding-top:2px}
+  .manual-add-row{padding-top:12px;border-top:1px solid rgba(255,204,51,.12)}
+  .manual-title-input{width:min(360px,42vw)}
+  @media(max-width:768px){
+    .control-deck{gap:12px}
+    .settings-bar{gap:10px 12px}
+    .platform-bar{gap:9px 10px}
+    .manual-add-row{padding-top:10px}
+    .manual-title-input{width:100%;flex:1 1 100%}
+    .manual-add-row .platform-btn{width:100%;justify-content:center}
+  }
 </style>
 </head>
 <body>
@@ -393,7 +410,7 @@
     <span id="hkStatus" style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace">tags: 0</span>
   </div>
 
-  <div class="platform-bar">
+  <div class="platform-bar availability-row">
     <span class="platform-label">Country</span>
     <select class="platform-select" id="watchCountry" onchange="updateWatchCountry(this.value)">
       <option value="IN">India</option>
@@ -401,12 +418,12 @@
       <option value="GB">United Kingdom</option>
     </select>
     <input class="tmdb-token" id="tmdbToken" type="password" placeholder="free TMDB token/key" onchange="saveTmdbToken(this.value)">
-    <button class="platform-btn" onclick="refreshVisibleAvailability()">check visible</button>
+    <button class="platform-btn" onclick="refreshVisibleAvailability()">Check Availability</button>
     <span class="platform-label">Services</span>
     <span id="platformBar"></span>
   </div>
 
-  <div class="platform-bar">
+  <div class="platform-bar manual-add-row">
     <span class="platform-label">Add Title</span>
     <input class="manual-title-input" id="manualTitle" type="text" placeholder="type exact movie/show title" onkeydown="handleManualTitleKey(event)">
     <button class="platform-btn" onclick="addManualTitle()" id="manualAddBtn">add from Wikipedia</button>
@@ -631,6 +648,7 @@ let lastAutoExpandAt = 0;
 let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
+const CARD_REFRESH_BATCH_SIZE = 20;
 const OTT_PLATFORMS = ['Netflix','Prime Video','Hotstar','JioCinema','SonyLIV','ZEE5','Apple TV+','YouTube'];
 const PROVIDER_ALIASES = {
   'Prime Video':['Prime Video','Amazon Prime Video'],
@@ -1024,7 +1042,7 @@ async function expandPool(manual=true) {
             added++;
             runHousekeeping(false);
             saveLocalState();
-            render();
+            if (added % CARD_REFRESH_BATCH_SIZE === 0 || !needsMorePerfectRecommendations()) render();
             if (!needsMorePerfectRecommendations() && !manual) { fetchAbortRequested = true; break; }
           } else {
             recordRejectedTitle(title, mode, 'language/year/type mismatch');
