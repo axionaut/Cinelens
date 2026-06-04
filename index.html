@@ -714,7 +714,7 @@ let state = {
 let pendingManualRatingId = '';
 const PERFECT_REC_TARGET = 5;
 const PERFECT_REC_MIN_RATIO = 0.995;
-const MIN_PLOT_TAGS = 20;
+const MIN_PLOT_TAGS = 0;
 const LOW_CONFIDENCE_PLOT_TAGS = new Set([
   'protagonist-driven','conflict-driven','character-driven','plot-driven','dramatic-stakes',
   'goal-oriented-plot','relationship-conflict','moral-choice','escalating-conflict','personal-cost',
@@ -726,12 +726,56 @@ const LOW_CONFIDENCE_PLOT_TAGS = new Set([
   'investigation-thread','personal-history','opposition-force','moral-pressure','resolution-driven'
 ]);
 
+const CONTAMINATED_FALLBACK_TAGS = new Set([...LOW_CONFIDENCE_PLOT_TAGS]);
+
+function normaliseTagName(tag) {
+  return String(tag || '').toLowerCase().trim().replace(/\s+/g, '-');
+}
+
+function cleanTagArray(tags, movie=null, keepLowConfidence=false) {
+  return [...new Set((tags || [])
+    .map(normaliseTagName)
+    .filter(Boolean)
+    .filter(t => keepLowConfidence || !CONTAMINATED_FALLBACK_TAGS.has(t))
+    .filter(t => !movie || tagEvidenceOk(t, movie))
+  )];
+}
+
+function cleanContaminatedTags(silent=true) {
+  let changed = 0;
+  Object.values(state.movies || {}).forEach(m => {
+    const before = JSON.stringify({ tags:m.tags || [], coreTags:m.coreTags || [], plotTags:m.plotTags || [] });
+    if (SEED_TAGS[m.id]) {
+      m.tags = cleanTagArray(SEED_TAGS[m.id], m, false);
+      m.coreTags = cleanTagArray(recommendationTags(m.tags), m, false);
+      m.plotTags = [];
+    } else if (m.source === 'wikipedia' && m.storyText) {
+      const derived = cleanTagArray(deriveTagsFromText(m.storyText || '', m), m, false);
+      m.tags = cleanTagArray(derived, m, false);
+      m.coreTags = cleanTagArray(recommendationTags(m.tags), m, false);
+      m.plotTags = cleanTagArray(m.tags.filter(t => !isMetaTag(t)), m, false);
+    } else {
+      m.tags = cleanTagArray(m.tags || [], m, false);
+      m.coreTags = cleanTagArray(m.coreTags && m.coreTags.length ? m.coreTags : recommendationTags(m.tags), m, false);
+      m.plotTags = [];
+    }
+    m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length);
+    const after = JSON.stringify({ tags:m.tags || [], coreTags:m.coreTags || [], plotTags:m.plotTags || [] });
+    if (before !== after) changed++;
+  });
+  computeTagWeights();
+  if (changed) saveLocalState();
+  if (changed && !silent) showToast(`Cleaned tags on ${changed} titles`, 'success');
+  return changed;
+}
+
 
 // ─────────────────────────────────────────────
 // INIT
 // ─────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
   loadLocalState();
+  cleanContaminatedTags(true);
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   seedPool();        // always ensure seed movies are present
   render();
@@ -815,25 +859,22 @@ function seedPool() {
   let added = 0;
   let hydrated = 0;
   SEED.forEach(m => {
+    const seedTags = cleanTagArray(SEED_TAGS[m.id] || [], m, false);
+    const seedCoreTags = cleanTagArray(recommendationTags(seedTags), m, false);
     if (!state.movies[m.id]) {
-      const tags = SEED_TAGS[m.id] || [];
-      const coreTags = recommendationTags(tags);
-      const plotTags = ensureMinimumPlotTags(coreTags, '', m);
-      state.movies[m.id] = { ...m, tags: [...new Set([...tags, ...plotTags])], coreTags, plotTags, rating: 0, tagged: tags.length > 0, source: 'seed' };
+      state.movies[m.id] = { ...m, tags: seedTags, coreTags: seedCoreTags, plotTags: [], rating: 0, tagged: seedTags.length > 0, source: 'seed' };
       added++;
-    } else if ((!state.movies[m.id].tags || !state.movies[m.id].tags.length) && SEED_TAGS[m.id]) {
-      state.movies[m.id].tags = SEED_TAGS[m.id];
-      state.movies[m.id].coreTags = recommendationTags(SEED_TAGS[m.id]);
-      state.movies[m.id].plotTags = ensureMinimumPlotTags(state.movies[m.id].coreTags, '', state.movies[m.id]);
-      state.movies[m.id].tags = [...new Set([...(state.movies[m.id].tags || []), ...state.movies[m.id].plotTags])];
+    } else if ((!state.movies[m.id].tags || !state.movies[m.id].tags.length) && seedTags.length) {
+      state.movies[m.id].tags = seedTags;
+      state.movies[m.id].coreTags = seedCoreTags;
+      state.movies[m.id].plotTags = [];
       state.movies[m.id].tagged = true;
       state.movies[m.id].source = state.movies[m.id].source || 'seed';
       hydrated++;
-    } else if (state.movies[m.id].tags && !state.movies[m.id].plotTags) {
-      state.movies[m.id].coreTags = recommendationTags(state.movies[m.id].tags);
-      state.movies[m.id].plotTags = ensureMinimumPlotTags(state.movies[m.id].coreTags, '', state.movies[m.id]);
-      state.movies[m.id].tags = [...new Set([...(state.movies[m.id].tags || []), ...state.movies[m.id].plotTags])];
-      hydrated++;
+    } else {
+      state.movies[m.id].tags = cleanTagArray(state.movies[m.id].tags || seedTags, state.movies[m.id], false);
+      state.movies[m.id].coreTags = cleanTagArray(state.movies[m.id].coreTags && state.movies[m.id].coreTags.length ? state.movies[m.id].coreTags : recommendationTags(state.movies[m.id].tags), state.movies[m.id], false);
+      state.movies[m.id].plotTags = [];
     }
   });
   if (added || hydrated) saveLocalState();
@@ -1278,11 +1319,11 @@ async function fetchWikiMovie(wikiTitle, mode='all') {
 
   if (!year || !title) return null;
 
-  const meta = { title, year, language, country, format, director, categories: cats, categoryText: catText, leadText, pageTitle, wikiTitle };
-  const rawTags = deriveTagsFromText(storyText, meta);
-  const coreTags = recommendationTags(rawTags).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t));
-  const plotTags = ensureMinimumPlotTags(rawTags, storyText, meta);
-  const tags = [...new Set([...rawTags, ...plotTags])];
+  const meta = { title, year, language, country, format, director, categories: cats, categoryText: catText, leadText, pageTitle, wikiTitle, source: 'wikipedia', storyText };
+  const rawTags = cleanTagArray(deriveTagsFromText(storyText, meta), meta, false);
+  const coreTags = cleanTagArray(recommendationTags(rawTags), meta, false);
+  const plotTags = cleanTagArray(ensureMinimumPlotTags(rawTags, storyText, meta), meta, false);
+  const tags = cleanTagArray([...rawTags, ...coreTags, ...plotTags], meta, false);
   if (coreTags.length < 2) return null;
 
   return { id, title, year, director, language, country, format: format||null, tags, coreTags, plotTags, tagged: true, rating: 0, source: 'wikipedia', wikiTitle: pageTitle, pageTitle, storyText, leadText };
@@ -1446,42 +1487,7 @@ function deriveTagsFromText(text, meta) {
 }
 
 function ensureMinimumPlotTags(coreTags, text, meta={}) {
-  const out = new Set((coreTags || []).filter(t => !isMetaTag(t)));
-  const t = `${meta.leadText || ''} ${text || ''}`.toLowerCase();
-  const addWhen = (tag, rx) => { if (rx.test(t)) out.add(tag); };
-
-  addWhen('central-conflict', /\b(conflict|opposes|against|threat|rival|case|mission|problem)\b/);
-  addWhen('main-character-goal', /\b(tries to|attempts to|sets out|seeks to|must|plans to|wants to)\b/);
-  addWhen('character-relationships', /\b(family|friend|wife|husband|son|daughter|partner|lover|mentor)\b/);
-  addWhen('narrative-stakes', /\b(danger|risk|threat|death|murder|survive|save|protect)\b/);
-  addWhen('decision-pressure', /\b(choice|decide|decision|forced to|must choose)\b/);
-  addWhen('setting-driven', /\b(city|village|town|country|school|office|prison|court|space|war)\b/);
-  addWhen('identity-pressure', /\b(identity|secret|double life|mistaken|memory|truth)\b/);
-  addWhen('authority-conflict', /\b(police|government|judge|army|boss|king|system|authority)\b/);
-  addWhen('danger-driven', /\b(chase|attack|kidnap|murder|killer|escape|battle)\b/);
-  addWhen('emotional-pressure', /\b(love|grief|fear|guilt|anger|trauma|loss)\b/);
-  addWhen('social-pressure', /\b(class|caste|community|society|racism|poverty|wealth)\b/);
-  addWhen('professional-pressure', /\b(job|career|business|mission|case|reporter|doctor|lawyer|police)\b/);
-  addWhen('family-pressure', /\b(family|father|mother|son|daughter|brother|sister|marriage)\b/);
-  addWhen('survival-pressure', /\b(survival|stranded|trapped|escape|danger|life-threatening)\b/);
-  addWhen('hidden-information', /\b(secret|hidden|reveals|discovers|truth|clue|mystery)\b/);
-  addWhen('investigation-thread', /\b(investigation|detective|case|clue|suspect|evidence)\b/);
-  addWhen('personal-history', /\b(past|childhood|memory|backstory|former|years earlier)\b/);
-  addWhen('opposition-force', /\b(villain|antagonist|rival|enemy|gang|killer|corrupt)\b/);
-  addWhen('moral-pressure', /\b(moral|ethical|justice|conscience|guilt|right thing)\b/);
-  addWhen('resolution-driven', /\b(finally|eventually|ending|climax|confronts|defeats|solves)\b/);
-
-  const fallback = [
-    'central-conflict','main-character-goal','character-relationships','narrative-stakes','decision-pressure',
-    'setting-driven','identity-pressure','authority-conflict','danger-driven','emotional-pressure',
-    'social-pressure','professional-pressure','family-pressure','survival-pressure','hidden-information',
-    'investigation-thread','personal-history','opposition-force','moral-pressure','resolution-driven'
-  ];
-  for (const tag of fallback) {
-    if (out.size >= MIN_PLOT_TAGS) break;
-    out.add(tag);
-  }
-  return [...out].slice(0, Math.max(MIN_PLOT_TAGS, out.size));
+  return cleanTagArray(coreTags || [], meta, false).filter(t => !isMetaTag(t));
 }
 
 function tagEvidenceOk(tag, movie) {
@@ -1595,25 +1601,21 @@ const SEED_TAGS = {
 };
 
 function tagMovie(movie) {
-  // Use hardcoded tags for seed movies, derived tags for wiki movies
   if (SEED_TAGS[movie.id]) {
-    movie.tags = SEED_TAGS[movie.id];
-    movie.coreTags = recommendationTags(movie.tags);
-    movie.plotTags = ensureMinimumPlotTags(movie.coreTags, '', movie);
-    movie.tags = [...new Set([...(movie.tags || []), ...movie.plotTags])];
-  } else if (movie.source === 'wikipedia' && movie.tags && movie.tags.length > 0) {
-    // Already tagged during fetch — housekeeping will normalise
-    movie.coreTags = movie.coreTags && movie.coreTags.length ? movie.coreTags.filter(t => tagEvidenceOk(t, movie)) : recommendationTags(movie.tags).filter(t => tagEvidenceOk(t, movie));
-    movie.plotTags = ensureMinimumPlotTags(movie.coreTags, movie.storyText || '', movie);
-    movie.tags = [...new Set([...(movie.tags || []).filter(t => tagEvidenceOk(t, movie)), ...movie.plotTags])];
+    movie.tags = cleanTagArray(SEED_TAGS[movie.id], movie, false);
+    movie.coreTags = cleanTagArray(recommendationTags(movie.tags), movie, false);
+    movie.plotTags = [];
+  } else if (movie.source === 'wikipedia' && movie.storyText) {
+    const rawTags = cleanTagArray(deriveTagsFromText(movie.storyText || '', movie), movie, false);
+    movie.coreTags = cleanTagArray(recommendationTags(rawTags), movie, false);
+    movie.plotTags = cleanTagArray(ensureMinimumPlotTags(rawTags, movie.storyText || '', movie), movie, false);
+    movie.tags = cleanTagArray([...rawTags, ...movie.coreTags, ...movie.plotTags], movie, false);
   } else {
-    // Fallback: basic meta tags
-    movie.tags = deriveTagsFromText('', movie);
-    movie.coreTags = recommendationTags(movie.tags);
-    movie.plotTags = ensureMinimumPlotTags(movie.coreTags, '', movie);
-    movie.tags = [...new Set([...(movie.tags || []), ...movie.plotTags])];
+    movie.tags = cleanTagArray(deriveTagsFromText('', movie), movie, false);
+    movie.coreTags = cleanTagArray(recommendationTags(movie.tags), movie, false);
+    movie.plotTags = [];
   }
-  movie.tagged = true;
+  movie.tagged = !!((movie.tags && movie.tags.length) || (movie.coreTags && movie.coreTags.length));
   const card = document.getElementById('card-' + movie.id);
   const tagsEl = document.getElementById('tags-' + movie.id);
   if (tagsEl) tagsEl.innerHTML = renderTagChips(movie.tags, new Set(), false);
@@ -2164,25 +2166,31 @@ function runHousekeeping(manual=true) {
     'sci-fi':'science-fiction','scifi':'science-fiction',
     'bollywood':'hindi-language','indian-cinema':'india-setting',
   };
+  const remap = tags => cleanTagArray((tags || []).map(t => REMAP[normaliseTagName(t)] || normaliseTagName(t)), null, false);
   Object.values(state.movies).forEach(m => {
-    if (!m.tags) return;
-    m.tags = [...new Set(m.tags.map(t => {
-      const n=t.toLowerCase().trim().replace(/\s+/g,'-');
-      return REMAP[n]||n;
-    }))];
-    m.coreTags = [...new Set(((m.coreTags && m.coreTags.length ? m.coreTags : recommendationTags(m.tags)).map(t => {
-      const n=t.toLowerCase().trim().replace(/\s+/g,'-');
-      return REMAP[n]||n;
-    })).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)).filter(t => tagEvidenceOk(t, m)))];
-    m.tags = [...new Set((m.tags || []).filter(t => tagEvidenceOk(t, m)))];
-    m.plotTags = ensureMinimumPlotTags(m.plotTags && m.plotTags.length >= MIN_PLOT_TAGS ? m.plotTags.filter(t => tagEvidenceOk(t, m)) : m.coreTags, m.storyText || '', m);
-    m.tags = [...new Set([...m.tags, ...m.plotTags])];
+    const existing = remap(m.tags || []);
+    if (m.source === 'wikipedia' && m.storyText) {
+      const derived = cleanTagArray(deriveTagsFromText(m.storyText || '', m), m, false).map(t => REMAP[t] || t);
+      m.tags = cleanTagArray([...derived, ...existing.filter(isMetaTag)], m, false);
+      m.coreTags = cleanTagArray(recommendationTags(m.tags), m, false);
+      m.plotTags = cleanTagArray(m.tags.filter(t => !isMetaTag(t)), m, false);
+    } else {
+      m.tags = cleanTagArray(existing, m, false);
+      m.coreTags = cleanTagArray(recommendationTags(m.tags), m, false);
+      m.plotTags = [];
+    }
+    m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length);
   });
-  if (manual) showToast('Tags normalised', 'success');
+  computeTagWeights();
+  if (manual) {
+    saveLocalState();
+    syncDrive();
+    showToast('Tags cleaned', 'success');
+  }
   updateHKStatus('tags: '+countUniqueTags());
 }
 
-function countUniqueTags() { const s=new Set(); Object.values(state.movies).forEach(m=>(m.tags||[]).forEach(t=>s.add(t))); return s.size; }
+function countUniqueTags() { const s=new Set(); Object.values(state.movies).forEach(m=>scoringTags(m).forEach(t=>s.add(t))); return s.size; }
 function updateHKStatus(msg) { document.getElementById('hkStatus').textContent=msg; }
 
 // ─────────────────────────────────────────────
@@ -2200,8 +2208,8 @@ function renderTagBrain() {
   const countEl=document.getElementById('tagBrainCount');
   const map={};
   Object.values(state.movies).forEach(m => {
-    if (!m.tagged||!m.tags) return;
-    m.tags.forEach(tag => {
+    if (!m.tagged) return;
+    scoringTags(m).forEach(tag => {
       if (!map[tag]) map[tag]={weight:state.tagWeights[tag]||0,movieCount:0,movies:[]};
       map[tag].movieCount++; map[tag].movies.push(m);
     });
@@ -2223,7 +2231,7 @@ function renderTagBrain() {
 function openTagPanel(tag) {
   computeTagWeights();
   document.getElementById('tagPanelName').textContent=tag;
-  const movies=Object.values(state.movies).filter(m=>m.tagged&&m.tags&&m.tags.includes(tag));
+  const movies=Object.values(state.movies).filter(m=>m.tagged&&scoringTags(m).includes(tag));
   const weight=state.tagWeights[tag]||0;
   const ws=weight>0?`+${weight} (you like this)`:weight<0?`${weight} (you dislike this)`:'~ unweighted';
   document.getElementById('tagPanelStat').innerHTML=`weight: <span style="color:var(--accent)">${ws}</span> · ${movies.length} titles`;
@@ -2309,12 +2317,10 @@ function loadLocalState() {
     }
   } catch(e) {}
   Object.values(state.movies).forEach(m => {
-    if (m.tags && !m.coreTags) m.coreTags = recommendationTags(m.tags).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)).filter(t => tagEvidenceOk(t, m));
-    if (m.coreTags) m.coreTags = m.coreTags.filter(t => tagEvidenceOk(t, m));
-    if (m.tags) m.tags = m.tags.filter(t => tagEvidenceOk(t, m));
-    if (m.tags && (!m.plotTags || m.plotTags.length < MIN_PLOT_TAGS)) m.plotTags = ensureMinimumPlotTags(m.coreTags || recommendationTags(m.tags), m.storyText || '', m);
-    if (m.plotTags) m.plotTags = m.plotTags.filter(t => tagEvidenceOk(t, m));
-    if (m.tags && m.plotTags) m.tags = [...new Set([...m.tags, ...m.plotTags])];
+    m.tags = cleanTagArray(m.tags || [], m, false);
+    m.coreTags = cleanTagArray(m.coreTags && m.coreTags.length ? m.coreTags : recommendationTags(m.tags), m, false);
+    m.plotTags = cleanTagArray(m.plotTags || [], m, false);
+    m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length);
   });
 }
 
@@ -2549,9 +2555,11 @@ async function loadFromDrive() {
     const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media`);
     if (!resp.ok) throw new Error('Drive load failed');
     const d=await resp.json();
-    if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};if(d.rejectedWikiTitles)state.rejectedWikiTitles=d.rejectedWikiTitles;state.settings.platforms=state.settings.platforms||[];state.settings.watchCountry=state.settings.watchCountry||'IN';saveLocalState();render();showToast('Loaded from Drive','success');}
+    let cleaned = 0;
+    if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};if(d.rejectedWikiTitles)state.rejectedWikiTitles=d.rejectedWikiTitles;state.settings.platforms=state.settings.platforms||[];state.settings.watchCountry=state.settings.watchCountry||'IN';cleaned=cleanContaminatedTags(true);saveLocalState();render();showToast('Loaded from Drive','success');}
     state.drive.connected=true;
     setDriveStatus('connected');
+    if (cleaned) await syncDrive(false);
   } catch(e){
     state.drive.connected=false;
     setDriveStatus('');
