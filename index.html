@@ -661,7 +661,7 @@ let state = {
   movies: {},
   tagWeights: {},
   settings: { topN: 10, batchSize: 12, minYear: 1970, watchCountry: 'IN', platforms: ['Netflix','Prime Video','Hotstar'] },
-  drive: { connected: false, accessToken: '', folderId: '', fileId: '' },
+  drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
   rejectedWikiTitles: {},
   poolFetched: false
 };
@@ -683,6 +683,7 @@ window.addEventListener('DOMContentLoaded', () => {
   loadLocalState();
   seedPool();        // always ensure seed movies are present
   render();
+  restoreDriveSession();
   // Auto-expand if pool is small
   if (Object.keys(state.movies).length < 50) {
     setTimeout(() => expandPool(false), 800);
@@ -2060,7 +2061,19 @@ function updateMinYear(val) { document.getElementById('minYearVal').textContent=
 // PERSISTENCE
 // ─────────────────────────────────────────────
 function saveLocalState() {
-  try { localStorage.setItem('cinelens_v2',JSON.stringify({movies:state.movies,settings:state.settings,rejectedWikiTitles:state.rejectedWikiTitles,drive:{connected:state.drive.connected,folderId:state.drive.folderId,fileId:state.drive.fileId}})); } catch(e) {}
+  try {
+    localStorage.setItem('cinelens_v2',JSON.stringify({
+      movies:state.movies,
+      settings:state.settings,
+      rejectedWikiTitles:state.rejectedWikiTitles,
+      drive:{
+        enabled:state.drive.enabled,
+        folderId:state.drive.folderId,
+        fileId:state.drive.fileId,
+        lastConnectedAt:state.drive.lastConnectedAt
+      }
+    }));
+  } catch(e) {}
   updateStats();
 }
 function loadLocalState() {
@@ -2071,7 +2084,14 @@ function loadLocalState() {
       if (s.movies) state.movies=s.movies;
       if (s.settings) state.settings={...state.settings,...s.settings};
       if (s.rejectedWikiTitles) state.rejectedWikiTitles=s.rejectedWikiTitles;
-      if (s.drive) { state.drive.connected=false; state.drive.folderId=s.drive.folderId||''; state.drive.fileId=s.drive.fileId||''; }
+      if (s.drive) {
+        state.drive.connected=false;
+        state.drive.enabled=!!s.drive.enabled || !!s.drive.fileId;
+        state.drive.folderId=s.drive.folderId||'';
+        state.drive.fileId=s.drive.fileId||'';
+        state.drive.lastConnectedAt=s.drive.lastConnectedAt||0;
+      }
+      state.drive.accessToken=sessionStorage.getItem('cinelens_drive_token')||'';
       document.getElementById('topN').value=state.settings.topN;
       document.getElementById('topNVal').textContent=state.settings.topN;
       document.getElementById('batchSize').value=state.settings.batchSize;
@@ -2096,24 +2116,58 @@ const DRIVE_FILE='cinelens_data.json';
 const GOOGLE_CLIENT_ID='984899607223-h5oadg1cfb7o7ksfb4400vhidknk9soc.apps.googleusercontent.com';
 const DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
 let driveTokenClient=null;
+let driveRestoreInProgress=false;
 
 function openDriveModal() { connectDrive(); }
 function skipDrive() { showToast('Using local storage',''); }
+
 async function connectDrive() {
   if (!GOOGLE_CLIENT_ID) { showToast('Missing Google client ID','error'); return; }
   setDriveStatus('syncing');
   try {
-    await requestDriveToken();
+    await requestDriveToken('consent');
+    state.drive.enabled=true;
     const fileId=state.drive.fileId||await findDriveFile();
     if (fileId) { state.drive.fileId=fileId; await loadFromDrive(); }
     else await createDriveFile();
-    state.drive.connected=true; saveLocalState(); setDriveStatus('connected'); render();
+    state.drive.connected=true;
+    state.drive.lastConnectedAt=Date.now();
+    saveLocalState();
+    setDriveStatus('connected');
+    render();
     showToast('Drive connected','success');
   } catch(e) {
     console.error('Drive sign-in failed', e);
-    state.drive.connected=false; setDriveStatus(''); showToast(driveErrorMessage(e),'error');
+    state.drive.connected=false;
+    setDriveStatus('');
+    showToast(driveErrorMessage(e),'error');
   }
 }
+
+async function restoreDriveSession(showFailure=false) {
+  if (driveRestoreInProgress) return;
+  if (!state.drive.enabled || (!state.drive.fileId && !state.drive.accessToken)) return;
+  driveRestoreInProgress=true;
+  setDriveStatus('syncing');
+  try {
+    await requestDriveToken('');
+    if (!state.drive.fileId) state.drive.fileId=await findDriveFile();
+    if (state.drive.fileId) await loadFromDrive();
+    state.drive.connected=true;
+    state.drive.lastConnectedAt=Date.now();
+    saveLocalState();
+    setDriveStatus('connected');
+  } catch(e) {
+    state.drive.connected=false;
+    state.drive.accessToken='';
+    sessionStorage.removeItem('cinelens_drive_token');
+    setDriveStatus('');
+    if (showFailure) showToast('Drive reconnect needed','error');
+  } finally {
+    driveRestoreInProgress=false;
+  }
+}
+
 function setDriveStatus(s) { document.getElementById('driveDot').className='drive-dot '+s; document.getElementById('driveLabel').textContent=s==='connected'?'drive connected':s==='syncing'?'syncing...':'not connected'; }
 function driveErrorMessage(e) {
   const code = e?.error || e?.message || 'unknown';
@@ -2121,6 +2175,7 @@ function driveErrorMessage(e) {
   if (code === 'popup_failed_to_open') return 'Allow popups for Drive sign-in';
   if (code === 'access_denied') return 'Drive access was denied';
   if (code === 'idpiframe_initialization_failed') return 'Google sign-in blocked by browser settings';
+  if (code === 'interaction_required') return 'Click Drive once to reconnect';
   return `Drive sign-in failed: ${code}`;
 }
 async function waitForGoogleIdentity() {
@@ -2132,6 +2187,8 @@ async function waitForGoogleIdentity() {
 }
 async function requestDriveToken(prompt='consent') {
   if (state.drive.accessToken) return state.drive.accessToken;
+  const stored=sessionStorage.getItem('cinelens_drive_token');
+  if (stored) { state.drive.accessToken=stored; return stored; }
   await waitForGoogleIdentity();
   if (!driveTokenClient) {
     driveTokenClient=google.accounts.oauth2.initTokenClient({
@@ -2144,20 +2201,25 @@ async function requestDriveToken(prompt='consent') {
     driveTokenClient.callback = resp => {
       if (resp.error) { reject(resp); return; }
       state.drive.accessToken=resp.access_token;
+      sessionStorage.setItem('cinelens_drive_token', resp.access_token);
       resolve(resp.access_token);
     };
     try { driveTokenClient.requestAccessToken({prompt}); }
     catch(e) { reject(e); }
   });
 }
+function clearDriveToken() {
+  state.drive.accessToken='';
+  sessionStorage.removeItem('cinelens_drive_token');
+}
 function driveHeaders(extra={}) { return {...extra, Authorization:`Bearer ${state.drive.accessToken}`}; }
 async function driveFetch(url, opts={}) {
   if (!state.drive.accessToken) await requestDriveToken('');
-  const resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
+  let resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
   if (resp.status===401) {
-    state.drive.accessToken='';
+    clearDriveToken();
     await requestDriveToken('');
-    return fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
+    resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
   }
   return resp;
 }
@@ -2177,8 +2239,13 @@ async function loadFromDrive() {
     if (!resp.ok) throw new Error('Drive load failed');
     const d=await resp.json();
     if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};if(d.rejectedWikiTitles)state.rejectedWikiTitles=d.rejectedWikiTitles;state.settings.platforms=state.settings.platforms||[];state.settings.watchCountry=state.settings.watchCountry||'IN';saveLocalState();render();showToast('Loaded from Drive','success');}
+    state.drive.connected=true;
     setDriveStatus('connected');
-  } catch(e){setDriveStatus('connected');}
+  } catch(e){
+    state.drive.connected=false;
+    setDriveStatus('');
+    throw e;
+  }
 }
 async function createDriveFile() {
   if(!state.drive.accessToken)return;
@@ -2194,14 +2261,20 @@ async function createDriveFile() {
   } catch(e){showToast('Drive file create failed','error');}
 }
 async function syncDrive(manual=false) {
-  if(!state.drive.connected&&!state.drive.accessToken){ if(manual) await connectDrive(); return; }
+  if(!state.drive.connected&&!state.drive.accessToken){
+    if(state.drive.enabled) await restoreDriveSession(manual);
+    if(!state.drive.connected&&!state.drive.accessToken){ if(manual) await connectDrive(); return; }
+  }
   if(!state.drive.fileId){await createDriveFile(); if(!state.drive.fileId)return;}
   setDriveStatus('syncing');
   try {
     const resp=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${state.drive.fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({movies:state.movies,settings:state.settings,rejectedWikiTitles:state.rejectedWikiTitles})});
     if (!resp.ok) throw new Error('Drive sync failed');
+    state.drive.connected=true;
+    state.drive.lastConnectedAt=Date.now();
+    saveLocalState();
     setDriveStatus('connected'); showToast('Synced to Drive','success');
-  } catch(e){setDriveStatus('connected'); showToast('Drive sync failed','error');}
+  } catch(e){state.drive.connected=false; setDriveStatus(''); showToast('Drive sync failed','error');}
 }
 
 // ─────────────────────────────────────────────
