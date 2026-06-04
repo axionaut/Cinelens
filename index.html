@@ -61,8 +61,9 @@
   .platform-btn{padding:4px 8px;border-radius:3px;font-size:10px;font-family:'DM Mono',monospace;border:1px solid var(--border);background:rgba(36,28,23,.72);color:var(--muted);cursor:pointer;transition:all .15s}
   .platform-btn.active{border-color:var(--accent2);color:var(--accent);background:rgba(242,193,78,.08)}
   .platform-btn:hover{border-color:var(--muted2);color:var(--text)}
-  .platform-select,.tmdb-token{background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:'DM Mono',monospace;font-size:10px;padding:4px 7px;outline:none}
+  .platform-select,.tmdb-token,.manual-title-input{background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:'DM Mono',monospace;font-size:10px;padding:4px 7px;outline:none}
   .tmdb-token{width:170px}
+  .manual-title-input{width:220px}
   .where-line{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px;font-family:'DM Mono',monospace;font-size:9px;color:var(--muted)}
   .where-chip{border:1px solid var(--tag-border);background:rgba(255,255,255,.03);border-radius:3px;padding:2px 5px}
   .where-chip.selected{border-color:var(--accent2);color:var(--accent);background:rgba(242,193,78,.07)}
@@ -184,7 +185,7 @@
   .settings-bar label{color:#d3bca4;font-size:11px}
   .settings-bar input[type=range]{width:112px}
   .platform-bar{margin:0;gap:8px}
-  .platform-btn,.platform-select,.tmdb-token,.btn{border-color:rgba(242,193,78,.14);background:rgba(255,255,255,.045);border-radius:5px}
+  .platform-btn,.platform-select,.tmdb-token,.manual-title-input,.btn{border-color:rgba(242,193,78,.14);background:rgba(255,255,255,.045);border-radius:5px}
   .platform-btn.active,.tab-btn.active{background:#ffd05a;color:#17100b;border-color:#ffd05a}
   .tab-bar{background:rgba(255,255,255,.055);border-color:rgba(242,193,78,.14);border-radius:6px}
   .tab-btn{padding:5px 12px;border-radius:4px}
@@ -269,7 +270,7 @@
   .stats-bar{border-bottom-color:rgba(255,204,51,.13);gap:34px}
   .stat-val{color:var(--accent)}
   .settings-bar label,.platform-label,.section-count,.stat-label{color:var(--muted)}
-  .platform-btn,.platform-select,.tmdb-token,.btn,.tab-bar{background:rgba(255,255,255,.045);border-color:rgba(255,204,51,.16);color:var(--text)}
+  .platform-btn,.platform-select,.tmdb-token,.manual-title-input,.btn,.tab-bar{background:rgba(255,255,255,.045);border-color:rgba(255,204,51,.16);color:var(--text)}
   .platform-btn.active,.tab-btn.active{background:var(--accent);border-color:var(--accent);color:#15100a}
   .btn-warning{background:var(--accent);border-color:var(--accent);color:#15100a}
   .btn-warning:hover{background:var(--accent2);border-color:var(--accent2);color:#fff}
@@ -387,6 +388,12 @@
     <button class="platform-btn" onclick="refreshVisibleAvailability()">check visible</button>
     <span class="platform-label">Services</span>
     <span id="platformBar"></span>
+  </div>
+
+  <div class="platform-bar">
+    <span class="platform-label">Add Title</span>
+    <input class="manual-title-input" id="manualTitle" type="text" placeholder="type exact movie/show title" onkeydown="handleManualTitleKey(event)">
+    <button class="platform-btn" onclick="addManualTitle()" id="manualAddBtn">add from Wikipedia</button>
   </div>
   </div>
 
@@ -785,6 +792,18 @@ async function fetchShowSourceTitles() {
   return [...new Set(titles)];
 }
 
+async function fetchWikiSearchTitles(query) {
+  const q = (query || '').trim();
+  if (!q) return [];
+  try {
+    const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&srlimit=8&format=json&origin=*`;
+    const data = await (await fetch(url)).json();
+    return (data.query?.search || []).map(item => item.title);
+  } catch(e) {
+    return [];
+  }
+}
+
 async function fetchWikiSourceTitles(mode, pagesPerCategory=4) {
   const titles = [];
   for (const category of sourceCategoriesForMode(mode)) {
@@ -814,49 +833,117 @@ async function expandPool(manual=true) {
   const btn = document.getElementById('expandBtn');
   if (btn) { btn.disabled = true; btn.textContent = 'Fetching...'; }
   const mode = expansionMode();
-  if (manual) showFetchProgress(`Expanding ${mode === 'all' ? 'movies and shows' : mode} from Wikipedia...`, 0, '');
-
-  const sourceTitles = await fetchWikiSourceTitles(mode, manual ? 6 : 3);
-  const allTitles = [...sourceTitles, ...curatedTitlesForMode(mode)];
-  const existing = new Set(Object.values(state.movies).map(m => normaliseTitleKey(m.title)));
-  const toFetch = allTitles.filter(t => {
-    const clean = normaliseTitleKey(t);
-    return clean && !existing.has(clean) && !state.rejectedWikiTitles[rejectKey(t, mode)] && !obviousNonMovieTitle(t);
-  });
+  const chasingPerfect = needsMorePerfectRecommendations();
+  if (manual || chasingPerfect) showFetchProgress(chasingPerfect ? `Finding ${PERFECT_REC_TARGET} × 100% matches...` : `Expanding ${mode === 'all' ? 'movies and shows' : mode} from Wikipedia...`, 0, '');
 
   let added = 0;
   let attempts = 0;
-  const chasingPerfect = !manual && needsMorePerfectRecommendations();
-  const target = manual ? 60 : (chasingPerfect ? Number.POSITIVE_INFINITY : 24);
-  const maxAttempts = Math.min(toFetch.length, manual ? 180 : (chasingPerfect ? 500 : 80));
+  let pageDepth = manual ? 10 : 8;
+  let finished = false;
+  const seenThisRun = new Set();
 
-  for (let i = 0; i < maxAttempts && added < target; i++) {
-    const title = toFetch[i];
-    attempts++;
-    if (manual) showFetchProgress(`Finding new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} ${added}/${target}`, (i/maxAttempts)*100, title);
-    try {
-      const movie = await fetchWikiMovie(title, mode);
-      if (movie && !state.movies[movie.id]) {
-        if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, mode)) {
-          state.movies[movie.id] = movie;
-          added++;
-          if (!manual && chasingPerfect && added % 5 === 0) render();
-          if (chasingPerfect && !needsMorePerfectRecommendations()) break;
-        } else {
-          state.rejectedWikiTitles[rejectKey(title, mode)] = true;
-        }
-      } else state.rejectedWikiTitles[rejectKey(title, mode)] = true;
-    } catch(e) {}
-    if (chasingPerfect && !needsMorePerfectRecommendations()) break;
-    if (i % 10 === 9) await sleep(300);
+  while (!finished) {
+    const sourceTitles = await fetchWikiSourceTitles(mode, pageDepth);
+    const allTitles = [...sourceTitles, ...curatedTitlesForMode(mode)];
+    const existing = new Set(Object.values(state.movies).map(m => normaliseTitleKey(m.title)));
+    const toFetch = allTitles.filter(t => {
+      const clean = normaliseTitleKey(t);
+      return clean && !existing.has(clean) && !seenThisRun.has(clean) && !state.rejectedWikiTitles[rejectKey(t, mode)] && !obviousNonMovieTitle(t);
+    });
+
+    if (!toFetch.length) {
+      if (chasingPerfect && pageDepth < 40) { pageDepth += 8; continue; }
+      finished = true;
+      break;
+    }
+
+    for (let i = 0; i < toFetch.length; i++) {
+      const title = toFetch[i];
+      seenThisRun.add(normaliseTitleKey(title));
+      attempts++;
+      if (manual || chasingPerfect) {
+        const perfectCount = perfectRecommendationCount(recommendationCandidates());
+        showFetchProgress(
+          chasingPerfect ? `Finding ${PERFECT_REC_TARGET} × 100% matches · ${perfectCount}/${PERFECT_REC_TARGET} ready` : `Finding new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} · added ${added}`,
+          Math.min(96, attempts % 100),
+          title
+        );
+      }
+      try {
+        const movie = await fetchWikiMovie(title, mode);
+        if (movie && !state.movies[movie.id]) {
+          if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, mode)) {
+            state.movies[movie.id] = movie;
+            added++;
+            runHousekeeping(false);
+            saveLocalState();
+            render();
+            if (chasingPerfect && !needsMorePerfectRecommendations()) { finished = true; break; }
+            if (manual && added >= 60 && !chasingPerfect) { finished = true; break; }
+          } else {
+            state.rejectedWikiTitles[rejectKey(title, mode)] = true;
+          }
+        } else state.rejectedWikiTitles[rejectKey(title, mode)] = true;
+      } catch(e) {}
+      if (chasingPerfect && !needsMorePerfectRecommendations()) { finished = true; break; }
+      if (i % 10 === 9) await sleep(250);
+    }
+
+    if (chasingPerfect && needsMorePerfectRecommendations() && pageDepth < 40) pageDepth += 8;
+    else finished = true;
   }
 
-  if (manual) hideFetchProgress();
+  if (manual || chasingPerfect) hideFetchProgress();
   if (btn) { btn.disabled = false; btn.textContent = 'Expand Pool'; }
   poolExpansionInProgress = false;
   saveLocalState(); syncDrive(); render();
   if (manual || added) showToast(`Added ${added} new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} to pool`, added?'success':'');
 }
+
+
+function handleManualTitleKey(e) {
+  if (e.key === 'Enter') addManualTitle();
+}
+
+async function addManualTitle() {
+  const input = document.getElementById('manualTitle');
+  const btn = document.getElementById('manualAddBtn');
+  const rawTitle = (input?.value || '').trim();
+  if (!rawTitle) { showToast('Type a title first','error'); return; }
+  const mode = expansionMode();
+  const existing = Object.values(state.movies).find(m => normaliseTitleKey(m.title) === normaliseTitleKey(rawTitle));
+  if (existing) { showToast(`Already in pool: "${existing.title}"`, ''); return; }
+
+  if (btn) { btn.disabled = true; btn.textContent = 'searching...'; }
+  showFetchProgress('Adding title from Wikipedia...', 8, rawTitle);
+
+  let movie = null;
+  const candidates = [rawTitle, ...(await fetchWikiSearchTitles(rawTitle))];
+  const seen = new Set();
+  for (let i = 0; i < candidates.length; i++) {
+    const title = candidates[i];
+    const key = normaliseTitleKey(title);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    showFetchProgress('Adding title from Wikipedia...', Math.min(92, 12 + i * 12), title);
+    movie = await fetchWikiMovie(title, mode);
+    if (movie) break;
+  }
+
+  hideFetchProgress();
+  if (btn) { btn.disabled = false; btn.textContent = 'add from Wikipedia'; }
+
+  if (!movie) { showToast(`Could not process "${rawTitle}"`, 'error'); return; }
+  if (state.movies[movie.id]) { showToast(`Already in pool: "${state.movies[movie.id].title}"`, ''); return; }
+
+  state.movies[movie.id] = movie;
+  tagMovie(movie);
+  runHousekeeping(false);
+  if (input) input.value = '';
+  saveLocalState(); syncDrive(); render();
+  showToast(`Added "${movie.title}"`, 'success');
+}
+
 async function fetchWikiMovie(wikiTitle, mode='all') {
   // Fetch extract + page props from Wikipedia API
   const url = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|revisions|categories&exintro=1&explaintext=1&rvprop=content&rvsection=0&cllimit=20&format=json&origin=*`;
@@ -1235,7 +1322,8 @@ function needsMorePerfectRecommendations(target=PERFECT_REC_TARGET) {
 function maybeAutoExpandPool() {
   const available = discoveryPool().length;
   const needsPerfect = needsMorePerfectRecommendations();
-  if ((available < 30 || needsPerfect) && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > 120000) {
+  const gap = needsPerfect ? 2000 : 120000;
+  if ((available < 30 || needsPerfect) && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > gap) {
     lastAutoExpandAt = Date.now();
     setTimeout(() => expandPool(false), 600);
   }
