@@ -1,0 +1,1186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CineLens</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0a0a0a; --surface:#111; --surface2:#1a1a1a; --border:#222;
+    --accent:#e8c547; --accent2:#c49b2e; --text:#e8e8e8;
+    --muted:#666; --muted2:#444; --danger:#e05252; --green:#52c087;
+    --tag-bg:#1e1e1e; --tag-border:#2a2a2a;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif;font-weight:300;min-height:100vh;overflow-x:hidden}
+  body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");pointer-events:none;z-index:9999;opacity:.4}
+
+  header{position:sticky;top:0;z-index:100;background:rgba(10,10,10,.93);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:0 28px;height:54px;display:flex;align-items:center;justify-content:space-between}
+  .logo{font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:3px;color:var(--accent);line-height:1}
+  .logo span{color:var(--muted);font-size:12px;font-family:'DM Mono',monospace;letter-spacing:1px;margin-left:8px;vertical-align:middle}
+  .header-right{display:flex;align-items:center;gap:8px}
+
+  .tab-bar{display:flex;gap:3px;background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:3px}
+  .tab-btn{padding:4px 14px;border-radius:3px;font-size:11px;font-family:'DM Mono',monospace;cursor:pointer;border:none;background:transparent;color:var(--muted);transition:all .15s;letter-spacing:.5px}
+  .tab-btn.active{background:var(--accent);color:#000;font-weight:500}
+  .tab-btn:not(.active):hover{color:var(--text)}
+
+  .btn{display:inline-flex;align-items:center;gap:5px;padding:6px 13px;border-radius:4px;font-family:'DM Sans',sans-serif;font-size:12px;font-weight:500;cursor:pointer;border:1px solid var(--border);background:var(--surface2);color:var(--text);transition:all .15s}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn-sm{padding:4px 10px;font-size:11px}
+  .btn-ghost{background:transparent;border-color:transparent;color:var(--muted)}
+  .btn-ghost:hover{color:var(--text);border-color:var(--border)}
+  .btn-warning{background:rgba(232,197,71,.1);border-color:var(--accent2);color:var(--accent)}
+  .btn-warning:hover{background:var(--accent);color:#000;border-color:var(--accent)}
+  .btn-primary{background:var(--accent);color:#000;border-color:var(--accent)}
+  .btn-primary:hover{background:var(--accent2);border-color:var(--accent2);color:#000}
+
+  .container{max-width:1400px;margin:0 auto;padding:0 28px}
+  main{padding:24px 0 80px}
+
+  .section-header{display:flex;align-items:baseline;gap:10px;margin-bottom:18px;flex-wrap:wrap}
+  .section-title{font-family:'Bebas Neue',sans-serif;font-size:19px;letter-spacing:2px;color:var(--text)}
+  .section-count{font-family:'DM Mono',monospace;font-size:11px;color:var(--muted)}
+  hr.sep{border:none;border-top:1px solid var(--border);margin:28px 0}
+
+  .stats-bar{display:flex;gap:28px;padding:14px 0;border-bottom:1px solid var(--border);margin-bottom:24px;flex-wrap:wrap}
+  .stat{display:flex;flex-direction:column;gap:2px}
+  .stat-val{font-family:'Bebas Neue',sans-serif;font-size:24px;color:var(--accent);line-height:1}
+  .stat-label{font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase}
+
+  .settings-bar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:22px;padding:9px 14px;background:var(--surface);border:1px solid var(--border);border-radius:6px}
+  .settings-bar label{font-size:12px;color:var(--muted)}
+  .settings-bar input[type=range]{width:80px;accent-color:var(--accent)}
+  .settings-bar .val{font-family:'DM Mono',monospace;font-size:12px;color:var(--accent);min-width:22px}
+  .sep-v{width:1px;height:18px;background:var(--border)}
+
+  .movies-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:13px}
+
+  .movie-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;overflow:hidden;transition:border-color .2s,transform .2s;position:relative}
+  .movie-card:hover{border-color:var(--muted2);transform:translateY(-2px)}
+  .movie-card.rated:hover{border-color:var(--accent2)}
+  .card-poster{width:100%;aspect-ratio:2/3;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+  .card-poster-inner{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;width:100%;height:100%;padding:14px}
+  .card-poster-year{font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)}
+  .card-poster-title{font-family:'Bebas Neue',sans-serif;font-size:16px;letter-spacing:1px;color:var(--text);text-align:center;line-height:1.2}
+  .card-poster-dir{font-size:10px;color:var(--muted);text-align:center}
+  .score-badge{position:absolute;top:7px;right:7px;background:rgba(0,0,0,.85);border:1px solid var(--accent);border-radius:3px;padding:2px 6px;font-family:'DM Mono',monospace;font-size:10px;color:var(--accent)}
+  .rank-badge{position:absolute;top:7px;left:7px;background:var(--accent);border-radius:3px;padding:2px 6px;font-family:'Bebas Neue',sans-serif;font-size:13px;color:#000;letter-spacing:1px}
+  .format-badge{position:absolute;bottom:7px;left:7px;background:rgba(0,0,0,.75);border:1px solid var(--border);border-radius:3px;padding:2px 5px;font-size:9px;font-family:'DM Mono',monospace;color:var(--muted);letter-spacing:.5px;text-transform:uppercase}
+  .card-body{padding:9px 11px 11px}
+  .card-title{font-size:12px;font-weight:500;line-height:1.3;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card-meta{font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;margin-bottom:7px}
+
+  .star-rating{display:flex;gap:3px;margin-bottom:6px}
+  .star{font-size:15px;cursor:pointer;color:var(--muted2);transition:color .1s,transform .1s;line-height:1}
+  .star:hover,.star.active{color:var(--accent)}
+  .star:hover{transform:scale(1.2)}
+
+  .card-tags{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px}
+  .tag{background:var(--tag-bg);border:1px solid var(--tag-border);border-radius:3px;padding:2px 5px;font-size:9px;color:var(--muted);font-family:'DM Mono',monospace;letter-spacing:.2px}
+  .tag.matched{border-color:var(--accent2);color:var(--accent);background:rgba(232,197,71,.06)}
+
+  .match-bar{height:2px;background:var(--border);border-radius:1px;margin-bottom:7px;overflow:hidden}
+  .match-fill{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:1px;transition:width .4s ease}
+  .match-label{font-size:9px;color:var(--muted);font-family:'DM Mono',monospace;margin-bottom:3px}
+
+  .tagging-label{font-size:9px;color:var(--accent);font-family:'DM Mono',monospace;animation:pulse 1s ease infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+  .card-actions{display:flex;gap:3px;margin-top:7px;flex-wrap:wrap}
+  .card-act{padding:3px 7px;border-radius:3px;font-size:9px;font-family:'DM Mono',monospace;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--muted);transition:all .15s}
+  .card-act:hover{color:var(--text);border-color:var(--muted2)}
+  .card-act.del:hover{color:var(--danger);border-color:var(--danger)}
+  .card-act.retag:hover{color:var(--accent);border-color:var(--accent2)}
+
+  #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:9px 18px;font-size:13px;color:var(--text);z-index:2000;transition:transform .3s ease;white-space:nowrap}
+  #toast.show{transform:translateX(-50%) translateY(0)}
+  #toast.success{border-color:var(--green);color:var(--green)}
+  #toast.error{border-color:var(--danger);color:var(--danger)}
+
+  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:500;backdrop-filter:blur(4px)}
+  .modal-overlay.hidden{display:none}
+  .modal{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:26px;width:420px;max-width:90vw}
+  .modal h2{font-family:'Bebas Neue',sans-serif;font-size:21px;letter-spacing:2px;margin-bottom:6px}
+  .modal p{font-size:13px;color:var(--muted);margin-bottom:18px;line-height:1.6}
+  .modal input{width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:9px 13px;font-family:'DM Mono',monospace;font-size:13px;color:var(--text);margin-bottom:10px;outline:none}
+  .modal input:focus{border-color:var(--accent)}
+  .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
+
+  .drive-status{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);font-family:'DM Mono',monospace}
+  .drive-dot{width:6px;height:6px;border-radius:50%;background:var(--muted2)}
+  .drive-dot.connected{background:var(--green)}
+  .drive-dot.syncing{background:var(--accent);animation:pulse 1s ease infinite}
+
+  .empty-state{text-align:center;padding:50px 20px;color:var(--muted);grid-column:1/-1}
+  .empty-state .icon{font-size:36px;margin-bottom:10px;opacity:.4}
+  .empty-state h3{font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:2px;margin-bottom:6px;color:var(--text)}
+  .empty-state p{font-size:13px;line-height:1.6}
+
+  /* TAG BRAIN */
+  .tag-brain-controls{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap;align-items:center}
+  .tb-filter-btn{padding:4px 11px;border-radius:3px;font-size:11px;font-family:'DM Mono',monospace;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--muted);transition:all .15s}
+  .tb-filter-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(232,197,71,.06)}
+  .tb-filter-btn:hover{border-color:var(--muted2);color:var(--text)}
+  .tag-brain-grid{display:flex;flex-wrap:wrap;gap:5px}
+  .tb-tag{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:4px;font-family:'DM Mono',monospace;font-size:10px;border:1px solid var(--tag-border);background:var(--tag-bg);color:var(--muted);cursor:pointer;transition:all .15s}
+  .tb-tag:hover{border-color:var(--muted2);color:var(--text)}
+  .tb-tag.positive{border-color:rgba(82,192,135,.4);color:var(--green);background:rgba(82,192,135,.05)}
+  .tb-tag.negative{border-color:rgba(224,82,82,.3);color:var(--danger);background:rgba(224,82,82,.04)}
+  .tb-weight{font-size:9px;opacity:.7;background:rgba(255,255,255,.06);padding:1px 4px;border-radius:2px}
+  .tb-count{font-size:9px;opacity:.5}
+
+  .tag-panel{position:fixed;right:0;top:0;bottom:0;width:320px;background:var(--surface);border-left:1px solid var(--border);z-index:200;transform:translateX(100%);transition:transform .25s ease;overflow-y:auto;padding:22px}
+  .tag-panel.open{transform:translateX(0)}
+  .tag-panel-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px}
+  .tag-panel-name{font-family:'DM Mono',monospace;font-size:13px;color:var(--accent);word-break:break-all}
+  .tag-panel-close{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0;line-height:1}
+  .tag-panel-close:hover{color:var(--text)}
+  .tag-panel-stat{font-size:11px;color:var(--muted);margin-bottom:14px;font-family:'DM Mono',monospace}
+  .tag-panel-movie{display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid var(--border)}
+  .tag-panel-movie:last-child{border-bottom:none}
+  .tag-panel-movie-title{font-size:12px;font-weight:500;flex:1}
+  .tag-panel-movie-meta{font-size:10px;color:var(--muted);font-family:'DM Mono',monospace}
+
+  /* FETCH PROGRESS */
+  .fetch-progress{background:var(--surface);border:1px solid var(--accent2);border-radius:6px;padding:12px 14px;margin-bottom:20px;display:none}
+  .fetch-progress.visible{display:block}
+  .fetch-label{font-size:11px;color:var(--accent);font-family:'DM Mono',monospace;margin-bottom:7px;animation:pulse 1s ease infinite}
+  .fetch-bar{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
+  .fetch-fill{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:2px;transition:width .3s ease}
+  .fetch-sub{font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  ::-webkit-scrollbar{width:4px;height:4px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:var(--muted2);border-radius:2px}
+
+  @media(max-width:768px){
+    header{padding:0 14px}
+    .container{padding:0 14px}
+    .movies-grid{grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px}
+    .logo span{display:none}
+    .tab-btn{padding:4px 9px;font-size:10px}
+  }
+  @keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+  .movie-card{animation:fadeIn .3s ease both}
+  .movie-card:nth-child(1){animation-delay:.03s}.movie-card:nth-child(2){animation-delay:.06s}
+  .movie-card:nth-child(3){animation-delay:.09s}.movie-card:nth-child(4){animation-delay:.12s}
+  .movie-card:nth-child(5){animation-delay:.15s}.movie-card:nth-child(6){animation-delay:.18s}
+</style>
+</head>
+<body>
+
+<div id="toast"></div>
+
+<div class="modal-overlay hidden" id="driveModal">
+  <div class="modal">
+    <h2>Connect Google Drive</h2>
+    <p>CineLens stores your data in a JSON file on your Google Drive. Paste your Google Drive API key and optionally a folder ID.</p>
+    <input type="text" id="driveApiKey" placeholder="Google Drive API Key" autocomplete="off">
+    <input type="text" id="driveFolderId" placeholder="Folder ID (optional)" autocomplete="off">
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="skipDrive()">Local Only</button>
+      <button class="btn btn-primary" onclick="connectDrive()">Connect</button>
+    </div>
+  </div>
+</div>
+
+<div class="tag-panel" id="tagPanel">
+  <div class="tag-panel-header">
+    <div class="tag-panel-name" id="tagPanelName"></div>
+    <button class="tag-panel-close" onclick="closeTagPanel()">×</button>
+  </div>
+  <div class="tag-panel-stat" id="tagPanelStat"></div>
+  <div id="tagPanelMovies"></div>
+</div>
+
+<header>
+  <div style="display:flex;align-items:center;gap:14px">
+    <div class="logo">CineLens <span>DISCOVERY</span></div>
+    <div class="tab-bar">
+      <button class="tab-btn active" onclick="setTab('all',this)">All</button>
+      <button class="tab-btn" onclick="setTab('movie',this)">Movies</button>
+      <button class="tab-btn" onclick="setTab('show',this)">Shows</button>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="drive-status">
+      <div class="drive-dot" id="driveDot"></div>
+      <span id="driveLabel">not connected</span>
+    </div>
+    <button class="btn btn-sm" onclick="openDriveModal()">⚙ Drive</button>
+    <button class="btn btn-sm" onclick="syncDrive()">↑↓ Sync</button>
+    <button class="btn btn-sm btn-warning" onclick="expandPool()" id="expandBtn">＋ Expand Pool</button>
+  </div>
+</header>
+
+<main>
+<div class="container">
+
+  <div class="stats-bar">
+    <div class="stat"><div class="stat-val" id="statRated">0</div><div class="stat-label">Rated</div></div>
+    <div class="stat"><div class="stat-val" id="statTagged">0</div><div class="stat-label">Tagged</div></div>
+    <div class="stat"><div class="stat-val" id="statTags">0</div><div class="stat-label">Unique Tags</div></div>
+    <div class="stat"><div class="stat-val" id="statPool">0</div><div class="stat-label">In Pool</div></div>
+    <div class="stat"><div class="stat-val" id="statAvg">—</div><div class="stat-label">Avg Rating</div></div>
+  </div>
+
+  <div class="settings-bar">
+    <label>Top Recs</label>
+    <input type="range" id="topN" min="5" max="30" value="10" oninput="updateTopN(this.value)">
+    <span class="val" id="topNVal">10</span>
+    <div class="sep-v"></div>
+    <label>Batch</label>
+    <input type="range" id="batchSize" min="6" max="24" value="12" oninput="document.getElementById('batchVal').textContent=this.value;renderRateGrid()">
+    <span class="val" id="batchVal">12</span>
+    <div class="sep-v"></div>
+    <span id="hkStatus" style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace">tags: 0</span>
+  </div>
+
+  <div class="fetch-progress" id="fetchProgress">
+    <div class="fetch-label" id="fetchLabel">Fetching films...</div>
+    <div class="fetch-bar"><div class="fetch-fill" id="fetchFill" style="width:0%"></div></div>
+    <div class="fetch-sub" id="fetchSub"></div>
+  </div>
+
+  <div class="section-header">
+    <div class="section-title">For You</div>
+    <div class="section-count" id="recCount">rate movies to unlock</div>
+  </div>
+  <div class="movies-grid" id="recsGrid">
+    <div class="empty-state">
+      <div class="icon">🎬</div><h3>Rate Movies First</h3>
+      <p>Rate movies below — recommendations appear once you've rated and tagged at least 3.</p>
+    </div>
+  </div>
+
+  <hr class="sep">
+
+  <div class="section-header">
+    <div class="section-title">Rated</div>
+    <div class="section-count" id="ratedCount">none yet</div>
+    <button class="btn btn-sm btn-warning" id="tagUntaggedBtn" onclick="tagAllUntagged()" style="display:none">⟳ Tag Untagged</button>
+  </div>
+  <div class="movies-grid" id="ratedGrid"></div>
+
+  <hr class="sep">
+
+  <div class="section-header">
+    <div class="section-title">Rate These</div>
+    <div class="section-count" id="rateCount">loading...</div>
+  </div>
+  <div class="movies-grid" id="rateGrid"></div>
+
+  <hr class="sep">
+
+  <div class="section-header">
+    <div class="section-title">Tag Brain</div>
+    <div class="section-count" id="tagBrainCount">rate movies to populate</div>
+  </div>
+  <div class="tag-brain-controls">
+    <button class="tb-filter-btn active" onclick="setTagFilter('all',this)">All</button>
+    <button class="tb-filter-btn" onclick="setTagFilter('positive',this)">You Like</button>
+    <button class="tb-filter-btn" onclick="setTagFilter('negative',this)">You Dislike</button>
+    <button class="tb-filter-btn" onclick="setTagFilter('neutral',this)">Unweighted</button>
+  </div>
+  <div class="tag-brain-grid" id="tagBrainGrid">
+    <span style="font-size:12px;color:var(--muted)">No tags yet.</span>
+  </div>
+
+</div>
+</main>
+
+<script>
+// ─────────────────────────────────────────────
+// WIKIPEDIA FILM SOURCES
+// These are the Wikipedia list pages we pull from.
+// The API returns page titles which we then individually fetch.
+// ─────────────────────────────────────────────
+const WIKI_SOURCES = {
+  english: [
+    // IMDb top 250 films - Wikipedia category members
+    'https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=Category:Films_considered_the_best&cmlimit=200&cmnamespace=0&format=json&origin=*',
+    'https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=Category:American_films&cmlimit=50&cmsort=sortkey&format=json&origin=*',
+  ],
+  hindi: [
+    'https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=Category:Hindi-language_films&cmlimit=200&cmsort=sortkey&format=json&origin=*',
+    'https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=Category:Indian_films&cmlimit=100&format=json&origin=*',
+  ]
+};
+
+// Curated expansion packs — well-known films by title, fetched from Wikipedia
+const EXPANSION_ENGLISH = [
+  "Citizen Kane","Vertigo (film)","Tokyo Story","2001: A Space Odyssey (film)","Singin' in the Rain",
+  "Sunrise: A Song of Two Humans","The Searchers","Man with a Movie Camera","Jeanne Dielman, 23, quai du Commerce, 1080 Bruxelles",
+  "Apocalypse Now","Taxi Driver","Rear Window","Lawrence of Arabia (film)","Psycho (1960 film)",
+  "Chinatown (1974 film)","Some Like It Hot","Sunset Boulevard (film)","All About Eve (film)",
+  "The Rules of the Game","Casablanca (film)","Raging Bull","Network (1976 film)","Barry Lyndon",
+  "Dr. Strangelove","A Clockwork Orange (film)","2001: A Space Odyssey (film)","The Shining (film)",
+  "Full Metal Jacket","Eyes Wide Shut","GoodFellas","Casino (1995 film)","Heat (1995 film)",
+  "L.A. Confidential (film)","Mulholland Drive (film)","Blue Velvet (film)","Wild at Heart (film)",
+  "No Country for Old Men (film)","There Will Be Blood (film)","The Master (film)","Phantom Thread",
+  "Boogie Nights","Magnolia (film)","Punch-Drunk Love","Paul Thomas Anderson",
+  "Zodiac (film)","Zodiac","The Social Network (film)","Gone Girl (film)","Mank (film)",
+  "Dunkirk (film)","Tenet (film)","Oppenheimer (film)","Killers of the Flower Moon (film)",
+  "The Wolf of Wall Street (film)","Shutter Island (film)","The Departed","Goodfellas",
+  "Reservoir Dogs","Jackie Brown (film)","Kill Bill","Inglourious Basterds","The Hateful Eight",
+  "Once Upon a Time in Hollywood","Jaws (film)","E.T. the Extra-Terrestrial","Schindler's List",
+  "Saving Private Ryan","Lincoln (film)","Munich (film)","Bridge of Spies (film)",
+  "Spotlight (film)","The Revenant (film)","1917 (film)","Dunkirk (film)",
+  "Mad Max: Fury Road","Children of Men","Alfonso Cuarón","Gravity (film)","Roma (film)",
+  "Birdman (film)","The Grand Budapest Hotel","Isle of Dogs (film)","Asteroid City",
+  "Her (film)","Being John Malkovich","Adaptation (film)","Synecdoche, New York",
+  "Requiem for a Dream","Pi (film)","Black Swan (film)","Whiplash (film)",
+  "La La Land (film)","Babylon (2022 film)","The Fabelmans","American Beauty (film)",
+  "Road to Perdition","A Beautiful Mind (film)","Russell Crowe","Gladiator (film)",
+  "Training Day","Crash (2004 film)","Million Dollar Baby","Mystic River (film)",
+  "Unforgiven (film)","The Silence of the Lambs (film)","Philadelphia (film)",
+  "Forrest Gump","The Shawshank Redemption","Se7en","Fight Club","American History X",
+  "The Truman Show","Eternal Sunshine of the Spotless Mind","Memento (film)","Inception",
+  "The Dark Knight","Interstellar (film)","The Prestige","Batman Begins",
+  "Blade Runner","Blade Runner 2049","Arrival (film)","Dune (2021 film)","Dune: Part Two",
+  "The Matrix","The Matrix Reloaded","V for Vendetta (film)","Cloud Atlas (film)",
+  "Ex Machina (film)","Annihilation (film)","Moon (2009 film)","Coherence (film)",
+  "Prisoners (film)","Sicario (film)","Villeneuve","Enemy (film)","Incendies",
+  "Heat","L.A. Confidential (film)","Collateral (film)","Michael Mann",
+  "American Gangster (film)","Training Day","End of Watch",
+  "Get Out (film)","Us (film)","Nope (film)","Hereditary (film)","Midsommar (film)",
+  "The Witch (film)","It Follows","A Quiet Place (film)","Don't Look Now",
+  "Parasite (film)","Burning (film)","The Handmaiden","Oldboy (film)","I Saw the Devil",
+  "Train to Busan","A Tale of Two Sisters","Memories of Murder","Mother (2009 film)",
+  "Portrait of a Lady on Fire","The Son's Room","The Great Beauty","Amarcord","8½",
+  "La Dolce Vita","Rome, Open City","Bicycle Thieves","Umberto D.","Il Posto",
+  "The 400 Blows","Jules and Jim","Breathless (1960 film)","Contempt (film)",
+  "Pierrot le Fou","My Neighbour Totoro","Princess Mononoke","Nausicaä of the Valley of the Wind",
+  "Castle in the Sky","Howl's Moving Castle","The Wind Rises","When Marnie Was There",
+  "Perfect Blue","Millennium Actress","Tokyo Godfathers","Paprika (2006 film)",
+  "In the Mood for Love","Chungking Express","Fallen Angels (film)","Happy Together (1997 film)",
+  "The Grandmaster","Ip Man (film)","A Better Tomorrow","Hard Boiled","The Killer (1989 film)",
+  "Crouching Tiger, Hidden Dragon","Hero (2002 film)","House of Flying Daggers",
+  "Pan's Labyrinth","The Others (film)","Open Your Eyes (1997 film)","Talk to Her",
+  "All About My Mother","Volver","The Skin I Live In","Julieta (film)",
+  "Amelie","The Intouchables","A Prophet","Cache (film)","The Class (film)",
+  "Capernaum (film)","A Separation","The Salesman (film)","About Elly","Close-Up (film)",
+  "City of God (film)","Central Station (film)","The Secret in Their Eyes (film)",
+  "Wild Tales (film)","Son of Saul","The White Ribbon","Amour (film)","Cache (film)",
+  "The Lives of Others","Run Lola Run","Downfall (film)","Das Boot","M (1931 film)",
+  "Nosferatu","The Cabinet of Dr. Caligari","Metropolis (1927 film)",
+  "The Seventh Seal","Wild Strawberries (film)","Persona (1966 film)","Fanny and Alexander",
+  "Scenes from a Marriage","Cries and Whispers","Winter Light (film)",
+  "Stalker (film)","Andrei Rublev (film)","The Mirror (film)","Solaris (1972 film)","Ivan's Childhood",
+  "Seven Samurai","Rashomon (film)","Yojimbo","Sanjuro (film)","High and Low (film)","Ran (film)",
+  "Harakiri (1962 film)","In the Realm of the Senses","Ugetsu","Sansho the Bailiff",
+  "Shoplifters (film)","Nobody Knows (film)","Like Father, Like Son (film)","Monster (2023 film)",
+  "Drive (2011 film)","Only God Forgives","The Neon Demon","Valhalla Rising",
+  "Melancholia (film)","The Hunt (film)","A Royal Affair","The Square (film)",
+  "Force Majeure (film)","The Hunt (2012 film)","Toni Erdmann","Never Look Away (film)",
+  "4 Months, 3 Weeks and 2 Days","The Death of Mr. Lazarescu","12:08 East of Bucharest",
+  "A Touch of Sin","Still Life (2013 film)","Mountains May Depart","Ash Is Purest White",
+  "The Handmaiden","Burning (film)","Poetry (film)","Secret Sunshine",
+  "Certified Copy (film)","The Past (film)","Le Havre (film)","Compartment No. 6"
+];
+
+const EXPANSION_HINDI = [
+  "Sholay","Mother India (film)","Mughal-E-Azam","Guide (film)","Pyaasa",
+  "Kaagaz Ke Phool","Sahib Bibi Aur Ghulam","Pather Panchali","Aparajito","The World of Apu",
+  "Dil Chahta Hai","Lagaan","3 Idiots","Gangs of Wasseypur","Gangs of Wasseypur – Part 2",
+  "Andhadhun (film)","Masaan (film)","Article 15 (film)","Tumbbad",
+  "Court (film)","Dil Se (film)","Roja (film)","Bombay (film)","Guru (film)",
+  "Rang De Basanti","Taare Zameen Par","Dangal (film)","Secret Superstar",
+  "PK (film)","3 Idiots","Dhoom 3","Dhoom 2",
+  "Dilwale Dulhania Le Jayenge","Kuch Kuch Hota Hai","Kabhi Khushi Kabhie Gham...",
+  "Dil Dhadakne Do","Zindagi Na Milegi Dobara","Tamasha (film)","Jab We Met",
+  "Cocktail (film)","Queen (film)","Dum Laga Ke Haisha","Bareilly Ki Barfi",
+  "Stree (film)","Bala (2019 film)","Shubh Mangal Saavdhan","Badhaai Ho",
+  "Pink (film)","Thappad (film)","Kahaani","Kahaani 2","Dirty Picture",
+  "Fashion (film)","Mary Kom (film)","Sarbjit","Neerja (film)","Airlift (film)",
+  "Baby (film)","A Wednesday","Special 26","Rustom (film)",
+  "Talaash (film)","Drishyam (film)","Badlapur (film)","Kaabil","Ittefaq (2017 film)",
+  "Andhadhun (film)","Raazi (film)","Uri: The Surgical Strike","Shershaah",
+  "Bharat (film)","War (2019 film)","Tiger Zinda Hai","Pathaan","Jawan (film)",
+  "Bard of Blood","Mirzapur (TV series)","Sacred Games (TV series)","Scam 1992",
+  "Delhi Crime","Panchayat (TV series)","Kota Factory","TVF Pitchers",
+  "Paan Singh Tomar","Gangs of Wasseypur","Dev.D","Oye Lucky! Lucky Oye!",
+  "Udaan (film)","Lootera","Trapped (2017 film)","Omerta (film)",
+  "Manto (film)","Aligarh (film)","Shahid (film)","Bhaag Milkha Bhaag",
+  "M.S. Dhoni: The Untold Story","Sanju (film)","Thalaivii",
+  "Guru (film)","Black (film)","Devdas (2002 film)","Saawariya",
+  "Jodhaa Akbar","Bajirao Mastani","Padmaavat","Tanhaji","Manikarnika: The Queen of Jhansi",
+  "Kabir Singh","Arjun Reddy","Animal (film)","Fighter (2024 film)",
+  "RRR (film)","Baahubali: The Beginning","Baahubali 2: The Conclusion",
+  "KGF: Chapter 1","KGF: Chapter 2","Pushpa: The Rise","Kantara (film)",
+  "Vikram (2022 film)","Jailer (film)","Leo (2023 film)","Indian 2"
+];
+
+// ─────────────────────────────────────────────
+// STATE
+// ─────────────────────────────────────────────
+let activeTab = 'all';
+let tagFilter = 'all';
+let state = {
+  movies: {},
+  tagWeights: {},
+  settings: { topN: 10, batchSize: 12 },
+  drive: { connected: false, apiKey: '', folderId: '', fileId: '' },
+  poolFetched: false
+};
+
+// ─────────────────────────────────────────────
+// INIT
+// ─────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  loadLocalState();
+  seedPool();        // always ensure seed movies are present
+  render();
+  // Auto-expand if pool is small
+  if (Object.keys(state.movies).length < 50) {
+    setTimeout(() => expandPool(), 800);
+  }
+});
+
+// ─────────────────────────────────────────────
+// SEED (hardcoded starter pack — always present)
+// ─────────────────────────────────────────────
+const SEED = [
+  {id:'tt0111161',title:'The Shawshank Redemption',year:1994,director:'Frank Darabont',language:'English',country:'USA'},
+  {id:'tt0068646',title:'The Godfather',year:1972,director:'Francis Ford Coppola',language:'English',country:'USA'},
+  {id:'tt0468569',title:'The Dark Knight',year:2008,director:'Christopher Nolan',language:'English',country:'USA'},
+  {id:'tt0137523',title:'Fight Club',year:1999,director:'David Fincher',language:'English',country:'USA'},
+  {id:'tt0816692',title:'Interstellar',year:2014,director:'Christopher Nolan',language:'English',country:'USA'},
+  {id:'tt1375666',title:'Inception',year:2010,director:'Christopher Nolan',language:'English',country:'USA'},
+  {id:'tt0110912',title:'Pulp Fiction',year:1994,director:'Quentin Tarantino',language:'English',country:'USA'},
+  {id:'tt0133093',title:'The Matrix',year:1999,director:'The Wachowskis',language:'English',country:'USA'},
+  {id:'tt0114369',title:'Se7en',year:1995,director:'David Fincher',language:'English',country:'USA'},
+  {id:'tt0102926',title:'The Silence of the Lambs',year:1991,director:'Jonathan Demme',language:'English',country:'USA'},
+  {id:'tt0317248',title:'City of God',year:2002,director:'Fernando Meirelles',language:'English',country:'Brazil'},
+  {id:'tt0482571',title:'The Prestige',year:2006,director:'Christopher Nolan',language:'English',country:'USA'},
+  {id:'tt0209144',title:'Memento',year:2000,director:'Christopher Nolan',language:'English',country:'USA'},
+  {id:'tt2267998',title:'Gone Girl',year:2014,director:'David Fincher',language:'English',country:'USA'},
+  {id:'tt1291584',title:'Prisoners',year:2013,director:'Denis Villeneuve',language:'English',country:'USA'},
+  {id:'tt6751668',title:'Parasite',year:2019,director:'Bong Joon-ho',language:'English',country:'South Korea'},
+  {id:'tt2582802',title:'Whiplash',year:2014,director:'Damien Chazelle',language:'English',country:'USA'},
+  {id:'tt0816711',title:'Arrival',year:2016,director:'Denis Villeneuve',language:'English',country:'USA'},
+  {id:'tt0364569',title:'Oldboy',year:2003,director:'Park Chan-wook',language:'English',country:'South Korea'},
+  {id:'tt0338013',title:'Eternal Sunshine of the Spotless Mind',year:2004,director:'Michel Gondry',language:'English',country:'USA'},
+  {id:'tt0172495',title:'Gladiator',year:2000,director:'Ridley Scott',language:'English',country:'USA'},
+  {id:'tt0120689',title:'The Green Mile',year:1999,director:'Frank Darabont',language:'English',country:'USA'},
+  {id:'tt1853728b',title:'Django Unchained',year:2012,director:'Quentin Tarantino',language:'English',country:'USA'},
+  {id:'tt0120586',title:'American History X',year:1998,director:'Tony Kaye',language:'English',country:'USA'},
+  {id:'tt1853728c',title:'Blade Runner 2049',year:2017,director:'Denis Villeneuve',language:'English',country:'USA'},
+  {id:'tt0047478',title:'Seven Samurai',year:1954,director:'Akira Kurosawa',language:'English',country:'Japan'},
+  {id:'tt0087843',title:'Once Upon a Time in America',year:1984,director:'Sergio Leone',language:'English',country:'USA'},
+  {id:'tt0253474',title:'The Pianist',year:2002,director:'Roman Polanski',language:'English',country:'Poland'},
+  {id:'tt0405094',title:'The Lives of Others',year:2006,director:'Florian Henckel',language:'English',country:'Germany'},
+  {id:'tt0050083',title:'12 Angry Men',year:1957,director:'Sidney Lumet',language:'English',country:'USA'},
+  // Hindi
+  {id:'in001',title:'Sholay',year:1975,director:'Ramesh Sippy',language:'Hindi',country:'India'},
+  {id:'in002',title:'Dil Chahta Hai',year:2001,director:'Farhan Akhtar',language:'Hindi',country:'India'},
+  {id:'in003',title:'Lagaan',year:2001,director:'Ashutosh Gowariker',language:'Hindi',country:'India'},
+  {id:'in004',title:'3 Idiots',year:2009,director:'Rajkumar Hirani',language:'Hindi',country:'India'},
+  {id:'in005',title:'Gangs of Wasseypur',year:2012,director:'Anurag Kashyap',language:'Hindi',country:'India'},
+  {id:'in006',title:'Andhadhun',year:2018,director:'Sriram Raghavan',language:'Hindi',country:'India'},
+  {id:'in007',title:'Tumbbad',year:2018,director:'Rahi Barve',language:'Hindi',country:'India'},
+  {id:'in008',title:'Article 15',year:2019,director:'Anubhav Sinha',language:'Hindi',country:'India'},
+  {id:'in009',title:'Masaan',year:2015,director:'Neeraj Ghaywan',language:'Hindi',country:'India'},
+  {id:'in010',title:'Dangal',year:2016,director:'Nitesh Tiwari',language:'Hindi',country:'India'},
+  {id:'in011',title:'Rang De Basanti',year:2006,director:'Rakeysh Mehra',language:'Hindi',country:'India'},
+  {id:'in012',title:'Taare Zameen Par',year:2007,director:'Aamir Khan',language:'Hindi',country:'India'},
+  {id:'in013',title:'Raazi',year:2018,director:'Meghna Gulzar',language:'Hindi',country:'India'},
+  {id:'in014',title:'Pink',year:2016,director:'Aniruddha Roy Chowdhury',language:'Hindi',country:'India'},
+  {id:'in015',title:'Kahaani',year:2012,director:'Sujoy Ghosh',language:'Hindi',country:'India'},
+  // Shows
+  {id:'tv001',title:'Breaking Bad',year:2008,director:'Vince Gilligan',language:'English',country:'USA',format:'series'},
+  {id:'tv002',title:'Chernobyl',year:2019,director:'Johan Renck',language:'English',country:'UK',format:'miniseries'},
+  {id:'tv003',title:'True Detective S1',year:2014,director:'Cary Fukunaga',language:'English',country:'USA',format:'series'},
+  {id:'tv004',title:'Succession',year:2018,director:'Jesse Armstrong',language:'English',country:'USA',format:'series'},
+  {id:'tv005',title:'The Wire',year:2002,director:'David Simon',language:'English',country:'USA',format:'series'},
+  {id:'tv006',title:'Mindhunter',year:2017,director:'David Fincher',language:'English',country:'USA',format:'series'},
+  {id:'tv007',title:'Dark',year:2017,director:'Baran bo Odar',language:'English',country:'Germany',format:'series'},
+  {id:'tv008',title:'Scam 1992',year:2020,director:'Hansal Mehta',language:'Hindi',country:'India',format:'series'},
+  {id:'tv009',title:'Mirzapur',year:2018,director:'Karan Anshuman',language:'Hindi',country:'India',format:'series'},
+  {id:'tv010',title:'Panchayat',year:2020,director:'Deepak Kumar Mishra',language:'Hindi',country:'India',format:'series'},
+  {id:'tv011',title:'Sacred Games',year:2018,director:'Anurag Kashyap',language:'Hindi',country:'India',format:'series'},
+  {id:'tv012',title:'Peaky Blinders',year:2013,director:'Steven Knight',language:'English',country:'UK',format:'series'},
+  {id:'tv013',title:'The Sopranos',year:1999,director:'David Chase',language:'English',country:'USA',format:'series'},
+  {id:'tv014',title:'Band of Brothers',year:2001,director:'Steven Spielberg',language:'English',country:'USA',format:'miniseries'},
+  {id:'tv015',title:'Severance',year:2022,director:'Ben Stiller',language:'English',country:'USA',format:'series'},
+];
+
+function seedPool() {
+  let added = 0;
+  SEED.forEach(m => {
+    if (!state.movies[m.id]) {
+      state.movies[m.id] = { ...m, tags: [], rating: 0, tagged: false };
+      added++;
+    }
+  });
+  if (added) saveLocalState();
+}
+
+// ─────────────────────────────────────────────
+// WIKIPEDIA POOL EXPANSION
+// ─────────────────────────────────────────────
+async function expandPool() {
+  const btn = document.getElementById('expandBtn');
+  btn.disabled = true; btn.textContent = '⟳ Fetching...';
+  showFetchProgress('Expanding pool from Wikipedia...', 0, '');
+
+  const allTitles = [...EXPANSION_ENGLISH, ...EXPANSION_HINDI];
+  const existing = new Set(Object.values(state.movies).map(m => m.title.toLowerCase()));
+  const toFetch = allTitles.filter(t => {
+    const clean = t.replace(/ \(.*\)$/, '').trim().toLowerCase();
+    return !existing.has(clean);
+  });
+
+  let added = 0;
+  const total = Math.min(toFetch.length, 300);
+
+  for (let i = 0; i < total; i++) {
+    const title = toFetch[i];
+    showFetchProgress(`Fetching ${i+1}/${total}`, (i/total)*100, title);
+    try {
+      const movie = await fetchWikiMovie(title);
+      if (movie && !state.movies[movie.id]) {
+        // Only English and Hindi
+        if (movie.language === 'English' || movie.language === 'Hindi') {
+          state.movies[movie.id] = movie;
+          added++;
+        }
+      }
+    } catch(e) {}
+    // Small delay to be polite to Wikipedia API
+    if (i % 10 === 9) await sleep(300);
+  }
+
+  hideFetchProgress();
+  btn.disabled = false; btn.textContent = '＋ Expand Pool';
+  saveLocalState(); syncDrive(); render();
+  showToast(`Added ${added} new films to pool`, 'success');
+}
+
+async function fetchWikiMovie(wikiTitle) {
+  // Fetch extract + page props from Wikipedia API
+  const url = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|revisions|categories&exintro=1&explaintext=1&rvprop=content&rvsection=0&cllimit=20&format=json&origin=*`;
+  const resp = await fetch(url);
+  const data = await resp.json();
+  const pages = data.query?.pages;
+  if (!pages) return null;
+  const page = Object.values(pages)[0];
+  if (!page || page.missing !== undefined) return null;
+
+  const extract = page.extract || '';
+  const title = page.title.replace(/ \(.*\)$/, '').trim();
+  const id = 'wiki_' + page.pageid;
+
+  // Parse year from extract
+  const yearMatch = extract.match(/\b(19[3-9]\d|20[012]\d)\b/);
+  const year = yearMatch ? parseInt(yearMatch[1]) : null;
+
+  // Detect language from title hint or categories
+  const cats = (page.categories || []).map(c => c.title.toLowerCase());
+  let language = 'English';
+  if (cats.some(c => c.includes('hindi-language'))) language = 'Hindi';
+  else if (wikiTitle.toLowerCase().includes('hindi') || EXPANSION_HINDI.includes(wikiTitle)) language = 'Hindi';
+
+  // Detect format
+  let format = null;
+  if (cats.some(c => c.includes('television series') || c.includes('tv series'))) format = 'series';
+  if (cats.some(c => c.includes('miniseries'))) format = 'miniseries';
+
+  // Country
+  let country = 'USA';
+  if (language === 'Hindi') country = 'India';
+  else if (cats.some(c => c.includes('british film') || c.includes('united kingdom'))) country = 'UK';
+
+  // Director — try to extract from first sentence
+  const dirMatch = extract.match(/directed by ([A-Z][a-z]+ [A-Z][a-z]+(?:\s[A-Z][a-z]+)?)/);
+  const director = dirMatch ? dirMatch[1] : 'Unknown';
+
+  if (!year || !title) return null;
+
+  // Generate tags from extract
+  const tags = deriveTagsFromText(extract, { title, year, language, country, format, director });
+  if (tags.length < 5) return null; // skip if we can't generate meaningful tags
+
+  return { id, title, year, director, language, country, format: format||null, tags, tagged: true, rating: 0, source: 'wikipedia' };
+}
+
+// ─────────────────────────────────────────────
+// TAG DERIVATION FROM PLOT TEXT
+// This is the core intelligence — no API needed.
+// We match plot keywords to a comprehensive tag vocabulary.
+// ─────────────────────────────────────────────
+function deriveTagsFromText(text, meta) {
+  const t = text.toLowerCase();
+  const tags = new Set();
+
+  // META tags always added
+  const lang = (meta.language||'English').toLowerCase().replace(/\s+/g,'-') + '-language';
+  const country = (meta.country||'usa').toLowerCase().replace(/\s+/g,'-');
+  const decade = meta.year ? Math.floor(meta.year/10)*10 + 's' : '2000s';
+  const fmt = meta.format || 'film';
+  tags.add(lang); tags.add(country); tags.add(decade); tags.add(fmt);
+  if (fmt !== 'film') tags.add('prestige-tv');
+
+  // GENRE / TONE
+  if (/\b(murder|kill|killer|detective|investigat|crime|heist|robbery|gangster|mob|mafia|cartel)\b/.test(t)) tags.add('crime-thriller');
+  if (/\b(serial killer|psychopath|profil)\b/.test(t)) tags.add('serial-killer-thriller');
+  if (/\b(ghost|haunted|supernatural|demon|possession|exorcis)\b/.test(t)) tags.add('supernatural-horror');
+  if (/\b(zombie|undead|apocalypse|pandemic|outbreak)\b/.test(t)) tags.add('apocalyptic');
+  if (/\b(space|spacecraft|astronaut|alien|extraterrestrial|planet|galaxy|nasa)\b/.test(t)) tags.add('space-sci-fi');
+  if (/\b(robot|android|artificial intelligence|ai|machine|cyborg|simulation)\b/.test(t)) tags.add('artificial-intelligence');
+  if (/\b(time travel|time loop|paradox|alternate timeline|future|past)\b/.test(t)) tags.add('time-manipulation');
+  if (/\b(dream|subconscious|surreal|hallucination|psychedelic)\b/.test(t)) tags.add('surreal-dreamlike');
+  if (/\b(war|battle|soldier|military|combat|army|wwii|world war)\b/.test(t)) tags.add('war-drama');
+  if (/\b(prison|inmate|cell|incarcerat|jail)\b/.test(t)) tags.add('prison-setting');
+  if (/\b(court|trial|judge|jury|lawyer|attorney|verdict)\b/.test(t)) tags.add('courtroom-drama');
+  if (/\b(political|government|corruption|election|regime|authoritarian)\b/.test(t)) tags.add('political-thriller');
+  if (/\b(spy|espionage|secret agent|cia|mi6|undercover|surveillance)\b/.test(t)) tags.add('spy-thriller');
+  if (/\b(drug|narcotic|trafficking|cartel|dealer|addiction)\b/.test(t)) tags.add('drug-trade');
+  if (/\b(heist|rob|vault|steal|theft|con artist|grift)\b/.test(t)) tags.add('heist-thriller');
+  if (/\b(western|cowboy|frontier|gunfighter|outlaw|sheriff|saloon)\b/.test(t)) tags.add('western');
+  if (/\b(music|musician|band|concert|rock|jazz|singer|composer)\b/.test(t)) tags.add('music-world');
+  if (/\b(sport|athlete|tournament|championship|coach|team|game|match)\b/.test(t)) tags.add('sports-drama');
+  if (/\b(comedy|funny|humour|humor|laugh|comedic|farce)\b/.test(t)) tags.add('comedy');
+  if (/\b(romance|love|relationship|couple|affair|heartbreak|wedding)\b/.test(t)) tags.add('romance');
+  if (/\b(horror|terror|fear|scare|monster|creature)\b/.test(t)) tags.add('horror');
+  if (/\b(biography|biopic|based on|true story|real events|historical figure)\b/.test(t)) tags.add('based-on-true-story');
+  if (/\b(animation|animated|cartoon)\b/.test(t)) tags.add('animated');
+  if (/\b(documentary|docu|real footage)\b/.test(t)) tags.add('documentary');
+  if (/\b(superhero|marvel|dc|batman|spider|avenger|x-men)\b/.test(t)) tags.add('superhero');
+  if (/\b(fantasy|magic|wizard|dragon|mytholog|fairy|enchant)\b/.test(t)) tags.add('fantasy');
+  if (/\b(mythology|folklore|legend|ancient|gods|goddess)\b/.test(t)) tags.add('mythology-folklore');
+
+  // NARRATIVE STRUCTURE
+  if (/\b(twist|revelation|unexpected|shocking ending|turns out|discover)\b/.test(t)) tags.add('twist-ending');
+  if (/\b(flashback|non-linear|told in|parallel|fragmented|interwoven)\b/.test(t)) tags.add('non-linear-narrative');
+  if (/\b(unreliable|memory|perspective|subjective|unclear|ambiguous)\b/.test(t)) tags.add('unreliable-narration');
+  if (/\b(multiple storyline|ensemble|interweav|anthology|several character)\b/.test(t)) tags.add('ensemble-cast');
+  if (/\b(single location|one room|confined|claustrophobic)\b/.test(t)) tags.add('single-location');
+  if (/\b(real time|one day|one night|24 hour)\b/.test(t)) tags.add('compressed-timeline');
+
+  // CHARACTER / PROTAGONIST
+  if (/\b(anti-hero|morally grey|morally ambiguous|flawed|complex character)\b/.test(t)) tags.add('morally-ambiguous-protagonist');
+  if (/\b(villain|antagonist|evil|ruthless|corrupt)\b/.test(t)) tags.add('compelling-villain');
+  if (/\b(female lead|woman|she|her journey|protagonist.*woman)\b/.test(t)) tags.add('female-lead-protagonist');
+  if (/\b(child|boy|girl|teenager|adolescent|youth|coming of age|grow up)\b/.test(t)) tags.add('coming-of-age-story');
+  if (/\b(father|mother|parent|family|son|daughter|sibling|brother|sister)\b/.test(t)) tags.add('family-dynamics');
+  if (/\b(friendship|friend|bond|loyal|brotherhood|sisterhood)\b/.test(t)) tags.add('friendship-bond');
+  if (/\b(mentor|student|teacher|pupil|master)\b/.test(t)) tags.add('mentor-student');
+  if (/\b(obsession|obsessive|fixated|compulsive)\b/.test(t)) tags.add('obsession');
+  if (/\b(revenge|vengeance|retaliation|payback|grudge)\b/.test(t)) tags.add('revenge-driven');
+  if (/\b(redemption|forgiveness|atone|second chance)\b/.test(t)) tags.add('redemption-arc');
+  if (/\b(grief|loss|death|mourning|bereavement|widow)\b/.test(t)) tags.add('grief-and-loss');
+  if (/\b(identity|who am i|who is|persona|facade|double life)\b/.test(t)) tags.add('identity-crisis');
+  if (/\b(power|ambition|greed|corruption|climb|status)\b/.test(t)) tags.add('power-and-ambition');
+  if (/\b(class|poverty|wealth|rich|poor|inequality|working class)\b/.test(t)) tags.add('class-divide');
+  if (/\b(race|racism|discrimination|prejudice|segregation|caste)\b/.test(t)) tags.add('social-discrimination');
+
+  // TONE
+  if (/\b(dark|bleak|grim|gritty|brutal|disturbing|harrowing|oppressive)\b/.test(t)) tags.add('dark-tone');
+  if (/\b(slow|contemplative|meditative|quiet|understated|atmospheric)\b/.test(t)) tags.add('slow-burn');
+  if (/\b(psychological|mind|mental|psyche|psychiatr|therapy)\b/.test(t)) tags.add('psychological');
+  if (/\b(satire|satirical|parody|absurd|darkly comic)\b/.test(t)) tags.add('satirical');
+  if (/\b(uplifting|heartwarming|inspiring|optimistic|feel.good|joyful)\b/.test(t)) tags.add('uplifting-tone');
+  if (/\b(epic|sweeping|grand|spectacle|monumental|vast)\b/.test(t)) tags.add('epic-scale');
+  if (/\b(intimate|personal|quiet|small-scale|chamber)\b/.test(t)) tags.add('intimate-scale');
+  if (/\b(visually stunning|beautiful cinematography|gorgeous|visual|imagery)\b/.test(t)) tags.add('visually-striking');
+  if (/\b(emotionally|devastating|tearjerker|deeply moving|wrenching|heartbreaking)\b/.test(t)) tags.add('emotionally-devastating');
+
+  // SETTING
+  if (/\b(new york|manhattan|brooklyn|los angeles|chicago|london|paris|berlin|mumbai|delhi|lahore)\b/.test(t)) {
+    const cityMatch = t.match(/\b(new york|manhattan|brooklyn|los angeles|chicago|london|paris|berlin|mumbai|delhi|lahore)\b/);
+    if (cityMatch) tags.add(cityMatch[1].replace(/\s/g,'-') + '-setting');
+  }
+  if (/\b(rural|village|countryside|small town|remote|isolated)\b/.test(t)) tags.add('rural-setting');
+  if (/\b(urban|city|metropolis|street|downtown)\b/.test(t)) tags.add('urban-setting');
+  if (/\b(period|historical|19th century|18th century|medieval|ancient|victorian|1920s|1930s|1940s|1950s|1960s)\b/.test(t)) tags.add('period-drama');
+  if (/\b(dystopian|totalitarian|oppressive state|surveillance state|authoritarian regime)\b/.test(t)) tags.add('dystopian');
+  if (/\b(post-apocalyptic|after the war|ruined world|wasteland)\b/.test(t)) tags.add('post-apocalyptic');
+  if (/\b(india|bollywood|indian|hindi|punjab|rajasthan|bengal|maharashtra)\b/.test(t)) tags.add('india-setting');
+
+  // DIRECTOR STYLE (based on known directors)
+  if (meta.director) {
+    const d = meta.director.toLowerCase();
+    if (/nolan/.test(d)) tags.add('nolan-style');
+    if (/fincher/.test(d)) tags.add('fincher-style');
+    if (/tarantino/.test(d)) tags.add('tarantino-style');
+    if (/villeneuve/.test(d)) tags.add('villeneuve-style');
+    if (/scorsese/.test(d)) tags.add('scorsese-style');
+    if (/kubrick/.test(d)) tags.add('kubrick-style');
+    if (/kurosawa/.test(d)) tags.add('kurosawa-style');
+    if (/anurag kashyap|kashyap/.test(d)) tags.add('anurag-kashyap-style');
+    if (/mani ratnam/.test(d)) tags.add('mani-ratnam-style');
+  }
+
+  return [...tags];
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function showFetchProgress(label, pct, sub) {
+  const el = document.getElementById('fetchProgress');
+  el.classList.add('visible');
+  document.getElementById('fetchLabel').textContent = label;
+  document.getElementById('fetchFill').style.width = pct + '%';
+  document.getElementById('fetchSub').textContent = sub;
+}
+function hideFetchProgress() {
+  document.getElementById('fetchProgress').classList.remove('visible');
+}
+
+// ─────────────────────────────────────────────
+// HARDCODED TAGS for seed movies (instant, no fetch needed)
+// ─────────────────────────────────────────────
+const SEED_TAGS = {
+  'tt0111161':['drama','english-language','usa','1990s','film','wrongful-imprisonment','prison-setting','friendship-bond','hope-and-redemption','institutional-oppression','slow-burn','uplifting-tone','moral-courage','based-on-novella','corrupt-authority','long-haul-narrative'],
+  'tt0068646':['crime-thriller','english-language','usa','1970s','film','organised-crime-saga','family-dynasty','power-and-ambition','morally-ambiguous-protagonist','loyalty-and-betrayal','slow-burn','dark-tone','ensemble-cast','operatic-tone','patriarch-protagonist'],
+  'tt0468569':['superhero','english-language','usa','2000s','film','compelling-villain','moral-philosophy','chaos-vs-order','dark-tone','cat-and-mouse-thriller','morally-ambiguous-protagonist','action-thriller','psychological','nolan-style','iconic-villain'],
+  'tt0137523':['psychological-thriller','english-language','usa','1990s','film','unreliable-narration','twist-ending','identity-crisis','dark-comedy','satirical','non-linear-narrative','morally-ambiguous-protagonist','anti-establishment','fincher-style','dark-tone'],
+  'tt0816692':['space-sci-fi','english-language','usa','2010s','film','time-manipulation','parent-child-relationship','grief-and-loss','hard-sci-fi','emotionally-devastating','non-linear-narrative','nolan-style','visually-striking','slow-burn'],
+  'tt1375666':['space-sci-fi','english-language','usa','2010s','film','surreal-dreamlike','heist-thriller','non-linear-narrative','nolan-style','ensemble-cast','twist-ending','action-thriller','layered-reality'],
+  'tt0110912':['crime-thriller','english-language','usa','1990s','film','non-linear-narrative','dark-comedy','ensemble-cast','tarantino-style','multiple-storylines','morally-ambiguous-protagonist','violence-and-humor','dialogue-driven'],
+  'tt0133093':['space-sci-fi','english-language','usa','1990s','film','dystopian','chosen-one','action-thriller','philosophical','twist-ending','artificial-intelligence','cyberpunk','visually-striking'],
+  'tt0114369':['crime-thriller','english-language','usa','1990s','film','serial-killer-thriller','detective-protagonist','dark-tone','urban-setting','fincher-style','cat-and-mouse-thriller','seven-deadly-sins','bleak-worldview'],
+  'tt0102926':['psychological-thriller','english-language','usa','1990s','film','serial-killer-thriller','female-lead-protagonist','cat-and-mouse-thriller','compelling-villain','suspense','gender-dynamics'],
+  'tt0317248':['crime-thriller','english-language','brazil','2000s','film','coming-of-age-story','urban-poverty','non-linear-narrative','ensemble-cast','based-on-true-story','gang-culture','kinetic-direction','dark-tone'],
+  'tt0482571':['mystery-thriller','english-language','usa','2000s','film','twist-ending','rivalry','obsession','non-linear-narrative','unreliable-narration','nolan-style','period-drama','dark-tone'],
+  'tt0209144':['psychological-thriller','english-language','usa','2000s','film','unreliable-narration','non-linear-narrative','twist-ending','identity-crisis','nolan-style','revenge-driven'],
+  'tt2267998':['psychological-thriller','english-language','usa','2010s','film','unreliable-narration','twist-ending','toxic-marriage','dark-tone','fincher-style','female-villain','media-manipulation','suburban-setting'],
+  'tt1291584':['crime-thriller','english-language','usa','2010s','film','missing-child','moral-dilemma','vigilante-justice','dark-tone','villeneuve-style','emotionally-devastating','parallel-investigation'],
+  'tt6751668':['crime-thriller','english-language','south-korea','2010s','film','class-divide','dark-comedy','twist-ending','ensemble-cast','satirical','emotionally-devastating','visually-striking'],
+  'tt2582802':['drama','english-language','usa','2010s','film','music-world','obsession','mentor-student','psychological','dark-tone','intense-pacing','coming-of-age-story'],
+  'tt0816711':['space-sci-fi','english-language','usa','2010s','film','linguistics','time-manipulation','grief-and-loss','slow-burn','female-lead-protagonist','philosophical','villeneuve-style'],
+  'tt0364569':['psychological-thriller','english-language','south-korea','2000s','film','revenge-driven','twist-ending','dark-tone','identity-crisis','disturbing','isolation'],
+  'tt0338013':['romance','english-language','usa','2000s','film','memory-and-identity','non-linear-narrative','grief-and-loss','surreal-dreamlike','emotionally-devastating'],
+  'tt0172495':['historical-action','english-language','usa','2000s','film','ancient-rome','revenge-driven','epic-scale','compelling-villain','honour-and-duty'],
+  'tt0120689':['drama','english-language','usa','1990s','film','death-row','prison-setting','supernatural','empathy-and-compassion','slow-burn','uplifting-tone'],
+  'tt1853728b':['western','english-language','usa','2010s','film','slavery','revenge-driven','dark-comedy','tarantino-style','violence-and-humor','morally-ambiguous-protagonist'],
+  'tt0120586':['drama','english-language','usa','1990s','film','social-discrimination','redemption-arc','prison','dark-tone','emotionally-devastating'],
+  'tt1853728c':['space-sci-fi','english-language','usa','2010s','film','artificial-intelligence','identity-crisis','slow-burn','visually-striking','dystopian','villeneuve-style'],
+  'tt0047478':['historical-action','english-language','japan','1950s','film','honour-and-duty','class-divide','ensemble-cast','kurosawa-style','action-choreography','slow-burn'],
+  'tt0087843':['crime-thriller','english-language','usa','1980s','film','organised-crime-saga','memory-and-identity','friendship-bond','non-linear-narrative','slow-burn','period-drama'],
+  'tt0253474':['war-drama','english-language','poland','2000s','film','world-war-ii','survival','based-on-true-story','emotionally-devastating','historical-drama','slow-burn'],
+  'tt0405094':['political-thriller','english-language','germany','2000s','film','surveillance','cold-war','redemption-arc','slow-burn','dark-tone'],
+  'tt0050083':['courtroom-drama','english-language','usa','1950s','film','single-location','ensemble-cast','justice-system','class-divide','slow-burn','moral-courage'],
+  // Hindi seeds
+  'in001':['action-adventure','hindi-language','india','1970s','film','revenge-driven','friendship-bond','rural-setting','ensemble-cast','classic-bollywood','dacoit-western'],
+  'in002':['coming-of-age-story','hindi-language','india','2000s','film','friendship-bond','romance','urban-setting','feel-good','dialogue-driven'],
+  'in003':['sports-drama','hindi-language','india','2000s','film','underdog-story','epic-scale','based-on-true-story','period-drama','ensemble-cast','uplifting-tone'],
+  'in004':['comedy','hindi-language','india','2000s','film','coming-of-age-story','friendship-bond','satirical','uplifting-tone','ensemble-cast'],
+  'in005':['crime-thriller','hindi-language','india','2010s','film','organised-crime-saga','revenge-driven','dark-tone','non-linear-narrative','anurag-kashyap-style','ensemble-cast'],
+  'in006':['crime-thriller','hindi-language','india','2010s','film','twist-ending','unreliable-narration','dark-comedy','cat-and-mouse-thriller','non-linear-narrative'],
+  'in007':['horror','hindi-language','india','2010s','film','mythology-folklore','greed-and-curse','slow-burn','visually-striking','supernatural-horror','dark-tone'],
+  'in008':['political-thriller','hindi-language','india','2010s','film','social-discrimination','police-procedural','dark-tone','institutional-corruption','based-on-true-story'],
+  'in009':['drama','hindi-language','india','2010s','film','grief-and-loss','class-divide','slow-burn','emotionally-devastating','romance'],
+  'in010':['sports-drama','hindi-language','india','2010s','film','father-child-relationship','based-on-true-story','female-lead-protagonist','underdog-story','uplifting-tone'],
+  'in011':['political-drama','hindi-language','india','2000s','film','youth-activism','india-setting','ensemble-cast','non-linear-narrative','emotionally-devastating'],
+  'in012':['drama','hindi-language','india','2000s','film','disability-representation','child-protagonist','mentor-student','emotionally-devastating','uplifting-tone'],
+  'in013':['spy-thriller','hindi-language','india','2010s','film','based-on-true-story','female-lead-protagonist','india-setting','emotional','cold-war'],
+  'in014':['drama','hindi-language','india','2010s','film','social-discrimination','female-lead-protagonist','courtroom-drama','dark-tone','india-setting'],
+  'in015':['crime-thriller','hindi-language','india','2010s','film','missing-person','mystery','twist-ending','female-lead-protagonist','india-setting'],
+  // Shows
+  'tv001':['crime-thriller','english-language','usa','2000s','series','prestige-tv','drug-trade','anti-hero','transformation-arc','morally-ambiguous-protagonist','slow-burn','dark-tone','ensemble-cast'],
+  'tv002':['historical-drama','english-language','uk','2010s','miniseries','prestige-tv','nuclear-disaster','based-on-true-story','slow-burn','emotionally-devastating','ensemble-cast'],
+  'tv003':['crime-thriller','english-language','usa','2010s','series','prestige-tv','detective-protagonist','psychological','serial-killer-thriller','slow-burn','non-linear-narrative','dark-tone'],
+  'tv004':['drama','english-language','usa','2010s','series','prestige-tv','family-dynamics','power-and-ambition','dark-comedy','satirical','ensemble-cast'],
+  'tv005':['crime-thriller','english-language','usa','2000s','series','prestige-tv','drug-trade','ensemble-cast','social-discrimination','slow-burn','institutional-corruption'],
+  'tv006':['crime-thriller','english-language','usa','2010s','series','prestige-tv','serial-killer-profiling','psychological','based-on-true-story','slow-burn','dark-tone'],
+  'tv007':['mystery-thriller','english-language','germany','2010s','series','prestige-tv','time-manipulation','non-linear-narrative','family-mystery','dark-tone','ensemble-cast'],
+  'tv008':['biographical-drama','hindi-language','india','2020s','series','prestige-tv','based-on-true-story','financial-thriller','india-setting','ensemble-cast'],
+  'tv009':['crime-drama','hindi-language','india','2010s','series','prestige-tv','organised-crime-saga','power-and-ambition','ensemble-cast','dark-tone','india-setting'],
+  'tv010':['comedy','hindi-language','india','2020s','series','prestige-tv','rural-setting','satirical','feel-good','india-setting','ensemble-cast'],
+  'tv011':['crime-thriller','hindi-language','india','2010s','series','prestige-tv','political-thriller','dark-tone','india-setting','ensemble-cast'],
+  'tv012':['crime-thriller','english-language','uk','2010s','series','prestige-tv','organised-crime-saga','period-drama','family-dynasty','anti-hero'],
+  'tv013':['crime-thriller','english-language','usa','2000s','series','prestige-tv','organised-crime-saga','family-dynamics','anti-hero','ensemble-cast','slow-burn'],
+  'tv014':['war-drama','english-language','usa','2000s','miniseries','prestige-tv','world-war-ii','based-on-true-story','ensemble-cast','heroism','emotionally-devastating'],
+  'tv015':['mystery-thriller','english-language','usa','2020s','series','prestige-tv','corporate-dystopia','identity-crisis','slow-burn','visually-striking','ensemble-cast'],
+};
+
+function tagMovie(movie) {
+  // Use hardcoded tags for seed movies, derived tags for wiki movies
+  if (SEED_TAGS[movie.id]) {
+    movie.tags = SEED_TAGS[movie.id];
+  } else if (movie.source === 'wikipedia' && movie.tags && movie.tags.length > 0) {
+    // Already tagged during fetch — housekeeping will normalise
+  } else {
+    // Fallback: basic meta tags
+    movie.tags = deriveTagsFromText('', movie);
+  }
+  movie.tagged = true;
+  const card = document.getElementById('card-' + movie.id);
+  const tagsEl = document.getElementById('tags-' + movie.id);
+  if (tagsEl) tagsEl.innerHTML = renderTagChips(movie.tags, new Set(), false);
+  if (card) { card.classList.remove('tagging-card'); const tl = card.querySelector('.tagging-label'); if (tl) tl.remove(); }
+}
+
+function tagAllUntagged() {
+  const untagged = Object.values(state.movies).filter(m => m.rating > 0 && !m.tagged);
+  if (!untagged.length) { showToast('Nothing to tag',''); return; }
+  untagged.forEach(m => tagMovie(m));
+  runHousekeeping(false);
+  saveLocalState(); syncDrive(); render();
+  showToast(`Tagged ${untagged.length} movies`, 'success');
+}
+
+// ─────────────────────────────────────────────
+// TABS
+// ─────────────────────────────────────────────
+function setTab(tab, btn) {
+  activeTab = tab;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  render();
+}
+function isShow(m) { return !!m.format; }
+function matchesTab(m) {
+  if (activeTab === 'all') return true;
+  if (activeTab === 'show') return isShow(m);
+  if (activeTab === 'movie') return !isShow(m);
+  return true;
+}
+
+// ─────────────────────────────────────────────
+// RENDER
+// ─────────────────────────────────────────────
+function render() { renderRecs(); renderRatedGrid(); renderRateGrid(); renderTagBrain(); updateStats(); }
+
+function renderRecs() {
+  const grid = document.getElementById('recsGrid');
+  const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
+  if (ratedTagged.length < 3) {
+    grid.innerHTML = `<div class="empty-state"><div class="icon">🎬</div><h3>Rate Movies First</h3><p>Rate at least 3 movies below.</p></div>`;
+    document.getElementById('recCount').textContent = 'needs 3+ rated & tagged movies';
+    return;
+  }
+  const scored = scoreMovies().filter(x => matchesTab(x.movie));
+  const top = scored.slice(0, state.settings.topN);
+  document.getElementById('recCount').textContent = top.length ? `top ${top.length} matches` : 'no matches yet';
+  grid.innerHTML = '';
+  if (!top.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">🔍</div><h3>No Matches Yet</h3><p>Rate more movies to build your taste profile.</p></div>`; return; }
+  top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, maxScore:scored[0]?.score||1 })));
+}
+
+function renderRatedGrid() {
+  const grid = document.getElementById('ratedGrid');
+  const rated = Object.values(state.movies).filter(m => m.rating > 0 && matchesTab(m)).sort((a,b) => b.rating-a.rating||a.title.localeCompare(b.title));
+  const untaggedCount = Object.values(state.movies).filter(m => m.rating > 0 && !m.tagged).length;
+  const btn = document.getElementById('tagUntaggedBtn');
+  btn.style.display = untaggedCount > 0 ? 'inline-flex' : 'none';
+  if (untaggedCount > 0) btn.textContent = `⟳ Tag ${untaggedCount} Untagged`;
+  document.getElementById('ratedCount').textContent = rated.length ? `${rated.length} titles` : 'none yet';
+  grid.innerHTML = '';
+  if (!rated.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">★</div><h3>Nothing Rated Yet</h3></div>`; return; }
+  rated.forEach(m => grid.appendChild(buildCard(m, { showEdit:true })));
+}
+
+function renderRateGrid() {
+  const grid = document.getElementById('rateGrid');
+  const batchSize = parseInt(document.getElementById('batchSize').value);
+  const unrated = Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && matchesTab(m));
+  const batch = unrated.slice(0, batchSize);
+  document.getElementById('rateCount').textContent = `${unrated.length} unrated · showing ${batch.length}`;
+  grid.innerHTML = '';
+  batch.forEach(m => grid.appendChild(buildCard(m, {})));
+}
+
+function buildCard(movie, opts={}) {
+  const { rank, score, matchedTags, maxScore, showEdit } = opts;
+  const card = document.createElement('div');
+  card.className = 'movie-card' + (movie.rating > 0 ? ' rated' : '');
+  card.id = 'card-' + movie.id;
+  const matchPct = maxScore ? Math.round((score/maxScore)*100) : 0;
+  const safeId = movie.id.replace(/'/g,"\\'");
+  card.innerHTML = `
+    <div class="card-poster">
+      <div class="card-poster-inner" style="background:${posterGrad(movie.title)}">
+        <div class="card-poster-year">${movie.year||''}${movie.format?' · '+movie.format.toUpperCase():''}</div>
+        <div class="card-poster-title">${movie.title}</div>
+        <div class="card-poster-dir">${movie.director||''}</div>
+      </div>
+      ${rank?`<div class="rank-badge">#${rank}</div>`:''}
+      ${movie.rating>0?`<div class="score-badge">${'★'.repeat(movie.rating)}${'☆'.repeat(5-movie.rating)}</div>`:''}
+    </div>
+    <div class="card-body">
+      <div class="card-title">${movie.title}</div>
+      <div class="card-meta">${movie.language}·${movie.country}·${movie.year||'?'}</div>
+      ${rank?`<div class="match-label">${matchPct}% match</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}
+      ${!movie.tagged&&movie.rating>0?`<div class="tagging-label">⟳ tagging...</div>`:''}
+      ${showEdit&&movie.rating>0?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star${movie.rating>=s?' active':''}" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
+      ${!showEdit&&movie.rating===0?`<div class="star-rating">${[1,2,3,4,5].map(s=>`<span class="star" onclick="rateMovie('${safeId}',${s})">★</span>`).join('')}</div>`:''}
+      <div class="card-tags" id="tags-${movie.id}">${renderTagChips(movie.tags, matchedTags, false)}</div>
+      <div class="card-actions">
+        ${movie.tagged?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ tags'}</button>`:''}
+        ${showEdit?`<button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>`:''}
+        ${!showEdit?`<button class="card-act" onclick="skipMovie('${safeId}',event)">${movie.skipped?'↩ restore':'skip'}</button>`:''}
+        <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
+      </div>
+    </div>`;
+  return card;
+}
+
+function renderTagChips(tags, matchedTags, expanded) {
+  if (!tags||!tags.length) return '';
+  const matched = matchedTags||new Set();
+  const list = expanded ? tags : tags.slice(0,10);
+  return list.map(t=>`<span class="tag${matched.has&&matched.has(t)?' matched':''}">${t}</span>`).join('')
+    + (tags.length>10&&!expanded?`<span class="tag" style="color:var(--muted2)">+${tags.length-10}</span>`:'');
+}
+
+function posterGrad(title) {
+  const h=[...title].reduce((a,c)=>a+c.charCodeAt(0),0);
+  return `linear-gradient(135deg,hsl(${h%360},15%,10%) 0%,hsl(${(h*7)%360},20%,16%) 100%)`;
+}
+
+// ─────────────────────────────────────────────
+// SCORING
+// ─────────────────────────────────────────────
+function computeTagWeights() {
+  const w={};
+  Object.values(state.movies).forEach(m => {
+    if (m.rating>0&&m.tags&&m.tags.length) {
+      const wt = m.rating-3;
+      m.tags.forEach(t => { w[t]=(w[t]||0)+wt; });
+    }
+  });
+  state.tagWeights=w;
+}
+
+function scoreMovies() {
+  computeTagWeights();
+  return Object.values(state.movies)
+    .filter(m => m.rating===0&&m.tagged&&m.tags&&m.tags.length)
+    .map(m => {
+      let score=0, posOverlap=0;
+      const matched=new Set();
+      m.tags.forEach(t => {
+        const w=state.tagWeights[t];
+        if (w) { score+=w; if (w>0){matched.add(t);posOverlap++;} }
+      });
+      return { movie:m, score, matchedTags:matched, posOverlap };
+    })
+    .filter(x => x.posOverlap>0&&x.score>0)
+    .sort((a,b) => b.score-a.score);
+}
+
+// ─────────────────────────────────────────────
+// RATING
+// ─────────────────────────────────────────────
+function rateMovie(id, rating) {
+  const movie = state.movies[id];
+  if (!movie) return;
+  movie.rating = rating;
+  if (!movie.tagged) tagMovie(movie);
+  runHousekeeping(false);
+  saveLocalState(); syncDrive(); render();
+  showToast(`"${movie.title}" → ${rating}/5`, 'success');
+}
+
+// ─────────────────────────────────────────────
+// CARD ACTIONS
+// ─────────────────────────────────────────────
+function deleteMovie(id, e) {
+  if (e) e.stopPropagation();
+  const m = state.movies[id];
+  if (!m||!confirm(`Remove "${m.title}"?`)) return;
+  delete state.movies[id];
+  saveLocalState(); syncDrive(); render();
+  showToast(`Removed "${m.title}"`, '');
+}
+function skipMovie(id, e) {
+  if (e) e.stopPropagation();
+  const m = state.movies[id];
+  if (!m) return;
+  m.skipped = !m.skipped;
+  saveLocalState(); renderRateGrid();
+  showToast(m.skipped?`Skipped "${m.title}"`:`Restored "${m.title}"`, '');
+}
+function retagMovie(id, e) {
+  if (e) e.stopPropagation();
+  const m = state.movies[id];
+  if (!m) return;
+  m.tagged=false; m.tags=[];
+  tagMovie(m);
+  runHousekeeping(false);
+  saveLocalState(); syncDrive(); render();
+  showToast(`Re-tagged "${m.title}"`, '');
+}
+function toggleTags(id, e) {
+  if (e) e.stopPropagation();
+  const m = state.movies[id];
+  if (!m||!m.tags||!m.tags.length) return;
+  m._expanded = !m._expanded;
+  const el = document.getElementById('tags-'+id);
+  if (el) el.innerHTML = renderTagChips(m.tags, new Set(), m._expanded);
+  const card = document.getElementById('card-'+id);
+  if (card) { const b=card.querySelector('.card-act'); if(b&&(b.textContent.includes('tags')||b.textContent.includes('less'))) b.textContent=m._expanded?'▲ less':'▼ tags'; }
+}
+
+// ─────────────────────────────────────────────
+// HOUSEKEEPING (local dedup)
+// ─────────────────────────────────────────────
+function runHousekeeping(manual=true) {
+  const REMAP = {
+    'revenge':'revenge-driven','revenge-narrative':'revenge-driven',
+    'nonlinear':'non-linear-narrative','non-linear':'non-linear-narrative',
+    'slowburn':'slow-burn','slow burn':'slow-burn',
+    'morally-grey':'morally-ambiguous-protagonist','moral-ambiguity':'morally-ambiguous-protagonist',
+    'twist':'twist-ending','plot-twist':'twist-ending',
+    'dark-humor':'dark-comedy','dark-humour':'dark-comedy',
+    'organized-crime':'organised-crime-saga','organised-crime':'organised-crime-saga',
+    'period-piece':'period-drama','historical':'historical-drama',
+    'coming-of-age':'coming-of-age-story',
+    'unreliable-narrator':'unreliable-narration',
+    'ensemble':'ensemble-cast','ensemble-driven':'ensemble-cast',
+    'cat-and-mouse':'cat-and-mouse-thriller',
+    'heist':'heist-thriller','heist-film':'heist-thriller',
+    'serial-killer':'serial-killer-thriller',
+    'based-on-true-events':'based-on-true-story','true-story':'based-on-true-story',
+    'sci-fi':'science-fiction','scifi':'science-fiction',
+    'bollywood':'hindi-language','indian-cinema':'india-setting',
+  };
+  Object.values(state.movies).forEach(m => {
+    if (!m.tags) return;
+    m.tags = [...new Set(m.tags.map(t => {
+      const n=t.toLowerCase().trim().replace(/\s+/g,'-');
+      return REMAP[n]||n;
+    }))];
+  });
+  if (manual) showToast('Tags normalised', 'success');
+  updateHKStatus('tags: '+countUniqueTags());
+}
+
+function countUniqueTags() { const s=new Set(); Object.values(state.movies).forEach(m=>(m.tags||[]).forEach(t=>s.add(t))); return s.size; }
+function updateHKStatus(msg) { document.getElementById('hkStatus').textContent=msg; }
+
+// ─────────────────────────────────────────────
+// TAG BRAIN
+// ─────────────────────────────────────────────
+function setTagFilter(filter, btn) {
+  tagFilter=filter;
+  document.querySelectorAll('.tb-filter-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTagBrain();
+}
+function renderTagBrain() {
+  computeTagWeights();
+  const grid=document.getElementById('tagBrainGrid');
+  const countEl=document.getElementById('tagBrainCount');
+  const map={};
+  Object.values(state.movies).forEach(m => {
+    if (!m.tagged||!m.tags) return;
+    m.tags.forEach(tag => {
+      if (!map[tag]) map[tag]={weight:state.tagWeights[tag]||0,movieCount:0,movies:[]};
+      map[tag].movieCount++; map[tag].movies.push(m);
+    });
+  });
+  let entries=Object.entries(map);
+  if (!entries.length) { grid.innerHTML='<span style="font-size:12px;color:var(--muted)">No tags yet.</span>'; countEl.textContent='rate movies to populate'; return; }
+  if (tagFilter==='positive') entries=entries.filter(([,v])=>v.weight>0);
+  else if (tagFilter==='negative') entries=entries.filter(([,v])=>v.weight<0);
+  else if (tagFilter==='neutral') entries=entries.filter(([,v])=>v.weight===0);
+  entries.sort((a,b)=>Math.abs(b[1].weight)-Math.abs(a[1].weight)||a[0].localeCompare(b[0]));
+  countEl.textContent=`${entries.length} tags${tagFilter!=='all'?' · filtered':''}`;
+  grid.innerHTML=entries.map(([tag,data])=>{
+    const cls=data.weight>0?'positive':data.weight<0?'negative':'neutral';
+    const ws=data.weight>0?'+'+data.weight:data.weight===0?'~':data.weight;
+    const safe=tag.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return `<span class="tb-tag ${cls}" onclick="openTagPanel('${safe}')">${tag}<span class="tb-weight">${ws}</span><span class="tb-count">${data.movieCount}</span></span>`;
+  }).join('');
+}
+function openTagPanel(tag) {
+  computeTagWeights();
+  document.getElementById('tagPanelName').textContent=tag;
+  const movies=Object.values(state.movies).filter(m=>m.tagged&&m.tags&&m.tags.includes(tag));
+  const weight=state.tagWeights[tag]||0;
+  const ws=weight>0?`+${weight} (you like this)`:weight<0?`${weight} (you dislike this)`:'~ unweighted';
+  document.getElementById('tagPanelStat').innerHTML=`weight: <span style="color:var(--accent)">${ws}</span> · ${movies.length} titles`;
+  const rated=movies.filter(m=>m.rating>0).sort((a,b)=>b.rating-a.rating);
+  const unrated=movies.filter(m=>m.rating===0);
+  let html='';
+  if (rated.length) {
+    html+=`<div style="font-size:10px;color:var(--muted);margin-bottom:7px;font-family:'DM Mono',monospace;text-transform:uppercase;letter-spacing:1px">Rated</div>`;
+    html+=rated.map(m=>`<div class="tag-panel-movie"><div style="flex:1"><div class="tag-panel-movie-title">${m.title}</div><div class="tag-panel-movie-meta">${m.year}·${m.language}</div></div><div style="color:var(--accent);font-size:11px">${'★'.repeat(m.rating)}</div></div>`).join('');
+  }
+  if (unrated.length) {
+    html+=`<div style="font-size:10px;color:var(--muted);margin:10px 0 7px;font-family:'DM Mono',monospace;text-transform:uppercase;letter-spacing:1px">In Pool</div>`;
+    html+=unrated.slice(0,20).map(m=>`<div class="tag-panel-movie"><div style="flex:1"><div class="tag-panel-movie-title">${m.title}</div><div class="tag-panel-movie-meta">${m.year}·${m.language}</div></div><div style="font-size:10px;color:var(--muted2)">unrated</div></div>`).join('');
+    if (unrated.length>20) html+=`<div style="font-size:10px;color:var(--muted);padding:6px 0">+${unrated.length-20} more</div>`;
+  }
+  document.getElementById('tagPanelMovies').innerHTML=html||'<span style="color:var(--muted);font-size:12px">No titles.</span>';
+  document.getElementById('tagPanel').classList.add('open');
+}
+function closeTagPanel() { document.getElementById('tagPanel').classList.remove('open'); }
+
+// ─────────────────────────────────────────────
+// STATS
+// ─────────────────────────────────────────────
+function updateStats() {
+  const movies=Object.values(state.movies);
+  const rated=movies.filter(m=>m.rating>0);
+  const tagged=movies.filter(m=>m.tagged);
+  const avg=rated.length?(rated.reduce((s,m)=>s+m.rating,0)/rated.length).toFixed(1):'—';
+  document.getElementById('statRated').textContent=rated.length;
+  document.getElementById('statTagged').textContent=tagged.length;
+  document.getElementById('statTags').textContent=countUniqueTags();
+  document.getElementById('statPool').textContent=movies.length;
+  document.getElementById('statAvg').textContent=avg;
+  updateHKStatus('tags: '+countUniqueTags());
+}
+function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); renderRecs(); }
+
+// ─────────────────────────────────────────────
+// PERSISTENCE
+// ─────────────────────────────────────────────
+function saveLocalState() {
+  try { localStorage.setItem('cinelens_v2',JSON.stringify({movies:state.movies,settings:state.settings,drive:{connected:state.drive.connected,folderId:state.drive.folderId,fileId:state.drive.fileId}})); } catch(e) {}
+  updateStats();
+}
+function loadLocalState() {
+  try {
+    const raw=localStorage.getItem('cinelens_v2');
+    if (raw) {
+      const s=JSON.parse(raw);
+      if (s.movies) state.movies=s.movies;
+      if (s.settings) state.settings=s.settings;
+      if (s.drive) { state.drive.connected=s.drive.connected; state.drive.folderId=s.drive.folderId||''; state.drive.fileId=s.drive.fileId||''; }
+      document.getElementById('topN').value=state.settings.topN;
+      document.getElementById('topNVal').textContent=state.settings.topN;
+    }
+  } catch(e) {}
+}
+
+// ─────────────────────────────────────────────
+// GOOGLE DRIVE
+// ─────────────────────────────────────────────
+const DRIVE_FILE='cinelens_data.json';
+function openDriveModal() { document.getElementById('driveModal').classList.remove('hidden'); const k=localStorage.getItem('cinelens_drive_key'); if(k) document.getElementById('driveApiKey').value=k; document.getElementById('driveFolderId').value=state.drive.folderId; }
+function skipDrive() { document.getElementById('driveModal').classList.add('hidden'); showToast('Using local storage',''); }
+async function connectDrive() {
+  const apiKey=document.getElementById('driveApiKey').value.trim();
+  const folderId=document.getElementById('driveFolderId').value.trim();
+  if (!apiKey) { showToast('Enter API key','error'); return; }
+  state.drive.apiKey=apiKey; state.drive.folderId=folderId;
+  localStorage.setItem('cinelens_drive_key',apiKey);
+  document.getElementById('driveModal').classList.add('hidden');
+  setDriveStatus('syncing');
+  const fileId=await findDriveFile(apiKey,folderId);
+  if (fileId) { state.drive.fileId=fileId; await loadFromDrive(); } else await createDriveFile();
+  state.drive.connected=true; saveLocalState(); setDriveStatus('connected'); render();
+}
+function setDriveStatus(s) { document.getElementById('driveDot').className='drive-dot '+s; document.getElementById('driveLabel').textContent=s==='connected'?'drive connected':s==='syncing'?'syncing...':'not connected'; }
+async function findDriveFile(k,f) { try { const q=f?`name='${DRIVE_FILE}' and '${f}' in parents and trashed=false`:`name='${DRIVE_FILE}' and trashed=false`; const d=await(await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&key=${k}&fields=files(id,name)`)).json(); return d.files?.[0]?.id||null; } catch(e){return null;} }
+async function loadFromDrive() { if(!state.drive.fileId||!state.drive.apiKey)return; try { setDriveStatus('syncing'); const d=await(await fetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media&key=${state.drive.apiKey}`)).json(); if(d.movies){state.movies=d.movies;if(d.settings)state.settings=d.settings;saveLocalState();render();showToast('Loaded from Drive','success');} setDriveStatus('connected'); } catch(e){setDriveStatus('connected');} }
+async function createDriveFile() { if(!state.drive.apiKey)return; try { const meta={name:DRIVE_FILE,mimeType:'application/json',parents:state.drive.folderId?[state.drive.folderId]:undefined}; const form=new FormData(); form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'})); form.append('file',new Blob([JSON.stringify({movies:state.movies,settings:state.settings})],{type:'application/json'})); const d=await(await fetch(`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&key=${state.drive.apiKey}`,{method:'POST',body:form})).json(); state.drive.fileId=d.id; saveLocalState(); } catch(e){} }
+async function syncDrive() { const k=localStorage.getItem('cinelens_drive_key'); if(!k)return; if(!state.drive.apiKey)state.drive.apiKey=k; if(!state.drive.connected||!state.drive.fileId){if(state.drive.connected)await createDriveFile();return;} setDriveStatus('syncing'); try { await fetch(`https://www.googleapis.com/upload/drive/v3/files/${state.drive.fileId}?uploadType=media&key=${state.drive.apiKey}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({movies:state.movies,settings:state.settings})}); setDriveStatus('connected'); } catch(e){setDriveStatus('connected');} }
+
+// ─────────────────────────────────────────────
+// TOAST
+// ─────────────────────────────────────────────
+let _tt;
+function showToast(msg,type='') { const el=document.getElementById('toast'); el.textContent=msg; el.className='show '+type; clearTimeout(_tt); _tt=setTimeout(()=>el.className='',3000); }
+</script>
+</body>
+</html>
