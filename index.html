@@ -649,6 +649,9 @@ let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const CARD_REFRESH_BATCH_SIZE = 20;
+let currentWikiAbortController = null;
+let currentSleepCancel = null;
+let autoFetchPaused = false;
 const OTT_PLATFORMS = ['Netflix','Prime Video','Hotstar','JioCinema','SonyLIV','ZEE5','Apple TV+','YouTube'];
 const PROVIDER_ALIASES = {
   'Prime Video':['Prime Video','Amazon Prime Video'],
@@ -841,12 +844,20 @@ function isShowListPage(title) {
 
 
 async function wikiApiJson(url) {
+  if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
   const wait = Math.max(0, WIKI_REQUEST_DELAY_MS - (Date.now() - lastWikiRequestAt));
-  if (wait) await sleep(wait);
+  if (wait) await abortableSleep(wait);
+  if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
   lastWikiRequestAt = Date.now();
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error('Wikipedia request failed: ' + resp.status);
-  return resp.json();
+  const controller = new AbortController();
+  currentWikiAbortController = controller;
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) throw new Error('Wikipedia request failed: ' + resp.status);
+    return await resp.json();
+  } finally {
+    if (currentWikiAbortController === controller) currentWikiAbortController = null;
+  }
 }
 
 function recordRejectedTitle(title, mode, reason='not usable', source='wikipedia') {
@@ -865,12 +876,21 @@ function rejectedEntries() {
 
 function stopOrExpandPool() {
   if (poolExpansionInProgress) stopFetching();
-  else expandPool(true);
+  else {
+    autoFetchPaused = false;
+    expandPool(true);
+  }
 }
 
 function stopFetching() {
   fetchAbortRequested = true;
-  showToast('Stopping after current Wikipedia request...', '');
+  autoFetchPaused = true;
+  if (currentWikiAbortController) currentWikiAbortController.abort();
+  if (currentSleepCancel) currentSleepCancel();
+  hideFetchProgress();
+  const btn = document.getElementById('expandBtn');
+  if (btn) { btn.disabled = false; btn.textContent = '＋ Expand Pool'; }
+  showToast('Fetching stopped.', '');
 }
 
 function shuffled(list) {
@@ -996,6 +1016,8 @@ async function fetchWikiSourceTitles(mode, pagesPerCategory=4) {
 
 async function expandPool(manual=true) {
   if (poolExpansionInProgress) return;
+  if (!manual && autoFetchPaused) return;
+  if (manual) autoFetchPaused = false;
   poolExpansionInProgress = true;
   fetchAbortRequested = false;
   const btn = document.getElementById('expandBtn');
@@ -1052,9 +1074,11 @@ async function expandPool(manual=true) {
           recordRejectedTitle(title, mode, 'not a usable Hindi/English movie or show');
         }
       } catch(e) {
+        if (fetchAbortRequested || e.name === 'AbortError') break;
         recordRejectedTitle(title, mode, e.message || 'fetch failed');
       }
-      if (attempts % 20 === 0) await sleep(WIKI_BATCH_PAUSE_MS);
+      if (fetchAbortRequested) break;
+      if (attempts % 20 === 0) await abortableSleep(WIKI_BATCH_PAUSE_MS);
     }
 
     if (!needsMorePerfectRecommendations() && !manual) break;
@@ -1064,8 +1088,9 @@ async function expandPool(manual=true) {
   if (manual || chasingPerfect || added) hideFetchProgress();
   if (btn) { btn.disabled = false; btn.textContent = '＋ Expand Pool'; }
   poolExpansionInProgress = false;
-  const stopped = fetchAbortRequested;
+  const stopped = fetchAbortRequested || autoFetchPaused;
   fetchAbortRequested = false;
+  if (!stopped) autoFetchPaused = false;
   saveLocalState(); syncDrive(); render();
   if (stopped && manual) showToast(`Stopped. Added ${added} titles.`, added?'success':'');
   else if (manual || added) showToast(`Added ${added} new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} to pool`, added?'success':'');
@@ -1356,7 +1381,21 @@ function scoringTags(movie) {
   return (base || []).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t));
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function abortableSleep(ms) {
+  if (fetchAbortRequested || ms <= 0) return Promise.resolve();
+  return new Promise(resolve => {
+    let timer = null;
+    const done = () => {
+      if (timer) clearTimeout(timer);
+      if (currentSleepCancel === done) currentSleepCancel = null;
+      resolve();
+    };
+    currentSleepCancel = done;
+    timer = setTimeout(done, ms);
+  });
+}
+
+function sleep(ms) { return abortableSleep(ms); }
 
 function showFetchProgress(label, pct, sub) {
   const el = document.getElementById('fetchProgress');
@@ -1571,7 +1610,7 @@ function needsMorePerfectRecommendations(target=PERFECT_REC_TARGET) {
 }
 
 function maybeAutoExpandPool() {
-  if (activeTab === 'pool' || activeTab === 'rejected') return;
+  if (activeTab === 'pool' || activeTab === 'rejected' || autoFetchPaused) return;
   const available = discoveryPool().length;
   const needsPerfect = needsMorePerfectRecommendations();
   const gap = needsPerfect ? 2000 : 120000;
@@ -1592,7 +1631,7 @@ function renderRecs() {
     const scored = recommendationCandidates();
     const top = scored.slice(0, state.settings.topN);
     const perfectCount = perfectRecommendationCount(scored);
-    if (perfectCount < PERFECT_REC_TARGET && !poolExpansionInProgress) {
+    if (perfectCount < PERFECT_REC_TARGET && !poolExpansionInProgress && !autoFetchPaused) {
       lastAutoExpandAt = Date.now();
       setTimeout(() => expandPool(false), 100);
     }
@@ -1606,7 +1645,7 @@ function renderRecs() {
   }
 
   const batch = discoveryPool().slice(0, batchSize);
-  if (ratedTagged.length >= 3 && !poolExpansionInProgress) {
+  if (ratedTagged.length >= 3 && !poolExpansionInProgress && !autoFetchPaused) {
     lastAutoExpandAt = Date.now();
     setTimeout(() => expandPool(false), 100);
   }
