@@ -382,8 +382,11 @@
 // The API returns page titles which we then individually fetch.
 // ─────────────────────────────────────────────
 const WIKI_SOURCES = {
-  english: 'Category:English-language_films',
-  hindi: 'Category:Hindi-language_films'
+  movies: ['Category:English-language_films','Category:Hindi-language_films'],
+  shows: ['Category:English-language_television_shows','Category:Hindi-language_television_shows','Category:Indian_web_series']
+};
+const WIKI_LIST_SOURCES = {
+  shows: ['List of television programs: A','List of television programs: B','List of television programs: C','List of Indian television series','List of British television programmes']
 };
 
 // Curated expansion packs — well-known films by title, fetched from Wikipedia
@@ -488,6 +491,14 @@ const EXPANSION_HINDI = [
   "RRR (film)","Baahubali: The Beginning","Baahubali 2: The Conclusion",
   "KGF: Chapter 1","KGF: Chapter 2","Pushpa: The Rise","Kantara (film)",
   "Vikram (2022 film)","Jailer (film)","Leo (2023 film)","Indian 2"
+];
+
+const EXPANSION_SHOWS = [
+  "Better Call Saul","Fargo (TV series)","The Bear (TV series)","The Last of Us (TV series)","The Crown (TV series)",
+  "The Boys (TV series)","Fleabag","Sherlock (TV series)","Mr. Robot","Narcos","Mad Men","House of Cards (American TV series)",
+  "The Office (American TV series)","Black Mirror","Stranger Things","The Mandalorian","Andor (TV series)","The Queen's Gambit (miniseries)",
+  "Mare of Easttown","The Night Of","Delhi Crime","Made in Heaven (TV series)","Paatal Lok","Aspirants (web series)",
+  "Special Ops (Indian TV series)","Rocket Boys","Gullak","Tabbar","Kohrra","Farzi","Dahaad","The Family Man (Indian TV series)"
 ];
 
 // ─────────────────────────────────────────────
@@ -637,9 +648,33 @@ function recommendationTags(tags) {
   return [...new Set((tags||[]).filter(t => !isMetaTag(t)))];
 }
 
-async function fetchWikiSourceTitles(pagesPerCategory=4) {
+function expansionMode() {
+  if (activeTab === 'movie') return 'movies';
+  if (activeTab === 'show') return 'shows';
+  return 'all';
+}
+
+function sourceCategoriesForMode(mode) {
+  if (mode === 'movies') return WIKI_SOURCES.movies;
+  if (mode === 'shows') return WIKI_SOURCES.shows;
+  return [...WIKI_SOURCES.movies, ...WIKI_SOURCES.shows];
+}
+
+function curatedTitlesForMode(mode) {
+  if (mode === 'movies') return [...EXPANSION_ENGLISH, ...EXPANSION_HINDI];
+  if (mode === 'shows') return EXPANSION_SHOWS;
+  return [...EXPANSION_SHOWS, ...EXPANSION_ENGLISH, ...EXPANSION_HINDI];
+}
+
+function matchesExpansionMode(movie, mode) {
+  if (mode === 'movies') return !movie.format;
+  if (mode === 'shows') return !!movie.format;
+  return true;
+}
+
+async function fetchWikiSourceTitles(mode, pagesPerCategory=4) {
   const titles = [];
-  for (const category of Object.values(WIKI_SOURCES)) {
+  for (const category of sourceCategoriesForMode(mode)) {
     let cmcontinue = '';
     try {
       for (let page = 0; page < pagesPerCategory; page++) {
@@ -654,6 +689,18 @@ async function fetchWikiSourceTitles(pagesPerCategory=4) {
       }
     } catch(e) {}
   }
+  if (mode === 'shows' || mode === 'all') {
+    for (const listPage of WIKI_LIST_SOURCES.shows) {
+      try {
+        const url = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(listPage)}&prop=links&pllimit=500&plnamespace=0&format=json&origin=*`;
+        const data = await (await fetch(url)).json();
+        const page = Object.values(data.query?.pages||{})[0];
+        (page?.links||[]).forEach(link => {
+          if (!obviousNonMovieTitle(link.title)) titles.push(link.title);
+        });
+      } catch(e) {}
+    }
+  }
   return [...new Set(titles)];
 }
 
@@ -662,10 +709,11 @@ async function expandPool(manual=true) {
   poolExpansionInProgress = true;
   const btn = document.getElementById('expandBtn');
   if (btn) { btn.disabled = true; btn.textContent = 'Fetching...'; }
-  if (manual) showFetchProgress('Expanding pool from Wikipedia...', 0, '');
+  const mode = expansionMode();
+  if (manual) showFetchProgress(`Expanding ${mode === 'all' ? 'movies and shows' : mode} from Wikipedia...`, 0, '');
 
-  const sourceTitles = await fetchWikiSourceTitles(manual ? 6 : 3);
-  const allTitles = [...sourceTitles, ...EXPANSION_ENGLISH, ...EXPANSION_HINDI];
+  const sourceTitles = await fetchWikiSourceTitles(mode, manual ? 6 : 3);
+  const allTitles = [...sourceTitles, ...curatedTitlesForMode(mode)];
   const existing = new Set(Object.values(state.movies).map(m => normaliseTitleKey(m.title)));
   const toFetch = allTitles.filter(t => {
     const clean = normaliseTitleKey(t);
@@ -682,9 +730,9 @@ async function expandPool(manual=true) {
     attempts++;
     if (manual) showFetchProgress(`Finding new movies ${added}/${target}`, (i/maxAttempts)*100, title);
     try {
-      const movie = await fetchWikiMovie(title);
+      const movie = await fetchWikiMovie(title, mode);
       if (movie && !state.movies[movie.id]) {
-        if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie)) {
+        if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, mode)) {
           state.movies[movie.id] = movie;
           added++;
         } else {
@@ -701,7 +749,7 @@ async function expandPool(manual=true) {
   saveLocalState(); syncDrive(); render();
   if (manual || added) showToast(`Added ${added} new movies to pool`, added?'success':'');
 }
-async function fetchWikiMovie(wikiTitle) {
+async function fetchWikiMovie(wikiTitle, mode='all') {
   // Fetch extract + page props from Wikipedia API
   const url = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|revisions|categories&exintro=1&explaintext=1&rvprop=content&rvsection=0&cllimit=20&format=json&origin=*`;
   const resp = await fetch(url);
@@ -714,7 +762,7 @@ async function fetchWikiMovie(wikiTitle) {
   const extract = page.extract || '';
   const title = page.title.replace(/ \(.*\)$/, '').trim();
   const id = 'wiki_' + page.pageid;
-  if (obviousNonMovieTitle(page.title) || /\b(film series|media franchise|shared universe|franchise|television series|web series)\b/i.test(extract.slice(0, 500))) return null;
+  if (obviousNonMovieTitle(page.title) || /\b(film series|media franchise|shared universe|franchise)\b/i.test(extract.slice(0, 500))) return null;
 
   // Parse year from extract
   const yearMatch = extract.match(/\b(19[3-9]\d|20[012]\d)\b/);
@@ -730,7 +778,10 @@ async function fetchWikiMovie(wikiTitle) {
   let format = null;
   if (cats.some(c => c.includes('television series') || c.includes('tv series'))) format = 'series';
   if (cats.some(c => c.includes('miniseries'))) format = 'miniseries';
+  if (!format && /\b(television series|tv series|web series|miniseries|streaming television series)\b/i.test(extract.slice(0, 600))) format = 'series';
   if (cats.some(c => c.includes('film series') || c.includes('media franchise') || c.includes('fictional universes'))) return null;
+  if (mode === 'movies' && format) return null;
+  if (mode === 'shows' && !format) return null;
 
   // Country
   let country = 'USA';
