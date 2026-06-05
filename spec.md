@@ -1573,6 +1573,69 @@ Wikipedia thumbnail parsed: true
 active-tab-only render: true
 ```
 
+## 28. Concept Quality and Card Explanation Redesign
+
+### 28.1 Problem
+
+The first canonical concept implementation over-homogenized phrases by promoting their individual tokens. This made concepts such as `crime`, `thriller`, `child`, `father` and `relationship` appear across hundreds of unrelated titles. The cards then repeated the same high-weight concepts, making recommendations look homogeneous and poorly explained.
+
+### 28.2 Phrase-preserving concepts
+
+- Canonicalization may merge genuinely similar phrases, but it must not promote the individual words inside a phrase into independent concepts.
+- `father-child-relationship` remains a phrase-level concept.
+- `boy-discovers` and `boy-keeps-discovering` may still merge because their normalized phrase signatures match.
+- Generic single-word fragments such as `crime`, `thriller`, `child`, `relationship`, `return` and `discover` are excluded from user-facing concept presentation.
+- The canonical version is increased so existing saved titles rebuild automatically without losing ratings, watchlist state or suppressions.
+
+### 28.3 Genre evidence
+
+Broad genre labels require corroboration.
+
+- `crime-thriller` requires at least two distinct crime-story signals, an explicit lead genre, or a relevant category.
+- A single occurrence of `detective`, `crime`, `murder` or `investigation` must not classify an otherwise unrelated title as crime-thriller.
+- Narrow concepts such as courtroom drama, heist, serial killer, prison setting or detective protagonist remain separately useful when their own evidence exists.
+
+### 28.4 Specificity-aware recommendations
+
+Concept contribution is multiplied by corpus specificity derived from document frequency.
+
+- Rare concepts retain high explanatory and recommendation value.
+- Concepts shared by a large fraction of the pool are strongly downweighted rather than allowed to dominate every score.
+- User taste weight is preserved; specificity only controls how diagnostic that concept is among the available titles.
+
+### 28.5 Card presentation
+
+Cards no longer display a ranked dump of five near-identical chips.
+
+- `Why`: at most two positively weighted concepts that contributed to this recommendation, ordered by actual weighted contribution.
+- `Distinct`: at most three comparatively rare concepts that describe what separates this title from the rest of the pool.
+- `More`: available only when expanded.
+- The selected concept is omitted from cards inside its own concept workspace because repeating it on every card adds no information.
+- Numeric chip ranks are removed.
+
+### 28.6 Visual theme
+
+The application background, control deck and cards use black and neutral dark-grey surfaces. Warm brown/red page glows are removed. Yellow remains the interaction accent rather than a background tint.
+
+### 28.7 Required verification and delivery
+
+Smoke testing must prove that token fragments are not promoted, a one-signal story is not classified as crime-thriller, corroborated crime evidence still works, broad concepts receive lower specificity, card explanations are limited and grouped, selected concepts are omitted in their own workspace, and the final computed background is black/dark grey. Complete the usual syntax, diff, cleanup, specification, commit and push steps.
+
+Current smoke result:
+
+```text
+status: PASS
+phrase preserved without father/child/relationship token promotion: true
+one detective signal does not create crime-thriller: true
+corroborated detective + murder evidence creates crime-thriller: true
+broad crime-thriller specificity lower than family-secret: true
+Why limited and contribution ordered: true
+Distinct limited to three: true
+numeric chip ranks removed: true
+selected workspace concept omitted from its cards: true
+computed background: linear-gradient(rgb(16,16,16), rgb(8,8,8), rgb(5,5,5))
+```
+
 ## 22. Persistent Hidden Titles
 
 Pressing the x action on a title must hide it instead of deleting all knowledge of it.
