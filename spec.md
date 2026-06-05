@@ -1205,10 +1205,12 @@ Every completed code change must follow this sequence before it is reported as d
 2. Extract and syntax-check the inline JavaScript from the real `index.html`.
 3. Run a targeted runtime smoke test in headless Chrome against the real app, preferably served from localhost when storage or browser behavior is involved.
 4. Exercise the changed user flow and verify its persisted state, not only function presence.
-5. Run `git diff --check` and review the final diff for unintended changes.
-6. Commit only the intended project files with a descriptive commit message.
-7. Push the commit to the active branch's configured remote.
-8. Report the smoke-test result, commit hash and pushed branch.
+5. Remove every temporary test artifact, including smoke-test HTML files, extracted scripts, browser profiles, logs, server output and generated scratch files.
+6. Confirm no temporary artifact remains in the workspace or staged changes.
+7. Run `git diff --check` and review the final diff for unintended changes.
+8. Commit only the intended project files with a descriptive commit message.
+9. Push the commit to the active branch's configured remote.
+10. Report the smoke-test result, cleanup result, commit hash and pushed branch.
 
 Do not describe a change as complete after static checks alone when a browser-visible or persistence behavior was changed.
 
