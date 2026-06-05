@@ -269,7 +269,7 @@ Implementation detail: Movies and Shows may remain filters for recommendations r
 - Recommendations tab: only recommendations
 - Rated tab: only rated
 - Watchlist tab: only watchlist
-- Tags tab: only Tag Brain
+- Tags tab: concept brain plus the selected concept's shared title-card workspace
 - Pool tab: only Pool
 - Rejected tab: only Rejected
 
@@ -282,14 +282,15 @@ Recommended grouping:
 Row 1:
 
 - Top Recs slider
-- Since/year slider
+- Since/year numeric field
+- Hindi + English / Hindi / English selector
 - Tag count/housekeeping status
 
 Row 2:
 
 - Country selector
 - TMDB token/key input
-- Check Availability button
+- Refresh Streaming Info button
 - Service filters
 
 Row 3:
@@ -302,22 +303,24 @@ Row 3:
 
 The previous huddling issue came from cramped flex wrapping. Controls need `row-gap`, `column-gap` and/or dedicated rows.
 
-### 4.5 Check Availability Button
+### 4.5 Streaming Availability Actions
 
-The button previously called `check visible` should be labeled:
+The bulk button is labeled:
 
 ```text
-Check Availability
+Refresh Streaming Info
 ```
 
 Function:
 
-- Checks streaming/watch availability only for visible cards.
+- Refreshes streaming/watch availability for up to 12 visible cards.
 - Uses TMDB watch providers.
 - Uses the selected country.
 - Does not tag.
 - Does not add recommendations.
 - Does not process the entire pool.
+- Requires a saved TMDB token and explains that requirement when absent.
+- Each card also has `where`: without TMDB it opens JustWatch; with TMDB it refreshes providers in CineLens.
 
 ### 4.6 Cards
 
@@ -331,13 +334,13 @@ Cards should include:
 - Match bar where applicable
 - Star rating control
 - Availability chips/line
-- Tags
+- Canonical concepts ordered by relevance
 - Actions
 
 Actions should include, where relevant:
 
 - Re-tag
-- Check Availability
+- Where / streaming lookup
 - Watchlist / Remove from Watchlist
 - Delete/remove title
 - Expand/collapse tags
@@ -346,17 +349,16 @@ Every card must have a Retag button, not only Pool entries.
 
 ### 4.7 Tags on Cards
 
-Normal cards may show a limited number of tags with expand/collapse.
+Normal cards may show a limited number of concepts with expand/collapse.
 
-Pool cards must show all tags because Pool is for auditing.
+Expanded cards may show all concepts because Pool and Tags are auditing workspaces.
 
-Pool card tags must be removable with an `×`.
+Concept removal uses the global `Concept clicks: remove` toggle rather than a tiny per-chip `×`.
 
-Removing a tag must:
+Removing a concept must:
 
-- Remove from `movie.tags`
-- Remove from `movie.plotTags`
-- Remove from `movie.coreTags`
+- Add it to the title's persisted `suppressedConcepts`
+- Keep it suppressed through canonical rebuilds and retagging
 - Recompute tag weights
 - Save locally
 - Sync to Drive when connected
@@ -530,7 +532,7 @@ Expected behavior:
 
 1. Fetch page extract and categories using Wikipedia API.
 2. Read lead section for identity only.
-3. Extract story text from Plot/Synopsis/Premise/Story/Plot summary/Series overview.
+3. Split the extract into sections and select the strongest section whose content is genuinely narrative.
 4. Reject the page if no valid story section exists.
 5. Determine year.
 6. Determine language.
@@ -544,22 +546,18 @@ Expected behavior:
 
 This is critical.
 
-No plot/synopsis/premise/story section means skip.
+No content-qualified narrative section means skip.
 
 Do not fall back to intro/lead for tagging.
 
 Intro/lead may help identify the page, year, language, country and format, but not tags.
 
-Story headings currently accepted:
+Do not use an exact-heading allowlist. Wikipedia headings vary and may combine concepts, such as `Premise and main characters`.
 
-```js
-['Plot', 'Synopsis', 'Premise', 'Story', 'Plot summary', 'Series overview']
-```
-
-Acceptable improvement:
-
-- Add `Overview` only if it is clearly story/episode premise text, not generic production overview.
-- Avoid using `Reception`, `Cast`, `Production`, `Music`, `Release`, `Marketing`, `Awards`, `Legacy` for tags.
+- Evaluate every real section by narrative content.
+- Treat heading words only as weak supporting signals.
+- Penalize or reject production, reception, casting, episode-list, music, release, marketing, awards and similar non-story content.
+- Select the strongest qualifying section rather than the first familiar heading.
 
 ## 7. Tagging Engine Specification
 
@@ -1317,16 +1315,16 @@ Recommendation scoring must use `scoringTags(movie)`, not raw metadata tags.
 
 ## 18. Recent Bugfixes and UX Improvements (Latest Build)
 
-### 18.1 Tag Removability Everywhere
+### 18.1 Concept Interaction Everywhere
 
-**Change**: Tags were previously only removable on the Pool tab. Now they are removable on all cards.
+**Change**: Canonical concepts use one consistent interaction on all shared title cards.
 
 **Implementation**:
-- Unified `renderRemovableTagChips()` function for all card rendering
-- Tag removal (× button) available on Recommendations, Rated, Watchlist, and Pool tabs
-- Consistent tag expand/collapse with "+N" indicator for hidden tags
-- Tag removal updates `movie.tags`, `movie.coreTags`, `movie.plotTags`
-- Immediate re-render and state save on tag removal
+- Unified `renderConceptChips()` path through the shared `buildCard()` component
+- Explore mode opens the concept workspace
+- Remove mode persists title-specific suppression
+- Consistent concept expand/collapse with "+N" indicator
+- Immediate active-workspace render and state save on removal
 
 ### 18.2 Top Recs Slider Removal
 
@@ -1465,6 +1463,116 @@ The extracted inline JavaScript also passes:
 node --check
 ```
 
+## 26. Rejected Title Refresh Lane
+
+Rejected Wikipedia titles are not permanent dead ends. Pool expansion keeps a persisted count of successful new additions and, after every 500 additions, runs a bounded rejected-title refresh lane.
+
+- Each lane retries at most 25 eligible rejected titles, oldest retry first.
+- A recovered title passes the same language, year, format and hidden-title checks as a newly discovered title, then moves into the normal pool and leaves Rejected.
+- Hidden titles are never restored by the lane.
+- Automatic retries stop after three attempts for the current Wikipedia parser version. Manual retry remains available.
+- Increasing the parser version makes older failures eligible again, even if they exhausted retries under an earlier parser.
+- Existing saved rejected titles become due for one refresh lane on the next pool expansion after this feature is loaded.
+- The addition counter, lane history and per-title retry metadata persist locally and in the Google Drive brain file.
+- Stopping fetching interrupts the lane and preserves its due state for the next expansion.
+
+### 26.1 Required verification and delivery
+
+Changes to this lane must include a real headless-Chrome smoke test of the `expandPool()` trigger and recovery behavior, JavaScript syntax and diff checks, removal of every temporary harness/profile/log file, an update to this specification, a commit, and a push.
+
+Current smoke result:
+
+```text
+status: PASS
+fresh title added: true
+lane triggered at addition 500: true
+old-parser rejection recovered: true
+failed rejection advanced to retry 3/3: true
+hidden rejection skipped: true
+current-parser exhausted rejection skipped: true
+counter reset to 0 after completed lane: true
+```
+
+## 27. Concept Workspace, Shared Cards and Performance Release
+
+### 27.1 Tags / Concepts workspace
+
+The Tags tab is a first-class concept explorer rather than a chip cloud with a narrow drawer.
+
+- Concepts are searchable and filterable by All, You Like, You Dislike and Unweighted.
+- Selecting a concept opens an inline title-card workspace using the same `buildCard()` component as recommendations, Rated, Watchlist, Pool and Hidden.
+- The selected concept shows total, Rated, In Pool and Hidden counts.
+- Title cards can be filtered by All titles, Rated, In Pool or Hidden.
+- Large concept groups render 40 cards at a time with an explicit show-more action.
+- Shared cards retain the actions appropriate to their state: rate/rerate, watchlist, retag, availability, hide, restore or forget.
+
+### 27.2 Concepts on cards
+
+Cards display canonical concepts, not the pre-homogenization raw descriptor list.
+
+- Concepts are ordered by recommendation relevance: matched concepts first, then positive taste weight, then absolute taste weight.
+- The visible order is meaningful; the strongest explanation appears first.
+- Recommendation matches are visually highlighted.
+- Each concept tooltip reports its taste weight and current click behavior.
+
+### 27.3 Concept click mode and permanent removal
+
+The tiny tag-removal cross is replaced by a single explicit toggle:
+
+- `Concept clicks: explore` opens that concept in the Tags workspace.
+- `Concept clicks: remove` removes the clicked concept from that title.
+- Removed concepts are stored in the title's persisted `suppressedConcepts` list.
+- Canonical rebuilds, housekeeping, retagging, local reload and Drive reload must never reapply a suppressed concept to the same title.
+
+### 27.4 Discovery controls
+
+- The country selector uses an explicit dark color scheme so options remain readable.
+- The year range slider is replaced by a numeric year field.
+- A language selector supports Hindi + English, Hindi only and English only.
+- Year, language, country and platform changes update only the active card workspace.
+
+### 27.5 Availability clarity
+
+- The bulk action is named `Refresh Streaming Info` and explains that it refreshes up to 12 visible cards through TMDB.
+- A card's `where` action opens JustWatch when no TMDB token is saved.
+- With a TMDB token, `where` refreshes and displays providers inside CineLens.
+
+### 27.6 Wikipedia thumbnails
+
+- New Wikipedia fetches request a small `pageimages` thumbnail in the existing API call.
+- Cards use native lazy loading and asynchronous image decoding.
+- Existing titles are not bulk-refetched merely to obtain images; they gain thumbnails when naturally re-tagged or refreshed.
+
+### 27.7 Performance requirements
+
+- `render()` renders only the active tab instead of rebuilding every hidden grid.
+- Rating an already-tagged title recalculates weights without rebuilding the entire tag corpus.
+- Pool expansion rebuilds, saves and paints at bounded card batches rather than after each successful title.
+- Mobile disables decorative noise, backdrop blur and card entrance animation.
+
+### 27.8 Required verification and delivery
+
+This release requires a real headless-Chrome smoke test covering concept selection, shared cards, card rerating, permanent suppression through retag/rebuild, filters, active-tab-only rendering, availability labels and lazy thumbnails. It also requires JavaScript syntax and diff checks, deletion of all temporary files/profiles/logs, this specification update, a commit and a push.
+
+Current smoke result:
+
+```text
+status: PASS
+shared concept cards: true
+Rated / Pool / Hidden grouping: true
+strongest concept first: true
+rerating from shared card: true
+suppression survives canonical rebuild: true
+Hindi-only filter: true
+numeric year field: true
+dark country selector: true
+availability explanation: true
+concept click toggle: true
+lazy thumbnail: true
+Wikipedia thumbnail parsed: true
+active-tab-only render: true
+```
+
 ## 22. Persistent Hidden Titles
 
 Pressing the x action on a title must hide it instead of deleting all knowledge of it.
@@ -1595,32 +1703,29 @@ The manual-add error also hid the actual parser rejection reason behind the gene
 
 ### 24.2 Implementation
 
-- Accept `Storyline` and `Series summary` as direct narrative headings.
-- Accept `Overview` only when a generic narrative-content validator finds multiple character/action/story signals and the text is not dominated by production, casting, broadcast, ratings or reception language.
-- Continue rejecting production-only Overview sections.
+- Do not maintain an allowlist of exact story headings.
+- Split the plaintext extract into all real Wikipedia sections and score each section by its content.
+- Narrative scoring uses character relationships, story actions, narrative openings and action-bearing sentences.
+- Production, casting, broadcast, episode-list, ratings, reception and other non-story signals reduce or disqualify a section.
+- Heading words such as plot, premise, story, overview, summary or character are only weak hints. The exact heading is never required, so combined or novel headings such as `Premise and main characters` work without code changes.
+- Select the strongest qualifying narrative section and continue rejecting pages whose sections are production-only or otherwise non-narrative.
 - Add parser diagnostics for missing pages, franchise pages, missing story sections, type mismatch, missing language evidence and missing core identity fields.
 - Show the specific parser or network reason in manual-add errors and store it in the Rejected tab.
 
-No title-specific exception is used.
+No title-specific or exact-heading exception is used.
 
 ### 24.3 Verification
 
-Runtime smoke test was performed in headless Chrome against the real `index.html` served from localhost with the live Wikipedia API.
+Runtime smoke test was performed in headless Chrome against the real `index.html` served from localhost.
 
 Observed result:
 
 ```text
 status: PASS
-title: Two and a Half Men
-manual URL flow added title: true
-format: series
-year: 2003
-storyLength: 5000
-tagCount: 17
-rating prompt visible: true
-Series summary accepted: true
-production-only Overview rejected: true
-missing-page diagnostic: Wikipedia page not found
+compound heading accepted: true
+completely unseen heading accepted: true
+production-only section rejected: true
+exact heading allowlist present: false
 ```
 
 ## 21. Current Fix Changelog — Remove Browse Cards Slider
