@@ -432,7 +432,7 @@
   <div class="stats-bar">
     <div class="stat"><div class="stat-val" id="statRated">0</div><div class="stat-label">Rated</div></div>
     <div class="stat"><div class="stat-val" id="statTagged">0</div><div class="stat-label">Tagged</div></div>
-    <div class="stat"><div class="stat-val" id="statTags">0</div><div class="stat-label">Unique Tags</div></div>
+    <div class="stat"><div class="stat-val" id="statTags">0</div><div class="stat-label">Concepts</div></div>
     <div class="stat"><div class="stat-val" id="statPool">0</div><div class="stat-label">In Pool</div></div>
     <div class="stat"><div class="stat-val" id="statAvg">—</div><div class="stat-label">Avg Rating</div></div>
   </div>
@@ -715,6 +715,7 @@ let state = {
   settings: { topN: 10, minYear: 1970, watchCountry: 'IN', platforms: ['Netflix','Prime Video','Hotstar'] },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
+  canonicalTagStats: { raw:0, canonical:0, rebuiltAt:'' },
   rejectedWikiTitles: {},
   poolFetched: false
 };
@@ -739,6 +740,173 @@ const CONTAMINATED_FALLBACK_TAGS = new Set([...LOW_CONFIDENCE_PLOT_TAGS]);
 
 function normaliseTagName(tag) {
   return String(tag || '').toLowerCase().trim().replace(/\s+/g, '-');
+}
+
+const CANONICAL_TAG_VERSION = 1;
+const CANONICAL_FUNCTION_WORDS = new Set('a an the and or but nor so yet of in on at to from into onto by for with without as is are was were be been being has have had do does did will would can could may might must shall should this that these those it its he she they them his her their who whom whose which what when where while after before during then than also just still already again ever never very more most less least much many some any each every both either neither keeps keep kept starts start started begins begin began continues continue continued tries try tried'.split(' '));
+
+function stemCanonicalToken(token) {
+  let word = String(token || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (word.length <= 3) return word;
+  if (word.endsWith('ies') && word.length > 4) word = word.slice(0, -3) + 'y';
+  else if (word.endsWith('ing') && word.length > 5) word = word.slice(0, -3);
+  else if (word.endsWith('ed') && word.length > 4) word = word.slice(0, -2);
+  else if (/(ses|xes|zes|ches|shes)$/.test(word) && word.length > 5) word = word.slice(0, -2);
+  else if (word.endsWith('s') && word.length > 4 && !/(ss|us|is)$/.test(word)) word = word.slice(0, -1);
+  if (/(.)\1$/.test(word) && word.length > 4) word = word.slice(0, -1);
+  return word;
+}
+
+function canonicalTagFeatures(tag) {
+  const tokens = normaliseTagName(tag).split(/[^a-z0-9]+/).filter(Boolean)
+    .filter(token => !CANONICAL_FUNCTION_WORDS.has(token))
+    .map(stemCanonicalToken)
+    .filter(Boolean);
+  const unique = [...new Set(tokens)];
+  return {
+    tag: normaliseTagName(tag),
+    tokens: unique,
+    signature: [...unique].sort().join('-'),
+    phrase: unique.join('-'),
+    acronym: unique.length > 1 ? unique.map(token => token[0]).join('') : ''
+  };
+}
+
+function rawScoringTags(movie) {
+  const base = movie?.descriptorTags && movie.descriptorTags.length ? movie.descriptorTags : (movie?.coreTags && movie.coreTags.length ? movie.coreTags : (movie?.plotTags && movie.plotTags.length ? movie.plotTags : recommendationTags(movie?.tags || [])));
+  return [...new Set((base || []).filter(t => !isMetaTag(t)).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)))];
+}
+
+function canonicalTokenSimilarity(a, b) {
+  if (a === b) return 1;
+  const min = Math.min(a.length, b.length);
+  const max = Math.max(a.length, b.length);
+  if (min >= 3 && (a.startsWith(b) || b.startsWith(a))) return min / max;
+  const grams = word => {
+    const padded = `^${word}$`;
+    const out = new Set();
+    for (let i = 0; i < padded.length - 1; i++) out.add(padded.slice(i, i + 2));
+    return out;
+  };
+  const ga = grams(a), gb = grams(b);
+  let overlap = 0;
+  ga.forEach(g => { if (gb.has(g)) overlap++; });
+  return (2 * overlap) / Math.max(1, ga.size + gb.size);
+}
+
+function canonicalPhraseSimilarity(a, b) {
+  if (!a.tokens.length || !b.tokens.length) return 0;
+  if (a.signature === b.signature) return 1;
+  if (a.acronym && a.acronym === b.acronym && a.tokens.length === b.tokens.length) {
+    const aligned = a.tokens.every((token, i) => canonicalTokenSimilarity(token, b.tokens[i]) >= 0.28);
+    if (aligned) return 0.9;
+  }
+  const best = a.tokens.map(token => Math.max(...b.tokens.map(other => canonicalTokenSimilarity(token, other))));
+  const reverse = b.tokens.map(token => Math.max(...a.tokens.map(other => canonicalTokenSimilarity(token, other))));
+  const coverage = (best.reduce((sum, value) => sum + value, 0) + reverse.reduce((sum, value) => sum + value, 0)) / (best.length + reverse.length);
+  const lengthPenalty = Math.min(a.tokens.length, b.tokens.length) / Math.max(a.tokens.length, b.tokens.length);
+  return coverage * (0.7 + 0.3 * lengthPenalty);
+}
+
+function probableEntityTokens(movie) {
+  const text = String(movie?.storyText || '');
+  const counts = new Map();
+  const pattern = /[a-z0-9,'")\]]\s+([A-Z][a-z]{2,})\b/g;
+  let match;
+  while ((match = pattern.exec(text))) {
+    const token = stemCanonicalToken(match[1]);
+    if (token) counts.set(token, (counts.get(token) || 0) + 1);
+  }
+  return new Set([...counts.entries()].filter(([, count]) => count >= 2).map(([token]) => token));
+}
+
+function rebuildCanonicalTagBrain() {
+  const records = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})];
+  const frequency = new Map();
+  records.forEach(movie => rawScoringTags(movie).forEach(tag => frequency.set(tag, (frequency.get(tag) || 0) + 1)));
+  const tags = [...frequency.keys()];
+  const features = new Map(tags.map(tag => [tag, canonicalTagFeatures(tag)]));
+  const tokenDocFrequency = new Map();
+  const entityDocFrequency = new Map();
+  records.forEach(movie => {
+    const tokens = new Set(rawScoringTags(movie).flatMap(tag => features.get(tag)?.tokens || canonicalTagFeatures(tag).tokens));
+    tokens.forEach(token => tokenDocFrequency.set(token, (tokenDocFrequency.get(token) || 0) + 1));
+    probableEntityTokens(movie).forEach(token => entityDocFrequency.set(token, (entityDocFrequency.get(token) || 0) + 1));
+  });
+  const parent = new Map(tags.map(tag => [tag, tag]));
+  const find = tag => {
+    let root = parent.get(tag);
+    while (root !== parent.get(root)) root = parent.get(root);
+    let current = tag;
+    while (parent.get(current) !== root) { const next = parent.get(current); parent.set(current, root); current = next; }
+    return root;
+  };
+  const union = (a, b) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent.set(rb, ra);
+  };
+  const blocks = new Map();
+  const signatureGroups = new Map();
+  const addBlock = (key, tag) => {
+    if (!key) return;
+    if (!blocks.has(key)) blocks.set(key, []);
+    blocks.get(key).push(tag);
+  };
+  tags.forEach(tag => {
+    const feature = features.get(tag);
+    if (!signatureGroups.has(feature.signature)) signatureGroups.set(feature.signature, []);
+    signatureGroups.get(feature.signature).push(tag);
+    if (feature.acronym) addBlock(`a:${feature.acronym}:${feature.tokens.length}`, tag);
+    feature.tokens.forEach(token => addBlock(`t:${token.slice(0, 4)}`, tag));
+  });
+  signatureGroups.forEach(group => {
+    for (let i = 1; i < group.length; i++) union(group[0], group[i]);
+  });
+  blocks.forEach(group => {
+    if (group.length > 140) return;
+    for (let i = 0; i < group.length; i++) {
+      for (let j = i + 1; j < group.length; j++) {
+        const a = group[i], b = group[j];
+        if (find(a) === find(b)) continue;
+        if (canonicalPhraseSimilarity(features.get(a), features.get(b)) >= 0.84) union(a, b);
+      }
+    }
+  });
+  const clusters = new Map();
+  tags.forEach(tag => {
+    const root = find(tag);
+    if (!clusters.has(root)) clusters.set(root, []);
+    clusters.get(root).push(tag);
+  });
+  const labelFor = new Map();
+  const supportFor = new Map();
+  clusters.forEach(group => {
+    const label = [...group].sort((a, b) => (frequency.get(b) || 0) - (frequency.get(a) || 0) || canonicalTagFeatures(a).tokens.length - canonicalTagFeatures(b).tokens.length || a.length - b.length || a.localeCompare(b))[0];
+    const support = group.reduce((sum, tag) => sum + (frequency.get(tag) || 0), 0);
+    group.forEach(tag => { labelFor.set(tag, label); supportFor.set(tag, support); });
+  });
+  let changed = 0;
+  records.forEach(movie => {
+    const learned = [];
+    rawScoringTags(movie).forEach(tag => {
+      const feature = features.get(tag) || canonicalTagFeatures(tag);
+      if ((supportFor.get(tag) || 0) > 1) learned.push(labelFor.get(tag) || feature.phrase);
+      feature.tokens.forEach(token => {
+        const docs = tokenDocFrequency.get(token) || 0;
+        const entityDocs = entityDocFrequency.get(token) || 0;
+        const minDocs = records.length < 30 ? 2 : 3;
+        const maxDocs = Math.max(3, Math.ceil(records.length * (records.length < 30 ? 0.8 : 0.35)));
+        if (token.length >= 4 && docs >= minDocs && docs <= maxDocs && entityDocs < 2 && entityDocs < docs * 0.5) learned.push(token);
+      });
+    });
+    const fallback = rawScoringTags(movie).map(tag => labelFor.get(tag) || canonicalTagFeatures(tag).phrase).filter(Boolean);
+    const canonicalTags = [...new Set(learned.length ? learned : fallback)];
+    if (JSON.stringify(movie.canonicalTags || []) !== JSON.stringify(canonicalTags) || movie.canonicalTagVersion !== CANONICAL_TAG_VERSION) changed++;
+    movie.canonicalTags = canonicalTags;
+    movie.canonicalTagVersion = CANONICAL_TAG_VERSION;
+  });
+  state.canonicalTagStats = { raw:tags.length, canonical:new Set(records.flatMap(movie => movie.canonicalTags || [])).size, rebuiltAt:new Date().toISOString() };
+  return changed;
 }
 
 function cleanTagArray(tags, movie=null, keepLowConfidence=false) {
@@ -846,7 +1014,7 @@ function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats()) {
   };
 }
 
-function meaningfulTagCount(movie) { return scoringTags(movie).length; }
+function meaningfulTagCount(movie) { return rawScoringTags(movie).length; }
 
 function cardStatusLabel(movie) {
   if (movie.source === 'wikipedia') {
@@ -911,7 +1079,7 @@ function rebuildDescriptorBrain() {
 
 function cleanContaminatedTags(silent=true) {
   migrateLegacyPoolItems();
-  const changed = rebuildDescriptorBrain();
+  const changed = rebuildDescriptorBrain() + rebuildCanonicalTagBrain();
   computeTagWeights();
   if (changed) saveLocalState();
   if (changed && !silent) showToast(`Cleaned descriptor data on ${changed} titles`, 'success');
@@ -1311,9 +1479,14 @@ async function expandPool(manual=true) {
           if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, mode)) {
             state.movies[movie.id] = movie;
             added++;
-            runHousekeeping(false);
+            runHousekeeping(false, true);
             saveLocalState();
-            if (added % CARD_REFRESH_BATCH_SIZE === 0 || !needsMorePerfectRecommendations()) render();
+            if (added % CARD_REFRESH_BATCH_SIZE === 0 || !needsMorePerfectRecommendations()) {
+              rebuildCanonicalTagBrain();
+              computeTagWeights();
+              saveLocalState();
+              render();
+            }
             if (!needsMorePerfectRecommendations() && !manual) { fetchAbortRequested = true; break; }
           } else {
             recordRejectedTitle(title, mode, 'language/year/type mismatch');
@@ -1339,6 +1512,8 @@ async function expandPool(manual=true) {
   const stopped = fetchAbortRequested || autoFetchPaused;
   fetchAbortRequested = false;
   if (!stopped) autoFetchPaused = false;
+  rebuildCanonicalTagBrain();
+  computeTagWeights();
   saveLocalState(); syncDrive(); render();
   if (stopped && manual) showToast(`Stopped. Added ${added} titles.`, added?'success':'');
   else if (manual || added) showToast(`Added ${added} new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} to pool`, added?'success':'');
@@ -1722,8 +1897,9 @@ function tagEvidenceOk(tag, movie) {
 }
 
 function scoringTags(movie) {
-  const base = movie?.descriptorTags && movie.descriptorTags.length ? movie.descriptorTags : (movie?.coreTags && movie.coreTags.length ? movie.coreTags : (movie?.plotTags && movie.plotTags.length ? movie.plotTags : recommendationTags(movie?.tags || [])));
-  return [...new Set((base || []).filter(t => !isMetaTag(t)).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)))];
+  if (!movie) return [];
+  if (movie.canonicalTagVersion === CANONICAL_TAG_VERSION && Array.isArray(movie.canonicalTags)) return [...new Set(movie.canonicalTags)];
+  return [...new Set(rawScoringTags(movie).map(tag => canonicalTagFeatures(tag).phrase).filter(Boolean))];
 }
 
 function abortableSleep(ms) {
@@ -2210,7 +2386,7 @@ function buildCard(movie, opts={}) {
       ${poolView?`<div class="pool-card-note">${cardStatusLabel(movie)}${movie.retagMessage ? ` · ${movie.retagMessage}` : ''}</div>`:''}
       ${movie.retagStatus === 'failed' || movie.needsManualUrl ? renderWikiRepairRow(safeId, movie.retagMessage) : ''}
       <div class="where-line" id="where-${movie.id}">${renderAvailability(movie)}</div>
-      <div class="card-tags" id="tags-${movie.id}">${renderRemovableTagChips(scoringTags(movie), safeId, movie._expanded)}</div>
+      <div class="card-tags" id="tags-${movie.id}">${renderRemovableTagChips(rawScoringTags(movie), safeId, movie._expanded)}</div>
       <div class="card-actions">
         ${movie.tagged?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ tags'}</button>`:''}
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
@@ -2319,6 +2495,7 @@ function removeTagFromMovie(id, tag, event) {
     if (Array.isArray(movie[key])) movie[key] = movie[key].filter(t => t !== tag);
   });
   movie.tagged = (movie.tags && movie.tags.length > 0) || (movie.plotTags && movie.plotTags.length > 0) || (movie.coreTags && movie.coreTags.length > 0) || (movie.descriptorTags && movie.descriptorTags.length > 0);
+  rebuildCanonicalTagBrain();
   computeTagWeights();
   saveLocalState();
   syncDrive();
@@ -2431,6 +2608,8 @@ function forgetHiddenMovie(id, e) {
   const movie = state.hiddenTitles?.[id];
   if (!movie || !confirm(`Forget "${movie.title}" permanently? It may be fetched again later.`)) return;
   delete state.hiddenTitles[id];
+  rebuildCanonicalTagBrain();
+  computeTagWeights();
   saveLocalState(); syncDrive(); render();
   showToast(`Forgot "${movie.title}"`, '');
 }
@@ -2647,30 +2826,10 @@ function toggleTags(id, e) {
 // ─────────────────────────────────────────────
 // HOUSEKEEPING (local dedup)
 // ─────────────────────────────────────────────
-function runHousekeeping(manual=true) {
-  const REMAP = {
-    'revenge':'revenge-driven','revenge-narrative':'revenge-driven',
-    'nonlinear':'non-linear-narrative','non-linear':'non-linear-narrative',
-    'slowburn':'slow-burn','slow burn':'slow-burn',
-    'morally-grey':'morally-ambiguous-protagonist','moral-ambiguity':'morally-ambiguous-protagonist',
-    'twist':'twist-ending','plot-twist':'twist-ending',
-    'dark-humor':'dark-comedy','dark-humour':'dark-comedy',
-    'organized-crime':'organised-crime-saga','organised-crime':'organised-crime-saga',
-    'period-piece':'period-drama','historical':'historical-drama',
-    'coming-of-age':'coming-of-age-story',
-    'unreliable-narrator':'unreliable-narration',
-    'ensemble':'ensemble-cast','ensemble-driven':'ensemble-cast',
-    'cat-and-mouse':'cat-and-mouse-thriller',
-    'heist':'heist-thriller','heist-film':'heist-thriller',
-    'serial-killer':'serial-killer-thriller',
-    'based-on-true-events':'based-on-true-story','true-story':'based-on-true-story',
-    'sci-fi':'science-fiction','scifi':'science-fiction',
-    'bollywood':'hindi-language','indian-cinema':'india-setting',
-  };
-  const remap = tags => cleanTagArray((tags || []).map(t => REMAP[normaliseTagName(t)] || normaliseTagName(t)), null, false);
+function runHousekeeping(manual=true, deferCanonical=false) {
   const descriptorStats = descriptorCorpusStats();
   Object.values(state.movies).forEach(m => {
-    const existing = remap(m.tags || []);
+    const existing = cleanTagArray(m.tags || [], null, false);
     if (m.source === 'wikipedia' && m.storyText) {
       const built = buildStoryTagSet(m.storyText, m, descriptorStats);
       m.rawDescriptors = built.rawDescriptors;
@@ -2686,16 +2845,21 @@ function runHousekeeping(manual=true) {
     }
     m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length || (m.descriptorTags && m.descriptorTags.length));
   });
-  computeTagWeights();
+  if (!deferCanonical) {
+    rebuildCanonicalTagBrain();
+    computeTagWeights();
+  }
   if (manual) {
     saveLocalState();
     syncDrive();
     showToast('Tags cleaned', 'success');
   }
-  updateHKStatus('tags: '+countUniqueTags());
+  updateHKStatus(canonicalStatusText());
 }
 
 function countUniqueTags() { const s=new Set(); Object.values(state.movies).forEach(m=>scoringTags(m).forEach(t=>s.add(t))); return s.size; }
+function countRawTags() { const s=new Set(); Object.values(state.movies).forEach(m=>rawScoringTags(m).forEach(t=>s.add(t))); return s.size; }
+function canonicalStatusText() { return `concepts: ${countUniqueTags()} · raw: ${countRawTags()}`; }
 function updateHKStatus(msg) { document.getElementById('hkStatus').textContent=msg; }
 
 // ─────────────────────────────────────────────
@@ -2771,7 +2935,7 @@ function updateStats() {
   document.getElementById('statTags').textContent=countUniqueTags();
   document.getElementById('statPool').textContent=movies.length;
   document.getElementById('statAvg').textContent=avg;
-  updateHKStatus('tags: '+countUniqueTags());
+  updateHKStatus(canonicalStatusText());
 }
 function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveLocalState(); renderRecs(); }
 function updateMinYear(val) { document.getElementById('minYearVal').textContent=val; state.settings.minYear=parseInt(val); saveLocalState(); renderRecs(); }
@@ -2782,6 +2946,7 @@ async function resetAllData() {
   state.movies = {};
   state.tagWeights = {};
   state.hiddenTitles = {};
+  state.canonicalTagStats = { raw:0, canonical:0, rebuiltAt:'' };
   state.rejectedWikiTitles = {};
   state.poolFetched = false;
   autoFetchPaused = true;
@@ -2801,6 +2966,7 @@ function saveLocalState() {
       movies:state.movies,
       settings:state.settings,
       hiddenTitles:state.hiddenTitles,
+      canonicalTagStats:state.canonicalTagStats,
       rejectedWikiTitles:state.rejectedWikiTitles,
       drive:{
         enabled:state.drive.enabled,
@@ -2820,6 +2986,7 @@ function loadLocalState() {
       if (s.movies) state.movies=s.movies;
       if (s.settings) state.settings={...state.settings,...s.settings};
       if (s.hiddenTitles) state.hiddenTitles=s.hiddenTitles;
+      if (s.canonicalTagStats) state.canonicalTagStats=s.canonicalTagStats;
       if (s.rejectedWikiTitles) state.rejectedWikiTitles=s.rejectedWikiTitles;
       if (s.drive) {
         state.drive.connected=false;
@@ -3082,7 +3249,7 @@ async function loadFromDrive() {
     if (!resp.ok) throw new Error('Drive load failed');
     const d=await resp.json();
     let cleaned = 0;
-    if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};if(d.hiddenTitles)state.hiddenTitles=d.hiddenTitles;if(d.rejectedWikiTitles)state.rejectedWikiTitles=d.rejectedWikiTitles;state.settings.platforms=state.settings.platforms||[];state.settings.watchCountry=state.settings.watchCountry||'IN';migrateLegacyPoolItems();cleaned=cleanContaminatedTags(true);saveLocalState();render();showToast('Loaded from Drive','success');}
+    if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};if(d.hiddenTitles)state.hiddenTitles=d.hiddenTitles;if(d.canonicalTagStats)state.canonicalTagStats=d.canonicalTagStats;if(d.rejectedWikiTitles)state.rejectedWikiTitles=d.rejectedWikiTitles;state.settings.platforms=state.settings.platforms||[];state.settings.watchCountry=state.settings.watchCountry||'IN';migrateLegacyPoolItems();cleaned=cleanContaminatedTags(true);saveLocalState();render();showToast('Loaded from Drive','success');}
     state.drive.connected=true;
     setDriveStatus('connected');
     if (cleaned) await syncDrive(false);
@@ -3098,7 +3265,7 @@ async function createDriveFile() {
     const meta={name:DRIVE_FILE,mimeType:'application/json'};
     const form=new FormData();
     form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));
-    form.append('file',new Blob([JSON.stringify({movies:state.movies,settings:state.settings,hiddenTitles:state.hiddenTitles,rejectedWikiTitles:state.rejectedWikiTitles})],{type:'application/json'}));
+    form.append('file',new Blob([JSON.stringify({movies:state.movies,settings:state.settings,hiddenTitles:state.hiddenTitles,canonicalTagStats:state.canonicalTagStats,rejectedWikiTitles:state.rejectedWikiTitles})],{type:'application/json'}));
     const resp=await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',{method:'POST',body:form});
     if (!resp.ok) throw new Error('Drive create failed');
     const d=await resp.json();
@@ -3113,7 +3280,7 @@ async function syncDrive(manual=false) {
   if(!state.drive.fileId){await createDriveFile(); if(!state.drive.fileId)return;}
   setDriveStatus('syncing');
   try {
-    const resp=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${state.drive.fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({movies:state.movies,settings:state.settings,hiddenTitles:state.hiddenTitles,rejectedWikiTitles:state.rejectedWikiTitles})});
+    const resp=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${state.drive.fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({movies:state.movies,settings:state.settings,hiddenTitles:state.hiddenTitles,canonicalTagStats:state.canonicalTagStats,rejectedWikiTitles:state.rejectedWikiTitles})});
     if (!resp.ok) throw new Error('Drive sync failed');
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();

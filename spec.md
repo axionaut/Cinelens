@@ -1509,6 +1509,82 @@ persistedAcrossReload: true
 restored: true
 ```
 
+## 23. Corpus-Learned Canonical Tag Brain
+
+Rich story descriptors must remain visible evidence, but recommendation scoring must use a second, automatically learned canonical concept layer.
+
+The canonical layer must not use a movie-domain synonym dictionary or a manually maintained map such as `sci-fi -> science-fiction`.
+
+### 23.1 Learning Rules
+
+The app derives concepts locally from the saved corpus using generic language mechanics:
+
+- lowercase and punctuation normalization
+- lightweight inflection stemming
+- removal of grammatical/function words
+- exact normalized phrase signatures
+- conservative token, prefix, character-bigram and acronym similarity
+- corpus frequency to select a representative label from the observed tags
+- reusable token concepts only when a token occurs across multiple different titles
+- suppression of likely character/entity tokens detected from capitalization patterns in story text
+- suppression of tokens that are so common that they stop being discriminative
+
+Raw descriptors remain in `descriptorTags`, `tags`, `coreTags` and `plotTags` for display and inspection. Learned scoring concepts are stored separately in:
+
+```js
+movie.canonicalTags
+movie.canonicalTagVersion
+state.canonicalTagStats
+```
+
+### 23.2 Existing Data Migration
+
+Existing titles must not be re-fetched or re-rated.
+
+On local load and Drive load, the app must rebuild canonical clusters across all active and hidden titles, then recompute tag weights from existing ratings. Ratings, raw tags, watchlist state, hidden state and Wikipedia metadata must remain intact.
+
+Rated hidden titles continue contributing through their rebuilt canonical tags. Unrated hidden titles remain neutral.
+
+The rebuilt records must be saved locally and synced back to Drive when Drive data required migration.
+
+### 23.3 Runtime Updates
+
+Canonical concepts must rebuild after manual add, retag, raw-tag removal, hide, restore and forget. During pool expansion, rebuilding may be deferred to card-refresh batch boundaries and final completion to avoid recalculating the full corpus after every fetched title.
+
+Cards continue showing raw descriptors. Recommendations, match scoring, Tag Brain and the top `Concepts` count use canonical tags. The control deck must also show both canonical and raw totals for comparison.
+
+### 23.4 Acceptance Test
+
+The runtime smoke test must verify:
+
+- `sci-fi` and `science-fiction` share a learned canonical concept without an explicit synonym entry.
+- `boy-discovers` and `boy-keeps-discovering` share a learned canonical concept.
+- repeated action roots can connect character-specific descriptors without turning a one-title character name into a concept.
+- existing ratings produce weights on canonical concepts immediately after migration.
+- raw descriptor arrays remain unchanged.
+- migrated canonical tags survive local storage reload.
+- canonical concept count is lower than raw unique descriptor count in the fixture.
+
+### 23.5 Verification
+
+Runtime smoke test was performed in headless Chrome against the real `index.html` served from localhost. The fixture began as already-saved, already-rated records without `canonicalTags`, then reloaded after migration.
+
+Observed result:
+
+```text
+status: PASS
+raw unique descriptors: 6
+canonical concepts: 3
+sci-fi / science-fiction: shared concept
+boy-discovers / boy-keeps-discovering: shared concept
+danny-discovers / john-keeps-discovering: shared learned action concept "discover"
+one-title character names promoted to concepts: false
+existing ratings preserved: true
+raw descriptors preserved: true
+persistedAcrossReload: true
+candidate scores: discovery variant 6, named discovery variant 4, science-fiction variant 2
+```
+
 ## 21. Current Fix Changelog — Remove Browse Cards Slider
 
 ### 21.1 Problem fixed
