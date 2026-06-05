@@ -1206,7 +1206,7 @@ Every completed code change must follow this sequence before it is reported as d
 3. Run a targeted runtime smoke test in headless Chrome against the real app, preferably served from localhost when storage or browser behavior is involved.
 4. Exercise the changed user flow and verify its persisted state, not only function presence.
 5. Remove every temporary test artifact, including smoke-test HTML files, extracted scripts, browser profiles, logs, server output and generated scratch files.
-6. Confirm no temporary artifact remains in the workspace or staged changes.
+6. Confirm no temporary artifact remains in the workspace, staged changes, system temp directory or any external browser-profile path used by the test.
 7. Run `git diff --check` and review the final diff for unintended changes.
 8. Commit only the intended project files with a descriptive commit message.
 9. Push the commit to the active branch's configured remote.
