@@ -1298,6 +1298,92 @@ Recommendation scoring must use `scoringTags(movie)`, not raw metadata tags.
 
 ### 17.5 UI rules
 
+## 18. Recent Bugfixes and UX Improvements (Latest Build)
+
+### 18.1 Tag Removability Everywhere
+
+**Change**: Tags were previously only removable on the Pool tab. Now they are removable on all cards.
+
+**Implementation**:
+- Unified `renderRemovableTagChips()` function for all card rendering
+- Tag removal (× button) available on Recommendations, Rated, Watchlist, and Pool tabs
+- Consistent tag expand/collapse with "+N" indicator for hidden tags
+- Tag removal updates `movie.tags`, `movie.coreTags`, `movie.plotTags`
+- Immediate re-render and state save on tag removal
+
+### 18.2 Top Recs Slider Removal
+
+**Change**: Removed the Top Recs / topN slider from the control deck.
+
+**Reason**: Infinite scroll display makes the slider redundant. Recommendations are user-controlled through infinite scroll pagination.
+
+**Implementation**:
+- Removed topN HTML control (lines 441-443)
+- Removed topN initialization from `loadLocalState()`
+- Preserved `topN` in settings state for backward compatibility if needed
+- No impact on recommendation scoring or ranking
+
+### 18.3 Manual Rating Dialog Fixes
+
+**Change**: Fixed star-rating interaction in the manual rating dialog (shown after manual add).
+
+**Problems Fixed**:
+1. Only the clicked star was highlighted, not the range up to that star
+2. "Rate Later" button cluttered the immediate add flow
+
+**Implementation**:
+- Added `previewManualStars(n)` function to show filled stars 1..n via `.active` class
+- Added `restoreManualStars()` function to reset preview on mouse leave
+- Removed "Rate Later" button from manual rating modal
+- Stars now correctly fill in range when clicked or hovered
+- Rating persists properly in state after selection
+
+### 18.4 Wikipedia URL Persistence Fix
+
+**Change**: Fixed the issue where retag would fail with "needs correct Wikipedia URL" even though the URL was saved.
+
+**Problems Diagnosed**:
+1. `wikiPageId` was not being reliably extracted or reconstructed when fetching
+2. Housekeeping and save cycles could lose wiki metadata
+3. Retag fallback logic was not sufficiently robust
+
+**Implementation**:
+- `findFreshWikiForMovie()`: Enhanced resilience with multiple fallback strategies
+  - Explicit `wikiPageId` reconstruction from movie.id at function start
+  - PageId-based fetch first (fastest if successful)
+  - 300ms delay after pageId attempt to avoid rate limiting
+  - Comprehensive title candidates (original, year variants, format variants, country-specific variants)
+  - 200ms stagger between title fetch attempts
+  - Wikipedia search as final fallback
+  - Total retry chain: pageId → title candidates → search results
+
+- `rebuildDescriptorBrain()`: Enhanced metadata preservation
+  - Explicitly reconstructs `wikiPageId` from movie.id if missing
+  - Cross-syncs `wikiTitle` ↔ `pageTitle` bidirectionally
+  - Ensures `wikiUrl` is reconstructed from title when needed
+  - Prevents metadata loss during rebuild cycles
+
+- `applyFreshWikiMovie()`: Explicit data preservation
+  - Preserves `wikiPageId`, `wikiTitle`, `pageTitle`, `wikiUrl` from both fresh and previous data
+  - Falls back to previous values if fresh data lacks wiki metadata
+  - No metadata lost during retag operations
+
+- `loadLocalState()`: Post-load reconstruction
+  - Reconstructs `wikiPageId` immediately after loading from localStorage for all Wikipedia movies
+  - Ensures the movie.id → wikiPageId mapping is always valid
+
+**Result**: Retag now works reliably even after pool expansion, saves, and complex state transitions. All wiki metadata paths include fallbacks and auto-reconstruction.
+
+### 18.5 Validation
+
+All changes tested for:
+- No orphaned references to removed controls
+- Consistent card component rendering across all tabs
+- Tag removal updates and persists correctly
+- Manual add flow completes without rate dialog deadlock
+- Retag succeeds or provides clear manual correction path
+- Drive sync and local storage remain compatible
+
 - Star rating must fill all stars from 1 through the selected rating.
 - Hover should preview the filled range.
 - Pool and Rated cards must use the same star renderer.

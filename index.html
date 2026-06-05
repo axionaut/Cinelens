@@ -379,15 +379,14 @@
     <p>You added this manually. Rate it now so recommendations learn from it immediately.</p>
     <div class="manual-rating-title" id="manualRatingTitle"></div>
     <div class="manual-rating-meta" id="manualRatingMeta"></div>
-    <div class="manual-rating-stars">
-      <span class="star" onclick="ratePendingManualMovie(1)">★</span>
-      <span class="star" onclick="ratePendingManualMovie(2)">★</span>
-      <span class="star" onclick="ratePendingManualMovie(3)">★</span>
-      <span class="star" onclick="ratePendingManualMovie(4)">★</span>
-      <span class="star" onclick="ratePendingManualMovie(5)">★</span>
+    <div class="manual-rating-stars" id="manualStars">
+      <span class="star" data-rating="1" onclick="ratePendingManualMovie(1)" onmouseenter="previewManualStars(1)" onmouseleave="restoreManualStars()">★</span>
+      <span class="star" data-rating="2" onclick="ratePendingManualMovie(2)" onmouseenter="previewManualStars(2)" onmouseleave="restoreManualStars()">★</span>
+      <span class="star" data-rating="3" onclick="ratePendingManualMovie(3)" onmouseenter="previewManualStars(3)" onmouseleave="restoreManualStars()">★</span>
+      <span class="star" data-rating="4" onclick="ratePendingManualMovie(4)" onmouseenter="previewManualStars(4)" onmouseleave="restoreManualStars()">★</span>
+      <span class="star" data-rating="5" onclick="ratePendingManualMovie(5)" onmouseenter="previewManualStars(5)" onmouseleave="restoreManualStars()">★</span>
     </div>
     <div class="modal-actions">
-      <button class="btn btn-ghost" onclick="closeManualRatingPrompt()">Rate later</button>
     </div>
   </div>
 </div>
@@ -438,9 +437,6 @@
   </div>
 
   <div class="settings-bar">
-    <label>Top Recs</label>
-    <input type="range" id="topN" min="5" max="30" value="10" oninput="updateTopN(this.value)">
-    <span class="val" id="topNVal">10</span>
     <label>Since</label>
     <input type="range" id="minYear" min="1940" max="2026" step="1" value="1970" oninput="updateMinYear(this.value)">
     <span class="val" id="minYearVal">1970</span>
@@ -880,8 +876,11 @@ function rebuildDescriptorBrain() {
       m.tags = built.tags;
       m.tagged = built.tagged;
       m.needsManualUrl = false;
+      // Explicitly preserve and reconstruct wiki metadata
       if (!m.wikiUrl && (m.wikiTitle || m.pageTitle)) m.wikiUrl = wikiUrlFromTitle(m.wikiTitle || m.pageTitle);
       if (!m.wikiPageId && String(m.id || '').startsWith('wiki_')) m.wikiPageId = String(m.id).replace(/^wiki_/, '');
+      if (!m.wikiTitle && m.pageTitle) m.wikiTitle = m.pageTitle;
+      if (!m.pageTitle && m.wikiTitle) m.pageTitle = m.wikiTitle;
     } else if (m.source !== 'wikipedia') {
       m.source = 'legacy';
       m.tags = [];
@@ -2131,6 +2130,16 @@ function restoreStars(el) {
   const rating = Number(box.dataset.rating || 0);
   box.querySelectorAll('.star').forEach(st => st.classList.toggle('active', Number(st.dataset.star) <= rating));
 }
+function previewManualStars(n) {
+  const box = document.getElementById('manualStars');
+  if (!box) return;
+  box.querySelectorAll('.star').forEach(st => st.classList.toggle('active', Number(st.dataset.rating) <= n));
+}
+function restoreManualStars() {
+  const box = document.getElementById('manualStars');
+  if (!box) return;
+  box.querySelectorAll('.star').forEach(st => st.classList.remove('active'));
+}
 function buildCard(movie, opts={}) {
   const { rank, score, matchedTags, maxScore, showEdit, watchlistView, poolView } = opts;
   const card = document.createElement('div');
@@ -2156,11 +2165,11 @@ function buildCard(movie, opts={}) {
       ${poolView?`<div class="pool-card-note">${cardStatusLabel(movie)}${movie.retagMessage ? ` · ${movie.retagMessage}` : ''}</div>`:''}
       ${movie.retagStatus === 'failed' || movie.needsManualUrl ? renderWikiRepairRow(safeId, movie.retagMessage) : ''}
       <div class="where-line" id="where-${movie.id}">${renderAvailability(movie)}</div>
-      <div class="card-tags" id="tags-${movie.id}">${poolView ? renderRemovableTagChips(scoringTags(movie), safeId) : renderTagChips(scoringTags(movie), matchedTags, false)}</div>
+      <div class="card-tags" id="tags-${movie.id}">${renderRemovableTagChips(scoringTags(movie), safeId, movie._expanded)}</div>
       <div class="card-actions">
-        ${movie.tagged&&!poolView?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ tags'}</button>`:''}
+        ${movie.tagged?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ tags'}</button>`:''}
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
-        ${(!showEdit||poolView)?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
+        ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
         <button class="card-act watch" onclick="checkAvailability('${safeId}',event)">where</button>
         <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
       </div>
@@ -2227,13 +2236,15 @@ function renderTagChips(tags, matchedTags, expanded) {
     + (tags.length>5&&!expanded?`<span class="tag" style="color:var(--muted2)">+${tags.length-5}</span>`:'');
 }
 
-function renderRemovableTagChips(tags, movieId) {
+function renderRemovableTagChips(tags, movieId, expanded) {
   if (!tags || !tags.length) return '';
   const unique = [...new Set(tags)].sort();
-  return unique.map(tag => {
+  const limited = expanded ? unique : unique.slice(0, 5);
+  const remaining = expanded ? 0 : Math.max(0, unique.length - 5);
+  return limited.map(tag => {
     const safeTag = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     return `<span class="tag removable" title="Remove tag" onclick="removeTagFromMovie('${movieId}','${safeTag}',event)">${tag}<span class="tag-remove">×</span></span>`;
-  }).join('');
+  }).join('') + (remaining > 0 ? `<span class="tag" style="color:var(--muted2)">+${remaining}</span>` : '');
 }
 
 function removeTagFromMovie(id, tag, event) {
@@ -2409,7 +2420,12 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
     watchlist: !!previous.watchlist,
     skipped: !!previous.skipped,
     userNotes: previous.userNotes || '',
-    availability: previous.availability || fresh.availability
+    availability: previous.availability || fresh.availability,
+    // Explicitly preserve wiki metadata if fresh doesn't have it
+    wikiPageId: fresh.wikiPageId || previous.wikiPageId,
+    wikiTitle: fresh.wikiTitle || previous.wikiTitle,
+    pageTitle: fresh.pageTitle || previous.pageTitle,
+    wikiUrl: fresh.wikiUrl || previous.wikiUrl
   };
   const next = {
     ...fresh,
@@ -2426,14 +2442,25 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
 
 async function findFreshWikiForMovie(movie) {
   const mode = movie.format ? 'shows' : 'movies';
+  
+  // Ensure wikiPageId is reconstructed if missing
+  if (!movie.wikiPageId && String(movie.id || '').startsWith('wiki_')) {
+    movie.wikiPageId = String(movie.id).replace(/^wiki_/, '');
+  }
+  
   const pageId = wikiPageIdFromMovie(movie);
+  
+  // Try pageId-based fetch first (fastest if successful)
   if (pageId) {
     try {
       const fresh = await fetchWikiMovieByPageId(pageId, mode);
       if (fresh) return fresh;
     } catch(e) {}
+    // Add a small delay before trying title candidates to avoid rate limiting
+    await new Promise(resolve => setTimeout(resolve, 300));
   }
 
+  // Build comprehensive candidate list, with best guesses first
   const candidates = [
     movie.wikiTitle,
     movie.pageTitle,
@@ -2441,23 +2468,37 @@ async function findFreshWikiForMovie(movie) {
     movie.format ? `${movie.title} (TV series)` : `${movie.title} (film)`,
     movie.year ? `${movie.title} (${movie.year} film)` : '',
     movie.year ? `${movie.title} (${movie.year} TV series)` : '',
-    movie.format ? `${movie.title} television series` : `${movie.title} film`
+    movie.format ? `${movie.title} television series` : `${movie.title} film`,
+    // Additional candidates for robustness
+    movie.director && movie.year ? `${movie.title} (${movie.year}) ${movie.director}` : '',
+    movie.language === 'Hindi' && movie.country === 'India' ? `${movie.title} (Hindi film)` : '',
+    movie.language === 'Hindi' && movie.country === 'India' && movie.format ? `${movie.title} (Hindi TV series)` : '',
   ].filter(Boolean);
 
+  // Try each title candidate with a small delay between attempts
   for (const title of [...new Set(candidates)]) {
     try {
       const fresh = await fetchWikiMovie(title, mode);
-      if (fresh && (sameCanonicalTitle(fresh.title, movie.title) || sameCanonicalTitle(fresh.pageTitle, movie.pageTitle || movie.title))) return fresh;
+      if (fresh && (sameCanonicalTitle(fresh.title, movie.title) || sameCanonicalTitle(fresh.pageTitle, movie.pageTitle || movie.title))) {
+        return fresh;
+      }
     } catch(e) {}
+    // Stagger requests to avoid rate limiting
+    await new Promise(resolve => setTimeout(resolve, 200));
   }
 
-  const searchTitles = await fetchWikiSearchTitles(`${movie.title} ${movie.year || ''} ${movie.format ? 'television series' : 'film'}`);
-  for (const title of searchTitles) {
-    try {
-      const fresh = await fetchWikiMovie(title, mode);
-      if (fresh && sameCanonicalTitle(fresh.title, movie.title)) return fresh;
-    } catch(e) {}
-  }
+  // Final fallback: try Wikipedia search
+  try {
+    const searchTitles = await fetchWikiSearchTitles(`${movie.title} ${movie.year || ''} ${movie.format ? 'television series' : 'film'}`);
+    for (const title of searchTitles) {
+      try {
+        const fresh = await fetchWikiMovie(title, mode);
+        if (fresh && sameCanonicalTitle(fresh.title, movie.title)) return fresh;
+      } catch(e) {}
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  } catch(e) {}
+  
   return null;
 }
 
@@ -2506,7 +2547,7 @@ function toggleTags(id, e) {
   if (!tags||!tags.length) return;
   m._expanded = !m._expanded;
   const el = document.getElementById('tags-'+id);
-  if (el) el.innerHTML = renderTagChips(tags, new Set(), m._expanded);
+  if (el) el.innerHTML = renderRemovableTagChips(tags, id, m._expanded);
   const card = document.getElementById('card-'+id);
   if (card) { const b=card.querySelector('.card-act'); if(b&&(b.textContent.includes('tags')||b.textContent.includes('less'))) b.textContent=m._expanded?'▲ less':'▼ tags'; }
 }
@@ -2692,12 +2733,17 @@ function loadLocalState() {
         state.drive.lastConnectedAt=s.drive.lastConnectedAt||0;
       }
       state.drive.accessToken=getStoredDriveToken()||'';
-      document.getElementById('topN').value=state.settings.topN;
-      document.getElementById('topNVal').textContent=state.settings.topN;
       document.getElementById('minYear').value=state.settings.minYear;
       document.getElementById('minYearVal').textContent=state.settings.minYear;
       document.getElementById('watchCountry').value=state.settings.watchCountry||'IN';
       const t=localStorage.getItem('cinelens_tmdb_token'); if(t) document.getElementById('tmdbToken').value=t;
+      
+      // Ensure wikiPageId is reconstructed for all Wikipedia movies
+      Object.values(state.movies || {}).forEach(m => {
+        if (m.source === 'wikipedia' && !m.wikiPageId && String(m.id || '').startsWith('wiki_')) {
+          m.wikiPageId = String(m.id).replace(/^wiki_/, '');
+        }
+      });
     }
   } catch(e) {}
   Object.values(state.movies).forEach(m => {
