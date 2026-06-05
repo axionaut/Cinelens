@@ -1,0 +1,2986 @@
+// ─────────────────────────────────────────────
+// WIKIPEDIA FILM SOURCES
+// These are the Wikipedia list pages we pull from.
+// The API returns page titles which we then individually fetch.
+// ─────────────────────────────────────────────
+const WIKI_SOURCES = {
+  movies: ['Category:English-language_films','Category:Hindi-language_films']
+};
+const WIKI_LIST_SOURCES = {
+  showsIndex: 'Lists of television programs',
+  showsSeedLists: ['List of television programs: A','List of television programs: B','List of television programs: C','List of Indian television series','List of British television programmes']
+};
+
+const WIKI_NAVIGATION_LISTS = {
+  englishMovies: ['Lists of English-language films','List of American films of the 2020s','List of British films of 2020','List of films considered the best'],
+  hindiMovies: ['Lists of Hindi films','List of Hindi films of 2024','List of Hindi films of 2023','List of Hindi films of 2022','List of Bollywood films of 2021'],
+  topicMovies: ['List of films considered the best','List of cult films','List of films based on actual events','List of films based on awards','List of films with a 100% rating on Rotten Tomatoes'],
+  shows: ['List of Netflix original programming','List of Amazon Prime Video original programming','List of Hindi-language television shows','List of Indian television series']
+};
+
+
+// Curated expansion packs — well-known films by title, fetched from Wikipedia
+const EXPANSION_ENGLISH = [
+  "Citizen Kane","Vertigo (film)","Tokyo Story","2001: A Space Odyssey (film)","Singin' in the Rain",
+  "Sunrise: A Song of Two Humans","The Searchers","Man with a Movie Camera","Jeanne Dielman, 23, quai du Commerce, 1080 Bruxelles",
+  "Apocalypse Now","Taxi Driver","Rear Window","Lawrence of Arabia (film)","Psycho (1960 film)",
+  "Chinatown (1974 film)","Some Like It Hot","Sunset Boulevard (film)","All About Eve (film)",
+  "The Rules of the Game","Casablanca (film)","Raging Bull","Network (1976 film)","Barry Lyndon",
+  "Dr. Strangelove","A Clockwork Orange (film)","2001: A Space Odyssey (film)","The Shining (film)",
+  "Full Metal Jacket","Eyes Wide Shut","GoodFellas","Casino (1995 film)","Heat (1995 film)",
+  "L.A. Confidential (film)","Mulholland Drive (film)","Blue Velvet (film)","Wild at Heart (film)",
+  "No Country for Old Men (film)","There Will Be Blood (film)","The Master (film)","Phantom Thread",
+  "Boogie Nights","Magnolia (film)","Punch-Drunk Love","Paul Thomas Anderson",
+  "Zodiac (film)","Zodiac","The Social Network (film)","Gone Girl (film)","Mank (film)",
+  "Dunkirk (film)","Tenet (film)","Oppenheimer (film)","Killers of the Flower Moon (film)",
+  "The Wolf of Wall Street (film)","Shutter Island (film)","The Departed","Goodfellas",
+  "Reservoir Dogs","Jackie Brown (film)","Kill Bill","Inglourious Basterds","The Hateful Eight",
+  "Once Upon a Time in Hollywood","Jaws (film)","E.T. the Extra-Terrestrial","Schindler's List",
+  "Saving Private Ryan","Lincoln (film)","Munich (film)","Bridge of Spies (film)",
+  "Spotlight (film)","The Revenant (film)","1917 (film)","Dunkirk (film)",
+  "Mad Max: Fury Road","Children of Men","Alfonso Cuarón","Gravity (film)","Roma (film)",
+  "Birdman (film)","The Grand Budapest Hotel","Isle of Dogs (film)","Asteroid City",
+  "Her (film)","Being John Malkovich","Adaptation (film)","Synecdoche, New York",
+  "Requiem for a Dream","Pi (film)","Black Swan (film)","Whiplash (film)",
+  "La La Land (film)","Babylon (2022 film)","The Fabelmans","American Beauty (film)",
+  "Road to Perdition","A Beautiful Mind (film)","Russell Crowe","Gladiator (film)",
+  "Training Day","Crash (2004 film)","Million Dollar Baby","Mystic River (film)",
+  "Unforgiven (film)","The Silence of the Lambs (film)","Philadelphia (film)",
+  "Forrest Gump","The Shawshank Redemption","Se7en","Fight Club","American History X",
+  "The Truman Show","Eternal Sunshine of the Spotless Mind","Memento (film)","Inception",
+  "The Dark Knight","Interstellar (film)","The Prestige","Batman Begins",
+  "Blade Runner","Blade Runner 2049","Arrival (film)","Dune (2021 film)","Dune: Part Two",
+  "The Matrix","The Matrix Reloaded","V for Vendetta (film)","Cloud Atlas (film)",
+  "Ex Machina (film)","Annihilation (film)","Moon (2009 film)","Coherence (film)",
+  "Prisoners (film)","Sicario (film)","Villeneuve","Enemy (film)","Incendies",
+  "Heat","L.A. Confidential (film)","Collateral (film)","Michael Mann",
+  "American Gangster (film)","Training Day","End of Watch",
+  "Get Out (film)","Us (film)","Nope (film)","Hereditary (film)","Midsommar (film)",
+  "The Witch (film)","It Follows","A Quiet Place (film)","Don't Look Now",
+  "Parasite (film)","Burning (film)","The Handmaiden","Oldboy (film)","I Saw the Devil",
+  "Train to Busan","A Tale of Two Sisters","Memories of Murder","Mother (2009 film)",
+  "Portrait of a Lady on Fire","The Son's Room","The Great Beauty","Amarcord","8½",
+  "La Dolce Vita","Rome, Open City","Bicycle Thieves","Umberto D.","Il Posto",
+  "The 400 Blows","Jules and Jim","Breathless (1960 film)","Contempt (film)",
+  "Pierrot le Fou","My Neighbour Totoro","Princess Mononoke","Nausicaä of the Valley of the Wind",
+  "Castle in the Sky","Howl's Moving Castle","The Wind Rises","When Marnie Was There",
+  "Perfect Blue","Millennium Actress","Tokyo Godfathers","Paprika (2006 film)",
+  "In the Mood for Love","Chungking Express","Fallen Angels (film)","Happy Together (1997 film)",
+  "The Grandmaster","Ip Man (film)","A Better Tomorrow","Hard Boiled","The Killer (1989 film)",
+  "Crouching Tiger, Hidden Dragon","Hero (2002 film)","House of Flying Daggers",
+  "Pan's Labyrinth","The Others (film)","Open Your Eyes (1997 film)","Talk to Her",
+  "All About My Mother","Volver","The Skin I Live In","Julieta (film)",
+  "Amelie","The Intouchables","A Prophet","Cache (film)","The Class (film)",
+  "Capernaum (film)","A Separation","The Salesman (film)","About Elly","Close-Up (film)",
+  "City of God (film)","Central Station (film)","The Secret in Their Eyes (film)",
+  "Wild Tales (film)","Son of Saul","The White Ribbon","Amour (film)","Cache (film)",
+  "The Lives of Others","Run Lola Run","Downfall (film)","Das Boot","M (1931 film)",
+  "Nosferatu","The Cabinet of Dr. Caligari","Metropolis (1927 film)",
+  "The Seventh Seal","Wild Strawberries (film)","Persona (1966 film)","Fanny and Alexander",
+  "Scenes from a Marriage","Cries and Whispers","Winter Light (film)",
+  "Stalker (film)","Andrei Rublev (film)","The Mirror (film)","Solaris (1972 film)","Ivan's Childhood",
+  "Seven Samurai","Rashomon (film)","Yojimbo","Sanjuro (film)","High and Low (film)","Ran (film)",
+  "Harakiri (1962 film)","In the Realm of the Senses","Ugetsu","Sansho the Bailiff",
+  "Shoplifters (film)","Nobody Knows (film)","Like Father, Like Son (film)","Monster (2023 film)",
+  "Drive (2011 film)","Only God Forgives","The Neon Demon","Valhalla Rising",
+  "Melancholia (film)","The Hunt (film)","A Royal Affair","The Square (film)",
+  "Force Majeure (film)","The Hunt (2012 film)","Toni Erdmann","Never Look Away (film)",
+  "4 Months, 3 Weeks and 2 Days","The Death of Mr. Lazarescu","12:08 East of Bucharest",
+  "A Touch of Sin","Still Life (2013 film)","Mountains May Depart","Ash Is Purest White",
+  "The Handmaiden","Burning (film)","Poetry (film)","Secret Sunshine",
+  "Certified Copy (film)","The Past (film)","Le Havre (film)","Compartment No. 6"
+];
+
+const EXPANSION_HINDI = [
+  "Sholay","Mother India (film)","Mughal-E-Azam","Guide (film)","Pyaasa",
+  "Kaagaz Ke Phool","Sahib Bibi Aur Ghulam","Pather Panchali","Aparajito","The World of Apu",
+  "Dil Chahta Hai","Lagaan","3 Idiots","Gangs of Wasseypur","Gangs of Wasseypur – Part 2",
+  "Andhadhun (film)","Masaan (film)","Article 15 (film)","Tumbbad",
+  "Court (film)","Dil Se (film)","Roja (film)","Bombay (film)","Guru (film)",
+  "Rang De Basanti","Taare Zameen Par","Dangal (film)","Secret Superstar",
+  "PK (film)","3 Idiots","Dhoom 3","Dhoom 2",
+  "Dilwale Dulhania Le Jayenge","Kuch Kuch Hota Hai","Kabhi Khushi Kabhie Gham...",
+  "Dil Dhadakne Do","Zindagi Na Milegi Dobara","Tamasha (film)","Jab We Met",
+  "Cocktail (film)","Queen (film)","Dum Laga Ke Haisha","Bareilly Ki Barfi",
+  "Stree (film)","Bala (2019 film)","Shubh Mangal Saavdhan","Badhaai Ho",
+  "Pink (film)","Thappad (film)","Kahaani","Kahaani 2","Dirty Picture",
+  "Fashion (film)","Mary Kom (film)","Sarbjit","Neerja (film)","Airlift (film)",
+  "Baby (film)","A Wednesday","Special 26","Rustom (film)",
+  "Talaash (film)","Drishyam (film)","Badlapur (film)","Kaabil","Ittefaq (2017 film)",
+  "Andhadhun (film)","Raazi (film)","Uri: The Surgical Strike","Shershaah",
+  "Bharat (film)","War (2019 film)","Tiger Zinda Hai","Pathaan","Jawan (film)",
+  "Bard of Blood","Mirzapur (TV series)","Sacred Games (TV series)","Scam 1992",
+  "Delhi Crime","Panchayat (TV series)","Kota Factory","TVF Pitchers",
+  "Paan Singh Tomar","Gangs of Wasseypur","Dev.D","Oye Lucky! Lucky Oye!",
+  "Udaan (film)","Lootera","Trapped (2017 film)","Omerta (film)",
+  "Manto (film)","Aligarh (film)","Shahid (film)","Bhaag Milkha Bhaag",
+  "M.S. Dhoni: The Untold Story","Sanju (film)","Thalaivii",
+  "Guru (film)","Black (film)","Devdas (2002 film)","Saawariya",
+  "Jodhaa Akbar","Bajirao Mastani","Padmaavat","Tanhaji","Manikarnika: The Queen of Jhansi",
+  "Kabir Singh","Arjun Reddy","Animal (film)","Fighter (2024 film)",
+  "RRR (film)","Baahubali: The Beginning","Baahubali 2: The Conclusion",
+  "KGF: Chapter 1","KGF: Chapter 2","Pushpa: The Rise","Kantara (film)",
+  "Vikram (2022 film)","Jailer (film)","Leo (2023 film)","Indian 2"
+];
+
+const EXPANSION_SHOWS = [
+  "Better Call Saul","Fargo (TV series)","The Bear (TV series)","The Last of Us (TV series)","The Crown (TV series)",
+  "The Boys (TV series)","Fleabag","Sherlock (TV series)","Mr. Robot","Narcos","Mad Men","House of Cards (American TV series)",
+  "The Office (American TV series)","Black Mirror","Stranger Things","The Mandalorian","Andor (TV series)","The Queen's Gambit (miniseries)",
+  "Mare of Easttown","The Night Of","Delhi Crime","Made in Heaven (TV series)","Paatal Lok","Aspirants (web series)",
+  "Special Ops (Indian TV series)","Rocket Boys","Gullak","Tabbar","Kohrra","Farzi","Dahaad","The Family Man (Indian TV series)"
+];
+
+// ─────────────────────────────────────────────
+// STATE
+// ─────────────────────────────────────────────
+let activeTab = 'all';
+let tagFilter = 'all';
+let selectedConcept = '';
+let conceptView = 'all';
+let conceptVisibleLimit = 40;
+let poolExpansionInProgress = false;
+let fetchAbortRequested = false;
+let lastAutoExpandAt = 0;
+let lastWikiRequestAt = 0;
+const WIKI_REQUEST_DELAY_MS = 850;
+const WIKI_BATCH_PAUSE_MS = 2500;
+const CARD_REFRESH_BATCH_SIZE = 20;
+const REJECTED_REFRESH_ADD_INTERVAL = 500;
+const REJECTED_REFRESH_BATCH_SIZE = 25;
+const REJECTED_REFRESH_MAX_ATTEMPTS = 3;
+const WIKI_PARSER_VERSION = 3;
+const REC_INFINITE_PAGE_SIZE = 20;
+let recVisibleLimit = 10;
+let currentWikiAbortController = null;
+let currentSleepCancel = null;
+let autoFetchPaused = false;
+let autoExpandTimer = null;
+let state = {
+  movies: {},
+  tagWeights: {},
+  genreWeights: {},
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', tagDeleteMode:false },
+  drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
+  hiddenTitles: {},
+  canonicalTagStats: { raw:0, canonical:0, rebuiltAt:'' },
+  rejectedWikiTitles: {},
+  rejectedRefresh: { additionsSinceRefresh:0, lastRunAt:0, totalRuns:0 },
+  poolFetched: false
+};
+
+let pendingManualRatingId = '';
+const PERFECT_REC_TARGET = 5;
+const PERFECT_REC_MIN_RATIO = 0.995;
+const MIN_PLOT_TAGS = 0;
+const MIN_STORY_SECTION_CHARS = 140;
+const LOW_CONFIDENCE_PLOT_TAGS = new Set([
+  'protagonist-driven','conflict-driven','character-driven','plot-driven','dramatic-stakes',
+  'goal-oriented-plot','relationship-conflict','moral-choice','escalating-conflict','personal-cost',
+  'turning-point-heavy','dialogue-driven','emotional-stakes','social-context','consequence-driven',
+  'journey-arc','high-stakes','character-growth','world-building','genre-hybrid',
+  'central-conflict','main-character-goal','character-relationships','narrative-stakes','decision-pressure',
+  'setting-driven','identity-pressure','authority-conflict','danger-driven','emotional-pressure',
+  'social-pressure','professional-pressure','family-pressure','survival-pressure','hidden-information',
+  'investigation-thread','personal-history','opposition-force','moral-pressure','resolution-driven'
+]);
+
+const CONTAMINATED_FALLBACK_TAGS = new Set([...LOW_CONFIDENCE_PLOT_TAGS]);
+const GENERIC_CONCEPT_TOKENS = new Set('crime thriller child relationship father mother family return discover learn decide sent college school workplace time there around away full other first'.split(' '));
+let conceptStatsCache = null;
+
+const GENRE_RULES = [
+  ['science-fiction', /\b(science fiction|sci-fi)\b/],
+  ['action', /\baction(?:-|\s)(?:film|comedy|drama|thriller|series)\b|\baction film\b/],
+  ['adventure', /\badventure(?:-|\s)(?:film|comedy|drama|series)\b|\badventure film\b/],
+  ['animation', /\banimat(?:ed|ion)(?:-|\s)(?:film|series|comedy|drama)\b/],
+  ['comedy', /\bcomedy(?:-|\s)(?:film|drama|series|thriller)\b|\bromantic comedy\b/],
+  ['crime', /\bcrime(?:-|\s)(?:film|drama|series|thriller|comedy)\b/],
+  ['documentary', /\bdocumentary(?:-|\s)(?:film|series)\b/],
+  ['drama', /\bdrama(?:-|\s)(?:film|series)\b|\b(?:film|television) drama\b/],
+  ['family', /\bfamily(?:-|\s)(?:film|drama|series|comedy)\b/],
+  ['fantasy', /\bfantasy(?:-|\s)(?:film|drama|series|comedy)\b/],
+  ['historical', /\bhistorical(?:-|\s)(?:film|drama|series|fiction)\b/],
+  ['horror', /\bhorror(?:-|\s)(?:film|comedy|drama|series)\b/],
+  ['musical', /\bmusical(?:-|\s)(?:film|comedy|drama|series)\b/],
+  ['mystery', /\bmystery(?:-|\s)(?:film|drama|series|thriller)\b/],
+  ['romance', /\bromance(?:-|\s)(?:film|drama|series)\b|\bromantic(?:-|\s)(?:film|drama|thriller)\b/],
+  ['sports', /\bsports?(?:-|\s)(?:film|drama|series|comedy)\b/],
+  ['thriller', /\bthriller(?:-|\s)(?:film|drama|series)\b|\b(?:action|crime|mystery|psychological|political|spy) thriller\b/],
+  ['war', /\bwar(?:-|\s)(?:film|drama|series)\b/],
+  ['western', /\bwestern(?:-|\s)(?:film|drama|series)\b/]
+];
+const GENRE_SCORE_FACTOR = 0.35;
+
+function deriveGenres(leadText='', categories=[]) {
+  const categoryText = Array.isArray(categories) ? categories.join(' ') : String(categories || '');
+  const metadata = `${leadText} ${categoryText}`.toLowerCase();
+  return GENRE_RULES.filter(([, pattern]) => pattern.test(metadata)).map(([genre]) => genre);
+}
+
+function movieGenres(movie) {
+  const stored = Array.isArray(movie?.genres) ? movie.genres : [];
+  return [...new Set(stored.length ? stored : deriveGenres(movie?.leadText || '', movie?.categoryText || ''))];
+}
+
+function normaliseTagName(tag) {
+  return String(tag || '').toLowerCase().trim().replace(/\s+/g, '-');
+}
+
+const CANONICAL_TAG_VERSION = 2;
+const CANONICAL_FUNCTION_WORDS = new Set('a an the and or but nor so yet of in on at to from into onto by for with without as is are was were be been being has have had do does did will would can could may might must shall should this that these those it its he she they them his her their who whom whose which what when where while after before during then than also just still already again ever never very more most less least much many some any each every both either neither keeps keep kept starts start started begins begin began continues continue continued tries try tried'.split(' '));
+
+function stemCanonicalToken(token) {
+  let word = String(token || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (word.length <= 3) return word;
+  if (word.endsWith('ies') && word.length > 4) word = word.slice(0, -3) + 'y';
+  else if (word.endsWith('ing') && word.length > 5) word = word.slice(0, -3);
+  else if (word.endsWith('ed') && word.length > 4) word = word.slice(0, -2);
+  else if (/(ses|xes|zes|ches|shes)$/.test(word) && word.length > 5) word = word.slice(0, -2);
+  else if (word.endsWith('s') && word.length > 4 && !/(ss|us|is)$/.test(word)) word = word.slice(0, -1);
+  if (/(.)\1$/.test(word) && word.length > 4) word = word.slice(0, -1);
+  return word;
+}
+
+function canonicalTagFeatures(tag) {
+  const tokens = normaliseTagName(tag).split(/[^a-z0-9]+/).filter(Boolean)
+    .filter(token => !CANONICAL_FUNCTION_WORDS.has(token))
+    .map(stemCanonicalToken)
+    .filter(Boolean);
+  const unique = [...new Set(tokens)];
+  return {
+    tag: normaliseTagName(tag),
+    tokens: unique,
+    signature: [...unique].sort().join('-'),
+    phrase: unique.join('-'),
+    acronym: unique.length > 1 ? unique.map(token => token[0]).join('') : ''
+  };
+}
+
+function rawScoringTags(movie) {
+  const base = movie?.descriptorTags && movie.descriptorTags.length ? movie.descriptorTags : (movie?.coreTags && movie.coreTags.length ? movie.coreTags : (movie?.plotTags && movie.plotTags.length ? movie.plotTags : recommendationTags(movie?.tags || [])));
+  return [...new Set((base || []).filter(t => !isMetaTag(t)).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)))];
+}
+
+function suppressedConceptSet(movie) {
+  return new Set((movie?.suppressedConcepts || []).map(normaliseTagName).filter(Boolean));
+}
+
+function conceptAllowed(movie, concept) {
+  return !suppressedConceptSet(movie).has(normaliseTagName(concept));
+}
+
+function canonicalTokenSimilarity(a, b) {
+  if (a === b) return 1;
+  const min = Math.min(a.length, b.length);
+  const max = Math.max(a.length, b.length);
+  if (min >= 3 && (a.startsWith(b) || b.startsWith(a))) return min / max;
+  const grams = word => {
+    const padded = `^${word}$`;
+    const out = new Set();
+    for (let i = 0; i < padded.length - 1; i++) out.add(padded.slice(i, i + 2));
+    return out;
+  };
+  const ga = grams(a), gb = grams(b);
+  let overlap = 0;
+  ga.forEach(g => { if (gb.has(g)) overlap++; });
+  return (2 * overlap) / Math.max(1, ga.size + gb.size);
+}
+
+function canonicalPhraseSimilarity(a, b) {
+  if (!a.tokens.length || !b.tokens.length) return 0;
+  if (a.signature === b.signature) return 1;
+  if (a.acronym && a.acronym === b.acronym && a.tokens.length === b.tokens.length) {
+    const aligned = a.tokens.every((token, i) => canonicalTokenSimilarity(token, b.tokens[i]) >= 0.28);
+    if (aligned) return 0.9;
+  }
+  const best = a.tokens.map(token => Math.max(...b.tokens.map(other => canonicalTokenSimilarity(token, other))));
+  const reverse = b.tokens.map(token => Math.max(...a.tokens.map(other => canonicalTokenSimilarity(token, other))));
+  const coverage = (best.reduce((sum, value) => sum + value, 0) + reverse.reduce((sum, value) => sum + value, 0)) / (best.length + reverse.length);
+  const lengthPenalty = Math.min(a.tokens.length, b.tokens.length) / Math.max(a.tokens.length, b.tokens.length);
+  return coverage * (0.7 + 0.3 * lengthPenalty);
+}
+
+function probableEntityTokens(movie) {
+  const text = String(movie?.storyText || '');
+  const counts = new Map();
+  const pattern = /[a-z0-9,'")\]]\s+([A-Z][a-z]{2,})\b/g;
+  let match;
+  while ((match = pattern.exec(text))) {
+    const token = stemCanonicalToken(match[1]);
+    if (token) counts.set(token, (counts.get(token) || 0) + 1);
+  }
+  return new Set([...counts.entries()].filter(([, count]) => count >= 2).map(([token]) => token));
+}
+
+function rebuildCanonicalTagBrain() {
+  const records = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})];
+  const frequency = new Map();
+  records.forEach(movie => rawScoringTags(movie).forEach(tag => frequency.set(tag, (frequency.get(tag) || 0) + 1)));
+  const tags = [...frequency.keys()];
+  const features = new Map(tags.map(tag => [tag, canonicalTagFeatures(tag)]));
+  const parent = new Map(tags.map(tag => [tag, tag]));
+  const find = tag => {
+    let root = parent.get(tag);
+    while (root !== parent.get(root)) root = parent.get(root);
+    let current = tag;
+    while (parent.get(current) !== root) { const next = parent.get(current); parent.set(current, root); current = next; }
+    return root;
+  };
+  const union = (a, b) => {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent.set(rb, ra);
+  };
+  const blocks = new Map();
+  const signatureGroups = new Map();
+  const addBlock = (key, tag) => {
+    if (!key) return;
+    if (!blocks.has(key)) blocks.set(key, []);
+    blocks.get(key).push(tag);
+  };
+  tags.forEach(tag => {
+    const feature = features.get(tag);
+    if (!signatureGroups.has(feature.signature)) signatureGroups.set(feature.signature, []);
+    signatureGroups.get(feature.signature).push(tag);
+    if (feature.acronym) addBlock(`a:${feature.acronym}:${feature.tokens.length}`, tag);
+    feature.tokens.forEach(token => addBlock(`t:${token.slice(0, 4)}`, tag));
+  });
+  signatureGroups.forEach(group => {
+    for (let i = 1; i < group.length; i++) union(group[0], group[i]);
+  });
+  blocks.forEach(group => {
+    if (group.length > 140) return;
+    for (let i = 0; i < group.length; i++) {
+      for (let j = i + 1; j < group.length; j++) {
+        const a = group[i], b = group[j];
+        if (find(a) === find(b)) continue;
+        if (canonicalPhraseSimilarity(features.get(a), features.get(b)) >= 0.84) union(a, b);
+      }
+    }
+  });
+  const clusters = new Map();
+  tags.forEach(tag => {
+    const root = find(tag);
+    if (!clusters.has(root)) clusters.set(root, []);
+    clusters.get(root).push(tag);
+  });
+  const labelFor = new Map();
+  const supportFor = new Map();
+  clusters.forEach(group => {
+    const label = [...group].sort((a, b) => (frequency.get(b) || 0) - (frequency.get(a) || 0) || canonicalTagFeatures(a).tokens.length - canonicalTagFeatures(b).tokens.length || a.length - b.length || a.localeCompare(b))[0];
+    const support = group.reduce((sum, tag) => sum + (frequency.get(tag) || 0), 0);
+    group.forEach(tag => { labelFor.set(tag, label); supportFor.set(tag, support); });
+  });
+  let changed = 0;
+  records.forEach(movie => {
+    const learned = [];
+    rawScoringTags(movie).forEach(tag => {
+      const feature = features.get(tag) || canonicalTagFeatures(tag);
+      if ((supportFor.get(tag) || 0) > 1) learned.push(labelFor.get(tag) || feature.phrase);
+    });
+    const fallback = rawScoringTags(movie).map(tag => labelFor.get(tag) || canonicalTagFeatures(tag).phrase).filter(Boolean);
+    const canonicalTags = [...new Set(learned.length ? learned : fallback)].filter(tag => conceptAllowed(movie, tag));
+    if (JSON.stringify(movie.canonicalTags || []) !== JSON.stringify(canonicalTags) || movie.canonicalTagVersion !== CANONICAL_TAG_VERSION) changed++;
+    movie.canonicalTags = canonicalTags;
+    movie.canonicalTagVersion = CANONICAL_TAG_VERSION;
+  });
+  state.canonicalTagStats = { raw:tags.length, canonical:new Set(records.flatMap(movie => movie.canonicalTags || [])).size, rebuiltAt:new Date().toISOString() };
+  conceptStatsCache = null;
+  return changed;
+}
+
+function conceptCorpusStats() {
+  if (conceptStatsCache) return conceptStatsCache;
+  const records=[...Object.values(state.movies || {}),...Object.values(state.hiddenTitles || {})];
+  const df={};
+  records.forEach(movie=>new Set(scoringTags(movie)).forEach(tag=>{df[tag]=(df[tag]||0)+1;}));
+  conceptStatsCache={docCount:Math.max(1,records.length),df};
+  return conceptStatsCache;
+}
+
+function conceptSpecificity(tag) {
+  const stats=conceptCorpusStats();
+  const docs=stats.df[tag]||1;
+  return Math.max(0.08,Math.log((stats.docCount+1)/(docs+1))/Math.log(stats.docCount+1));
+}
+
+function conceptIsPresentable(tag) {
+  const feature=canonicalTagFeatures(tag);
+  if (!feature.tokens.length) return false;
+  if (feature.tokens.length===1 && GENERIC_CONCEPT_TOKENS.has(feature.tokens[0])) return false;
+  return true;
+}
+
+function cleanTagArray(tags, movie=null, keepLowConfidence=false) {
+  return [...new Set((tags || [])
+    .map(normaliseTagName)
+    .filter(Boolean)
+    .filter(t => keepLowConfidence || !CONTAMINATED_FALLBACK_TAGS.has(t))
+    .filter(t => !movie || tagEvidenceOk(t, movie))
+  )];
+}
+
+
+function wikiPageIdFromMovie(movie) {
+  if (!movie) return '';
+  if (movie.wikiPageId) return String(movie.wikiPageId).replace(/^wiki_/, '');
+  if (String(movie.id || '').startsWith('wiki_')) return String(movie.id).replace(/^wiki_/, '');
+  return '';
+}
+
+function wikiUrlFromTitle(title) {
+  return `https://en.wikipedia.org/wiki/${encodeURIComponent(String(title || '').replace(/ /g, '_'))}`;
+}
+
+function canonicalTitle(s) {
+  return String(s || '').toLowerCase().replace(/\s*\([^)]*\)\s*/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function sameCanonicalTitle(a, b) {
+  return canonicalTitle(a) && canonicalTitle(a) === canonicalTitle(b);
+}
+
+const DESCRIPTOR_STOP = new Set('a an the and or but of in on at to from into by for with without as is are was were be been being has have had he she they them his her their its it this that these those who whom whose when where while after before over under out up down about against through during between among begins begin find finds found makes make made takes take took goes go went gets get got becomes become became tells told says said later soon then however eventually meanwhile years year day night man woman boy girl young old film movie story life lives world people'.split(' '));
+
+function tokeniseStory(text) {
+  return String(text || '').toLowerCase().replace(/[’']/g, '').replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(Boolean);
+}
+
+function phraseLooksUseful(words) {
+  if (words.length < 2 || words.length > 5) return false;
+  if (DESCRIPTOR_STOP.has(words[0]) || DESCRIPTOR_STOP.has(words[words.length-1])) return false;
+  const useful = words.filter(w => !DESCRIPTOR_STOP.has(w) && w.length > 2);
+  if (useful.length < Math.min(2, words.length)) return false;
+  const phrase = words.join(' ');
+  if (/^\d+$/.test(phrase)) return false;
+  if (/\b(film|movie|story|life|people|years|day|night)\b$/.test(phrase)) return false;
+  return true;
+}
+
+function extractRawDescriptors(text) {
+  const tokens = tokeniseStory(text);
+  const counts = new Map();
+  for (let n = 2; n <= 5; n++) {
+    for (let i = 0; i <= tokens.length - n; i++) {
+      const words = tokens.slice(i, i+n);
+      if (!phraseLooksUseful(words)) continue;
+      const phrase = words.join(' ');
+      counts.set(phrase, (counts.get(phrase) || 0) + 1);
+    }
+  }
+  const actionWords = /\b(kills|murder|discovers|investigates|escapes|travels|betrays|rescues|kidnaps|frames|steals|falls|returns|reveals|protects|survives|learns|decides|plans|joins|fights|seeks|finds|sent|trapped|forced|accused|wrongfully|time|machine|kingdom|throne|war|battle|mission|case|conspiracy|prison|court|killer|alien|space)\b/;
+  return [...counts.entries()].map(([phrase, count]) => {
+    const words = phrase.split(' ');
+    let score = count * (words.length === 2 ? 1.2 : words.length === 3 ? 1.5 : 1.25);
+    if (actionWords.test(phrase)) score *= 1.65;
+    return { phrase, count, score };
+  }).sort((a,b) => b.score - a.score || a.phrase.localeCompare(b.phrase)).slice(0, 40);
+}
+
+function descriptorCorpusStats() {
+  const docCount = Math.max(1, Object.values(state.movies || {}).filter(m => m.storyText).length);
+  const df = {};
+  Object.values(state.movies || {}).forEach(m => {
+    const raw = (m.rawDescriptors && m.rawDescriptors.length ? m.rawDescriptors : extractRawDescriptors(m.storyText || '')).map(x => typeof x === 'string' ? x : x.phrase);
+    new Set(raw).forEach(p => { if (p) df[p] = (df[p] || 0) + 1; });
+  });
+  return { docCount, df };
+}
+
+function selectContrastiveDescriptors(raw, stats) {
+  const list = (raw || []).map(x => typeof x === 'string' ? { phrase:x, score:1, count:1 } : x).filter(x => x && x.phrase);
+  const docCount = stats?.docCount || 1;
+  const df = stats?.df || {};
+  return list.map(x => {
+    const rarity = Math.log((docCount + 1) / ((df[x.phrase] || 1) + 0.5));
+    return { phrase:x.phrase, score:(x.score || 1) * Math.max(0.25, rarity) };
+  }).sort((a,b) => b.score - a.score || a.phrase.localeCompare(b.phrase)).slice(0, 12).map(x => normaliseTagName(x.phrase));
+}
+
+function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats()) {
+  const rawDescriptors = extractRawDescriptors(storyText || '');
+  const descriptors = selectContrastiveDescriptors(rawDescriptors, stats).slice(0, 10);
+  const storyOnlyMeta = { ...meta, leadText: '', categoryText: '' };
+  const evidenceTags = cleanTagArray(deriveTagsFromText(storyText || '', storyOnlyMeta), meta, false)
+    .filter(t => !isMetaTag(t))
+    .filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t))
+    .slice(0, 14);
+  const tags = cleanTagArray([...evidenceTags, ...descriptors], meta, false).slice(0, 22);
+  return {
+    rawDescriptors,
+    descriptorTags: tags,
+    tags,
+    coreTags: tags,
+    plotTags: tags,
+    tagged: tags.length > 0
+  };
+}
+
+function meaningfulTagCount(movie) { return rawScoringTags(movie).length; }
+
+function cardStatusLabel(movie) {
+  if (movie.source === 'wikipedia') {
+    if (scoringTags(movie).length > 0) return `wikipedia · ${scoringTags(movie).length} concepts`;
+    return movie.storyText ? 'wikipedia · no distinctive descriptors yet' : 'wikipedia · plot missing';
+  }
+  return 'legacy · needs wiki';
+}
+
+function migrateLegacyPoolItems() {
+  Object.values(state.movies || {}).forEach(m => {
+    if (m.source === 'wikipedia') return;
+    m.source = 'legacy';
+    m.tags = [];
+    m.coreTags = [];
+    m.plotTags = [];
+    m.descriptorTags = [];
+    m.rawDescriptors = [];
+    m.tagged = false;
+    m.needsManualUrl = true;
+    m.retagStatus = 'needs-url';
+    m.retagMessage = 'needs Wikipedia URL';
+  });
+}
+
+function rebuildDescriptorBrain() {
+  let changed = 0;
+  const stats = descriptorCorpusStats();
+  Object.values(state.movies || {}).forEach(m => {
+    const before = JSON.stringify({tags:m.tags||[], coreTags:m.coreTags||[], plotTags:m.plotTags||[], descriptorTags:m.descriptorTags||[], tagged:m.tagged});
+    if (m.source === 'wikipedia' && m.storyText) {
+      const built = buildStoryTagSet(m.storyText, m, stats);
+      m.rawDescriptors = built.rawDescriptors;
+      m.descriptorTags = built.descriptorTags;
+      m.coreTags = built.coreTags;
+      m.plotTags = built.plotTags;
+      m.tags = built.tags;
+      m.tagged = built.tagged;
+      m.needsManualUrl = false;
+      // Explicitly preserve and reconstruct wiki metadata
+      if (!m.wikiUrl && (m.wikiTitle || m.pageTitle)) m.wikiUrl = wikiUrlFromTitle(m.wikiTitle || m.pageTitle);
+      if (!m.wikiPageId && String(m.id || '').startsWith('wiki_')) m.wikiPageId = String(m.id).replace(/^wiki_/, '');
+      if (!m.wikiTitle && m.pageTitle) m.wikiTitle = m.pageTitle;
+      if (!m.pageTitle && m.wikiTitle) m.pageTitle = m.wikiTitle;
+    } else if (m.source !== 'wikipedia') {
+      m.source = 'legacy';
+      m.tags = [];
+      m.coreTags = [];
+      m.plotTags = [];
+      m.descriptorTags = [];
+      m.rawDescriptors = [];
+      m.tagged = false;
+      m.needsManualUrl = true;
+      m.retagStatus = 'needs-url';
+      m.retagMessage = 'needs Wikipedia URL';
+    }
+    const after = JSON.stringify({tags:m.tags||[], coreTags:m.coreTags||[], plotTags:m.plotTags||[], descriptorTags:m.descriptorTags||[], tagged:m.tagged});
+    if (before !== after) changed++;
+  });
+  return changed;
+}
+
+function cleanContaminatedTags(silent=true) {
+  migrateLegacyPoolItems();
+  const changed = rebuildDescriptorBrain() + rebuildCanonicalTagBrain();
+  computeTagWeights();
+  if (changed) saveLocalState();
+  if (changed && !silent) showToast(`Cleaned descriptor data on ${changed} titles`, 'success');
+  return changed;
+}
+
+
+// ─────────────────────────────────────────────
+// INIT
+// ─────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  loadLocalState();
+  migrateLegacyPoolItems();
+  cleanContaminatedTags(true);
+  recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
+  render();
+  restoreDriveSession();
+  // Auto-expand if pool is small
+  if (Object.keys(state.movies).length < 50) {
+    scheduleAutoExpand(800);
+  }
+  window.addEventListener('scroll', handleScroll);
+});
+
+// ─────────────────────────────────────────────
+// SEED (hardcoded starter pack — always present)
+// ─────────────────────────────────────────────
+const SEED = [
+  {id:'tt0111161',title:'The Shawshank Redemption',year:1994,director:'Frank Darabont',language:'English',country:'USA'},
+  {id:'tt0068646',title:'The Godfather',year:1972,director:'Francis Ford Coppola',language:'English',country:'USA'},
+  {id:'tt0468569',title:'The Dark Knight',year:2008,director:'Christopher Nolan',language:'English',country:'USA'},
+  {id:'tt0137523',title:'Fight Club',year:1999,director:'David Fincher',language:'English',country:'USA'},
+  {id:'tt0816692',title:'Interstellar',year:2014,director:'Christopher Nolan',language:'English',country:'USA'},
+  {id:'tt1375666',title:'Inception',year:2010,director:'Christopher Nolan',language:'English',country:'USA'},
+  {id:'tt0110912',title:'Pulp Fiction',year:1994,director:'Quentin Tarantino',language:'English',country:'USA'},
+  {id:'tt0133093',title:'The Matrix',year:1999,director:'The Wachowskis',language:'English',country:'USA'},
+  {id:'tt0114369',title:'Se7en',year:1995,director:'David Fincher',language:'English',country:'USA'},
+  {id:'tt0102926',title:'The Silence of the Lambs',year:1991,director:'Jonathan Demme',language:'English',country:'USA'},
+  {id:'tt0317248',title:'City of God',year:2002,director:'Fernando Meirelles',language:'English',country:'Brazil'},
+  {id:'tt0482571',title:'The Prestige',year:2006,director:'Christopher Nolan',language:'English',country:'USA'},
+  {id:'tt0209144',title:'Memento',year:2000,director:'Christopher Nolan',language:'English',country:'USA'},
+  {id:'tt2267998',title:'Gone Girl',year:2014,director:'David Fincher',language:'English',country:'USA'},
+  {id:'tt1291584',title:'Prisoners',year:2013,director:'Denis Villeneuve',language:'English',country:'USA'},
+  {id:'tt6751668',title:'Parasite',year:2019,director:'Bong Joon-ho',language:'English',country:'South Korea'},
+  {id:'tt2582802',title:'Whiplash',year:2014,director:'Damien Chazelle',language:'English',country:'USA'},
+  {id:'tt0816711',title:'Arrival',year:2016,director:'Denis Villeneuve',language:'English',country:'USA'},
+  {id:'tt0364569',title:'Oldboy',year:2003,director:'Park Chan-wook',language:'English',country:'South Korea'},
+  {id:'tt0338013',title:'Eternal Sunshine of the Spotless Mind',year:2004,director:'Michel Gondry',language:'English',country:'USA'},
+  {id:'tt0172495',title:'Gladiator',year:2000,director:'Ridley Scott',language:'English',country:'USA'},
+  {id:'tt0120689',title:'The Green Mile',year:1999,director:'Frank Darabont',language:'English',country:'USA'},
+  {id:'tt1853728b',title:'Django Unchained',year:2012,director:'Quentin Tarantino',language:'English',country:'USA'},
+  {id:'tt0120586',title:'American History X',year:1998,director:'Tony Kaye',language:'English',country:'USA'},
+  {id:'tt1853728c',title:'Blade Runner 2049',year:2017,director:'Denis Villeneuve',language:'English',country:'USA'},
+  {id:'tt0047478',title:'Seven Samurai',year:1954,director:'Akira Kurosawa',language:'English',country:'Japan'},
+  {id:'tt0087843',title:'Once Upon a Time in America',year:1984,director:'Sergio Leone',language:'English',country:'USA'},
+  {id:'tt0253474',title:'The Pianist',year:2002,director:'Roman Polanski',language:'English',country:'Poland'},
+  {id:'tt0405094',title:'The Lives of Others',year:2006,director:'Florian Henckel',language:'English',country:'Germany'},
+  {id:'tt0050083',title:'12 Angry Men',year:1957,director:'Sidney Lumet',language:'English',country:'USA'},
+  // Hindi
+  {id:'in001',title:'Sholay',year:1975,director:'Ramesh Sippy',language:'Hindi',country:'India'},
+  {id:'in002',title:'Dil Chahta Hai',year:2001,director:'Farhan Akhtar',language:'Hindi',country:'India'},
+  {id:'in003',title:'Lagaan',year:2001,director:'Ashutosh Gowariker',language:'Hindi',country:'India'},
+  {id:'in004',title:'3 Idiots',year:2009,director:'Rajkumar Hirani',language:'Hindi',country:'India'},
+  {id:'in005',title:'Gangs of Wasseypur',year:2012,director:'Anurag Kashyap',language:'Hindi',country:'India'},
+  {id:'in006',title:'Andhadhun',year:2018,director:'Sriram Raghavan',language:'Hindi',country:'India'},
+  {id:'in007',title:'Tumbbad',year:2018,director:'Rahi Barve',language:'Hindi',country:'India'},
+  {id:'in008',title:'Article 15',year:2019,director:'Anubhav Sinha',language:'Hindi',country:'India'},
+  {id:'in009',title:'Masaan',year:2015,director:'Neeraj Ghaywan',language:'Hindi',country:'India'},
+  {id:'in010',title:'Dangal',year:2016,director:'Nitesh Tiwari',language:'Hindi',country:'India'},
+  {id:'in011',title:'Rang De Basanti',year:2006,director:'Rakeysh Mehra',language:'Hindi',country:'India'},
+  {id:'in012',title:'Taare Zameen Par',year:2007,director:'Aamir Khan',language:'Hindi',country:'India'},
+  {id:'in013',title:'Raazi',year:2018,director:'Meghna Gulzar',language:'Hindi',country:'India'},
+  {id:'in014',title:'Pink',year:2016,director:'Aniruddha Roy Chowdhury',language:'Hindi',country:'India'},
+  {id:'in015',title:'Kahaani',year:2012,director:'Sujoy Ghosh',language:'Hindi',country:'India'},
+  // Shows
+  {id:'tv001',title:'Breaking Bad',year:2008,director:'Vince Gilligan',language:'English',country:'USA',format:'series'},
+  {id:'tv002',title:'Chernobyl',year:2019,director:'Johan Renck',language:'English',country:'UK',format:'miniseries'},
+  {id:'tv003',title:'True Detective S1',year:2014,director:'Cary Fukunaga',language:'English',country:'USA',format:'series'},
+  {id:'tv004',title:'Succession',year:2018,director:'Jesse Armstrong',language:'English',country:'USA',format:'series'},
+  {id:'tv005',title:'The Wire',year:2002,director:'David Simon',language:'English',country:'USA',format:'series'},
+  {id:'tv006',title:'Mindhunter',year:2017,director:'David Fincher',language:'English',country:'USA',format:'series'},
+  {id:'tv007',title:'Dark',year:2017,director:'Baran bo Odar',language:'English',country:'Germany',format:'series'},
+  {id:'tv008',title:'Scam 1992',year:2020,director:'Hansal Mehta',language:'Hindi',country:'India',format:'series'},
+  {id:'tv009',title:'Mirzapur',year:2018,director:'Karan Anshuman',language:'Hindi',country:'India',format:'series'},
+  {id:'tv010',title:'Panchayat',year:2020,director:'Deepak Kumar Mishra',language:'Hindi',country:'India',format:'series'},
+  {id:'tv011',title:'Sacred Games',year:2018,director:'Anurag Kashyap',language:'Hindi',country:'India',format:'series'},
+  {id:'tv012',title:'Peaky Blinders',year:2013,director:'Steven Knight',language:'English',country:'UK',format:'series'},
+  {id:'tv013',title:'The Sopranos',year:1999,director:'David Chase',language:'English',country:'USA',format:'series'},
+  {id:'tv014',title:'Band of Brothers',year:2001,director:'Steven Spielberg',language:'English',country:'USA',format:'miniseries'},
+  {id:'tv015',title:'Severance',year:2022,director:'Ben Stiller',language:'English',country:'USA',format:'series'},
+];
+
+function seedPool() {
+  // Seeds disabled: fetched Wikipedia items only. Existing legacy seed items are preserved but not rehydrated.
+}
+
+
+// ─────────────────────────────────────────────
+// WIKIPEDIA POOL EXPANSION
+// ─────────────────────────────────────────────
+function normaliseTitleKey(title) {
+  return (title||'').replace(/^Category:/,'').replace(/\s+\(.*?\)$/,'').trim().toLowerCase();
+}
+
+function obviousNonMovieTitle(title) {
+  return /^(list of|category:|template:|wikipedia:|portal:)/i.test(title)
+    || /\b(film series|media franchise|franchise|universe|timeline|soundtrack|discography|filmography|list)\b/i.test(title);
+}
+
+function isFranchiseOverviewPage(pageTitle, extract, cats=[]) {
+  if (obviousNonMovieTitle(pageTitle)) return true;
+  const lead = String(extract || '').slice(0, 700);
+  const categoryText = (cats || []).join(' ');
+  if (/\b(film series|media franchise|shared universe)\b/i.test(pageTitle)) return true;
+  if (/\b(film series|media franchise|fictional universes)\b/i.test(categoryText)) return true;
+  return /^\s*.+\s+is an? (?:American |British |Indian |English-language |Hindi-language )?(?:media franchise|film series|shared universe)\b/i.test(lead);
+}
+
+function isMetaTag(tag) {
+  return /^(english-language|hindi-language|usa|uk|india|south-korea|brazil|poland|germany|japan|film|series|miniseries|prestige-tv|\d{4}s)$/.test(tag);
+}
+
+function recommendationTags(tags) {
+  return [...new Set((tags||[]).filter(t => !isMetaTag(t)))];
+}
+
+function expansionMode() {
+  if (activeTab === 'movie') return 'movies';
+  if (activeTab === 'show') return 'shows';
+  return 'all';
+}
+
+function sourceCategoriesForMode(mode) {
+  if (mode === 'movies') return WIKI_SOURCES.movies;
+  if (mode === 'shows') return [];
+  return [...WIKI_SOURCES.movies];
+}
+
+function curatedTitlesForMode(mode) { return []; }
+
+function matchesExpansionMode(movie, mode) {
+  if (mode === 'movies') return !movie.format;
+  if (mode === 'shows') return !!movie.format;
+  return true;
+}
+
+function rejectKey(title, mode) { return `${mode}:${normaliseTitleKey(title)}`; }
+
+function isShowListPage(title) {
+  return /^List of .*television/i.test(title)
+    || /^Lists of .*television/i.test(title)
+    || /^List of .*web series/i.test(title)
+    || /television (programmes|programs|series)$/i.test(title);
+}
+
+
+async function wikiApiJson(url) {
+  if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
+  const wait = Math.max(0, WIKI_REQUEST_DELAY_MS - (Date.now() - lastWikiRequestAt));
+  if (wait) await abortableSleep(wait);
+  if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
+  lastWikiRequestAt = Date.now();
+  const controller = new AbortController();
+  currentWikiAbortController = controller;
+  try {
+    const resp = await fetch(url, { signal: controller.signal });
+    if (!resp.ok) throw new Error('Wikipedia request failed: ' + resp.status);
+    return await resp.json();
+  } finally {
+    if (currentWikiAbortController === controller) currentWikiAbortController = null;
+  }
+}
+
+function ensureRejectedRefreshState(markExistingDue=false) {
+  state.rejectedRefresh = {
+    additionsSinceRefresh: 0,
+    lastRunAt: 0,
+    totalRuns: 0,
+    ...(state.rejectedRefresh || {})
+  };
+  if (markExistingDue && Object.keys(state.rejectedWikiTitles || {}).length) {
+    state.rejectedRefresh.additionsSinceRefresh = Math.max(
+      REJECTED_REFRESH_ADD_INTERVAL,
+      Number(state.rejectedRefresh.additionsSinceRefresh || 0)
+    );
+  }
+  return state.rejectedRefresh;
+}
+
+function recordRejectedTitle(title, mode, reason='not usable', source='wikipedia', opts={}) {
+  if (!title) return;
+  const key = rejectKey(title, mode || 'all');
+  const existing = state.rejectedWikiTitles[key] || {};
+  const parserChanged = Number(existing.parserVersion || 0) < WIKI_PARSER_VERSION;
+  const retryCount = opts.retry
+    ? (parserChanged ? 1 : Number(existing.retryCount || 0) + 1)
+    : Number(existing.retryCount || 0);
+  const now = new Date().toISOString();
+  state.rejectedWikiTitles[key] = {
+    ...existing,
+    title,
+    mode: mode || 'all',
+    reason,
+    source,
+    at: existing.at || now,
+    updatedAt: now,
+    retryCount,
+    lastRetriedAt: opts.retry ? now : (existing.lastRetriedAt || ''),
+    parserVersion: WIKI_PARSER_VERSION
+  };
+}
+
+function rejectedEntries() {
+  return Object.entries(state.rejectedWikiTitles || {}).map(([key, val]) => {
+    if (val && typeof val === 'object') return { key, ...val };
+    const parts = key.split(':');
+    return { key, mode: parts[0] || 'all', title: parts.slice(1).join(':') || key, reason: 'rejected earlier', source: 'legacy', at: '' };
+  }).sort((a,b)=>(b.at||'').localeCompare(a.at||''));
+}
+
+function rejectedRefreshEligible(item) {
+  if (!item || hiddenTitleMatches(item.title)) return false;
+  if (Object.values(state.movies || {}).some(movie => normaliseTitleKey(movie.title) === normaliseTitleKey(item.title))) return false;
+  return Number(item.parserVersion || 0) < WIKI_PARSER_VERSION
+    || Number(item.retryCount || 0) < REJECTED_REFRESH_MAX_ATTEMPTS;
+}
+
+function notePoolAddition() {
+  const refresh = ensureRejectedRefreshState();
+  refresh.additionsSinceRefresh = Number(refresh.additionsSinceRefresh || 0) + 1;
+  return refresh.additionsSinceRefresh >= REJECTED_REFRESH_ADD_INTERVAL;
+}
+
+async function refreshRejectedLane(force=false) {
+  const refresh = ensureRejectedRefreshState();
+  if (!force && Number(refresh.additionsSinceRefresh || 0) < REJECTED_REFRESH_ADD_INTERVAL) {
+    return { attempted:0, recovered:0, completed:false };
+  }
+  Object.entries(state.rejectedWikiTitles || {}).forEach(([key, item]) => {
+    if (hiddenTitleMatches(item?.title)) delete state.rejectedWikiTitles[key];
+  });
+  const entries = rejectedEntries()
+    .filter(rejectedRefreshEligible)
+    .sort((a,b)=>(a.lastRetriedAt||a.at||'').localeCompare(b.lastRetriedAt||b.at||''))
+    .slice(0, REJECTED_REFRESH_BATCH_SIZE);
+  let attempted = 0;
+  let recovered = 0;
+  let interrupted = false;
+  for (const item of entries) {
+    if (fetchAbortRequested) { interrupted = true; break; }
+    attempted++;
+    showFetchProgress(`Refreshing rejected titles · ${attempted}/${entries.length}`, Math.round(attempted / Math.max(1, entries.length) * 100), item.title || '');
+    const mode = item.mode || 'all';
+    const diagnostics = {};
+    try {
+      const movie = await fetchWikiMovie(item.title, mode, diagnostics);
+      if (movie && isMovieHidden(movie)) {
+        delete state.rejectedWikiTitles[item.key];
+      } else if (movie && state.movies[movie.id]) {
+        delete state.rejectedWikiTitles[item.key];
+      } else if (movie && (movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, mode)) {
+        state.movies[movie.id] = movie;
+        delete state.rejectedWikiTitles[item.key];
+        recovered++;
+      } else {
+        recordRejectedTitle(item.title, mode, diagnostics.reason || 'still not a usable Hindi/English movie or show', item.source || 'rejected-refresh', { retry:true });
+      }
+    } catch(err) {
+      if (fetchAbortRequested || err.name === 'AbortError') { interrupted = true; break; }
+      recordRejectedTitle(item.title, mode, err.message || 'rejected refresh failed', item.source || 'rejected-refresh', { retry:true });
+    }
+  }
+  if (!interrupted) {
+    refresh.additionsSinceRefresh = Math.max(0, Number(refresh.additionsSinceRefresh || 0) - REJECTED_REFRESH_ADD_INTERVAL);
+    refresh.lastRunAt = Date.now();
+    refresh.totalRuns = Number(refresh.totalRuns || 0) + 1;
+  }
+  if (recovered) rebuildCanonicalTagBrain();
+  saveLocalState();
+  return { attempted, recovered, completed:!interrupted };
+}
+
+function hiddenTitleMatches(value) {
+  const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
+  if (!key) return false;
+  return Object.values(state.hiddenTitles || {}).some(movie => [movie.title, movie.wikiTitle, movie.pageTitle]
+    .some(title => normaliseTitleKey(title) === key));
+}
+
+function isMovieHidden(movie) {
+  if (!movie) return false;
+  if (movie.id && state.hiddenTitles?.[movie.id]) return true;
+  return [movie.title, movie.wikiTitle, movie.pageTitle].some(title => hiddenTitleMatches(title));
+}
+
+function stopOrExpandPool() {
+  if (poolExpansionInProgress) stopFetching();
+  else {
+    autoFetchPaused = false;
+    expandPool(true);
+  }
+}
+
+function stopFetching(opts={}) {
+  fetchAbortRequested = true;
+  autoFetchPaused = true;
+  if (autoExpandTimer) {
+    clearTimeout(autoExpandTimer);
+    autoExpandTimer = null;
+  }
+  if (currentWikiAbortController) currentWikiAbortController.abort();
+  if (currentSleepCancel) currentSleepCancel();
+  hideFetchProgress();
+  const btn = document.getElementById('expandBtn');
+  if (btn) { btn.disabled = false; btn.textContent = '＋ Expand Pool'; }
+  if (!opts.silent) showToast('Fetching stopped.', '');
+}
+
+async function waitForPoolIdle(timeoutMs=2500) {
+  const start = Date.now();
+  while (poolExpansionInProgress && Date.now() - start < timeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, 80));
+  }
+}
+
+function shuffled(list) {
+  const a = [...list];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function roundRobinUnique(lanes) {
+  const out = [];
+  const seen = new Set();
+  const queues = lanes.map(l => shuffled(l || []));
+  let added = true;
+  while (added) {
+    added = false;
+    for (const q of queues) {
+      const title = q.shift();
+      if (!title) continue;
+      const key = normaliseTitleKey(title);
+      if (!key || seen.has(key) || obviousNonMovieTitle(title)) continue;
+      seen.add(key); out.push(title); added = true;
+    }
+  }
+  return out;
+}
+
+async function fetchWikiPageLinks(title, limit=500) {
+  const links = [];
+  let plcontinue = '';
+  try {
+    do {
+      const cont = plcontinue ? `&plcontinue=${encodeURIComponent(plcontinue)}` : '';
+      const url = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(title)}&prop=links&pllimit=${limit}&plnamespace=0&format=json&origin=*${cont}`;
+      const data = await wikiApiJson(url);
+      const page = Object.values(data.query?.pages||{})[0];
+      (page?.links||[]).forEach(link => links.push(link.title));
+      plcontinue = data.continue?.plcontinue || '';
+    } while (plcontinue && links.length < limit * 2);
+  } catch(e) {}
+  return links;
+}
+
+async function fetchShowSourceTitles() {
+  const indexLinks = await fetchWikiPageLinks(WIKI_LIST_SOURCES.showsIndex, 500);
+  const listPages = [...new Set([
+    ...WIKI_LIST_SOURCES.showsSeedLists,
+    ...indexLinks.filter(isShowListPage)
+  ])].slice(0, 28);
+  const titles = [];
+  for (const listPage of listPages) {
+    const links = await fetchWikiPageLinks(listPage, 500);
+    links.forEach(title => {
+      if (!obviousNonMovieTitle(title) && !isShowListPage(title)) titles.push(title);
+    });
+  }
+  return [...new Set(titles)];
+}
+
+async function fetchWikiSearchTitles(query) {
+  const q = (query || '').trim();
+  if (!q) return [];
+  try {
+    const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&srlimit=8&format=json&origin=*`;
+    const data = await wikiApiJson(url);
+    return (data.query?.search || []).map(item => item.title);
+  } catch(e) {
+    return [];
+  }
+}
+
+
+async function fetchNavigationLaneTitles(mode, limitPerPage=180) {
+  const pages = [];
+  if (mode === 'movies' || mode === 'all') pages.push(...WIKI_NAVIGATION_LISTS.englishMovies, ...WIKI_NAVIGATION_LISTS.hindiMovies, ...WIKI_NAVIGATION_LISTS.topicMovies);
+  if (mode === 'shows' || mode === 'all') pages.push(...WIKI_NAVIGATION_LISTS.shows);
+  const titles = [];
+  for (const page of [...new Set(pages)].slice(0, 14)) {
+    if (fetchAbortRequested) break;
+    const links = await fetchWikiPageLinks(page, limitPerPage);
+    links.forEach(title => {
+      if (!obviousNonMovieTitle(title) && !isShowListPage(title)) titles.push(title);
+    });
+  }
+  return [...new Set(titles)];
+}
+
+async function candidateTitlesForMode(mode, pageDepth=4) {
+  const categoryTitles = await fetchWikiSourceTitles(mode, pageDepth);
+  const navigationTitles = await fetchNavigationLaneTitles(mode, 220);
+  return roundRobinUnique([navigationTitles, categoryTitles]);
+}
+
+
+async function fetchWikiSourceTitles(mode, pagesPerCategory=4) {
+  const titles = [];
+  for (const category of sourceCategoriesForMode(mode)) {
+    let cmcontinue = '';
+    try {
+      for (let page = 0; page < pagesPerCategory; page++) {
+        const cont = cmcontinue ? `&cmcontinue=${encodeURIComponent(cmcontinue)}` : '';
+        const url = `https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=${encodeURIComponent(category)}&cmlimit=200&cmnamespace=0&cmsort=sortkey&format=json&origin=*${cont}`;
+        const data = await wikiApiJson(url);
+        (data.query?.categorymembers||[]).forEach(item => {
+          if (!obviousNonMovieTitle(item.title)) titles.push(item.title);
+        });
+        cmcontinue = data.continue?.cmcontinue || '';
+        if (!cmcontinue) break;
+      }
+    } catch(e) {}
+  }
+  if (mode === 'shows' || mode === 'all') {
+    titles.push(...await fetchShowSourceTitles());
+  }
+  return [...new Set(titles)];
+}
+
+async function expandPool(manual=true) {
+  if (poolExpansionInProgress) return;
+  if (!manual && autoFetchPaused) return;
+  if (!manual && !recommendationPageActive()) return;
+  if (manual) autoFetchPaused = false;
+  poolExpansionInProgress = true;
+  fetchAbortRequested = false;
+  const btn = document.getElementById('expandBtn');
+  if (btn) { btn.disabled = false; btn.textContent = 'Stop Fetching'; }
+  const mode = expansionMode();
+  const chasingPerfect = needsMorePerfectRecommendations();
+  if (manual || chasingPerfect) showFetchProgress(chasingPerfect ? `Finding ${PERFECT_REC_TARGET} strongest overlap matches...` : `Expanding ${mode === 'all' ? 'movies and shows' : mode} from Wikipedia...`, 0, '');
+
+  let added = 0;
+  let recovered = 0;
+  let attempts = 0;
+  let pageDepth = manual ? 8 : 5;
+  const seenThisRun = new Set();
+
+  if (ensureRejectedRefreshState().additionsSinceRefresh >= REJECTED_REFRESH_ADD_INTERVAL) {
+    const refreshResult = await refreshRejectedLane();
+    recovered += refreshResult.recovered;
+  }
+
+  while (!fetchAbortRequested) {
+    const allTitles = await candidateTitlesForMode(mode, pageDepth);
+    const existing = new Set(Object.values(state.movies).map(m => normaliseTitleKey(m.title)));
+    const toFetch = allTitles.filter(t => {
+      const clean = normaliseTitleKey(t);
+      return clean && !existing.has(clean) && !hiddenTitleMatches(t) && !seenThisRun.has(clean) && !state.rejectedWikiTitles[rejectKey(t, mode)] && !obviousNonMovieTitle(t);
+    });
+
+    if (!toFetch.length) {
+      if (needsMorePerfectRecommendations() && pageDepth < 80) { pageDepth += 8; continue; }
+      break;
+    }
+
+    for (let i = 0; i < toFetch.length; i++) {
+      if (fetchAbortRequested) break;
+      const title = toFetch[i];
+      seenThisRun.add(normaliseTitleKey(title));
+      attempts++;
+      if (manual || chasingPerfect || needsMorePerfectRecommendations()) {
+        const perfectCount = perfectRecommendationCount(recommendationCandidates());
+        showFetchProgress(
+          needsMorePerfectRecommendations() ? `Finding ${PERFECT_REC_TARGET} strongest overlap matches · ${perfectCount}/${PERFECT_REC_TARGET} ready` : `Finding new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} · added ${added}`,
+          Math.min(96, (attempts % 100)),
+          title
+        );
+      }
+      try {
+        const movie = await fetchWikiMovie(title, mode);
+        if (movie && isMovieHidden(movie)) {
+          // Keep explicitly hidden titles out of both the pool and rejected list.
+        } else if (movie && !state.movies[movie.id]) {
+          if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, mode)) {
+            state.movies[movie.id] = movie;
+            added++;
+            const rejectedRefreshDue = notePoolAddition();
+            if (added % CARD_REFRESH_BATCH_SIZE === 0) {
+              rebuildCanonicalTagBrain();
+              computeTagWeights();
+              saveLocalState();
+              render();
+            }
+            if (rejectedRefreshDue && !fetchAbortRequested) {
+              const refreshResult = await refreshRejectedLane();
+              recovered += refreshResult.recovered;
+            }
+            if (!needsMorePerfectRecommendations() && !manual) { fetchAbortRequested = true; break; }
+          } else {
+            recordRejectedTitle(title, mode, 'language/year/type mismatch');
+          }
+        } else {
+          recordRejectedTitle(title, mode, 'not a usable Hindi/English movie or show');
+        }
+      } catch(e) {
+        if (fetchAbortRequested || e.name === 'AbortError') break;
+        recordRejectedTitle(title, mode, e.message || 'fetch failed');
+      }
+      if (fetchAbortRequested) break;
+      if (attempts % 20 === 0) await abortableSleep(WIKI_BATCH_PAUSE_MS);
+    }
+
+    if (!needsMorePerfectRecommendations() && !manual) break;
+    if (pageDepth < 80) pageDepth += 8; else break;
+  }
+
+  if (manual || chasingPerfect || added) hideFetchProgress();
+  if (btn) { btn.disabled = false; btn.textContent = '＋ Expand Pool'; }
+  poolExpansionInProgress = false;
+  const stopped = fetchAbortRequested || autoFetchPaused;
+  fetchAbortRequested = false;
+  if (!stopped) autoFetchPaused = false;
+  rebuildCanonicalTagBrain();
+  computeTagWeights();
+  saveLocalState(); syncDrive(); render();
+  const recoveredText = recovered ? ` Recovered ${recovered} rejected ${recovered === 1 ? 'title' : 'titles'}.` : '';
+  if (stopped && manual) showToast(`Stopped. Added ${added} titles.${recoveredText}`, (added || recovered)?'success':'');
+  else if (manual || added || recovered) showToast(`Added ${added} new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} to pool.${recoveredText}`, (added || recovered)?'success':'');
+}
+
+
+function handleManualTitleKey(e) {
+  if (e.key === 'Enter') addManualTitle();
+}
+
+function wikipediaTitleFromUrl(value) {
+  const raw = (value || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase().replace(/^m\./, '');
+    if (!host.endsWith('wikipedia.org')) return '';
+
+    if (url.pathname.startsWith('/wiki/')) {
+      const slug = url.pathname.replace(/^\/wiki\//, '').split('/')[0];
+      if (!slug) return '';
+      return decodeURIComponent(slug).replace(/_/g, ' ').trim();
+    }
+
+    const title = url.searchParams.get('title');
+    if (title) return decodeURIComponent(title).replace(/_/g, ' ').trim();
+  } catch(e) {}
+  return '';
+}
+
+async function addManualTitle() {
+  const input = document.getElementById('manualTitle');
+  const btn = document.getElementById('manualAddBtn');
+  const rawUrl = (input?.value || '').trim();
+  if (!rawUrl) { showToast('Paste a Wikipedia URL first','error'); return; }
+
+  const wikiTitle = wikipediaTitleFromUrl(rawUrl);
+  if (!wikiTitle) { showToast('Use a valid Wikipedia page URL','error'); return; }
+
+  const mode = expansionMode();
+  const existing = Object.values(state.movies).find(m => sameCanonicalTitle(m.title, wikiTitle) || sameCanonicalTitle(m.wikiTitle, wikiTitle) || sameCanonicalTitle(m.pageTitle, wikiTitle));
+  if (hiddenTitleMatches(wikiTitle)) { showToast(`"${wikiTitle}" is hidden. Restore it from the Hidden tab.`, ''); return; }
+
+  if (btn) { btn.disabled = true; btn.textContent = 'fetching...'; }
+  showFetchProgress('Fetching Wikipedia URL...', 8, wikiTitle);
+
+  let movie = null;
+  const diagnostics = {};
+  try {
+    movie = await fetchWikiMovie(wikiTitle, mode, diagnostics);
+  } catch(e) {
+    const reason = e.message || 'Wikipedia request failed';
+    recordRejectedTitle(wikiTitle, mode, reason, 'manual-url');
+    saveLocalState();
+    render();
+    showToast(`Could not process "${wikiTitle}": ${reason}`, 'error');
+    return;
+  } finally {
+    hideFetchProgress();
+    if (btn) { btn.disabled = false; btn.textContent = 'fetch from URL'; }
+  }
+
+  if (!movie) {
+    const reason = diagnostics.reason || 'Wikipedia URL could not be processed';
+    recordRejectedTitle(wikiTitle, mode, reason, 'manual-url');
+    saveLocalState(); render();
+    showToast(`Could not process "${wikiTitle}": ${reason}`, 'error');
+    return;
+  }
+  if (isMovieHidden(movie)) { showToast(`"${movie.title}" is hidden. Restore it from the Hidden tab.`, ''); return; }
+  if (existing) {
+    const keep = { rating: Number(existing.rating || 0), watchlist: !!existing.watchlist, skipped: !!existing.skipped, userNotes: existing.userNotes || '' };
+    delete state.movies[existing.id];
+    state.movies[movie.id] = { ...movie, ...keep, retagStatus:'verified', retagMessage:'manual URL verified' };
+    runHousekeeping(false);
+    if (input) input.value = '';
+    saveLocalState(); syncDrive(); render();
+    showToast(`Repaired "${movie.title}" from Wikipedia URL`, 'success');
+    return;
+  }
+  if (state.movies[movie.id]) { showToast(`Already in pool: "${state.movies[movie.id].title}"`, ''); return; }
+
+  state.movies[movie.id] = movie;
+  runHousekeeping(false);
+  if (input) input.value = '';
+  saveLocalState(); syncDrive(); render();
+  showToast(`Added "${movie.title}"`, 'success');
+  showManualRatingPrompt(movie);
+}
+
+function showManualRatingPrompt(movie) {
+  if (!movie || !movie.id) return;
+  pendingManualRatingId = movie.id;
+  const modal = document.getElementById('manualRatingModal');
+  const title = document.getElementById('manualRatingTitle');
+  const meta = document.getElementById('manualRatingMeta');
+  if (title) title.textContent = movie.title || 'Untitled';
+  if (meta) {
+    const bits = [movie.year || '', movie.format ? 'show' : 'movie', movie.language || '', movie.country || ''].filter(Boolean);
+    meta.textContent = bits.join(' · ');
+  }
+  if (modal) modal.classList.remove('hidden');
+}
+
+function closeManualRatingPrompt() {
+  pendingManualRatingId = '';
+  const modal = document.getElementById('manualRatingModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+function ratePendingManualMovie(rating) {
+  const id = pendingManualRatingId;
+  if (!id) return;
+  closeManualRatingPrompt();
+  rateMovie(id, rating);
+}
+
+async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null) {
+  const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&format=json&origin=*`;
+  const data = await wikiApiJson(url);
+  return parseWikiMovieResponse(data, wikiTitle, mode, diagnostics);
+}
+
+async function fetchWikiMovieByPageId(pageId, mode='all') {
+  const clean = String(pageId || '').replace(/^wiki_/, '');
+  if (!clean) return null;
+  const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&format=json&origin=*`;
+  const data = await wikiApiJson(url);
+  return parseWikiMovieResponse(data, clean, mode);
+}
+
+function rejectWikiParse(diagnostics, reason) {
+  if (diagnostics) diagnostics.reason = reason;
+  return null;
+}
+
+function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=null) {
+  const pages = data.query?.pages;
+  if (!pages) return rejectWikiParse(diagnostics, 'Wikipedia returned no page data');
+  const page = Object.values(pages)[0];
+  if (!page || page.missing !== undefined) return rejectWikiParse(diagnostics, 'Wikipedia page not found');
+
+  const extract = page.extract || '';
+  const pageTitle = page.title || requestedTitle;
+  const thumbnailUrl = page.thumbnail?.source || '';
+  const title = pageTitle.replace(/ \(.*\)$/, '').trim();
+  const wikiPageId = String(page.pageid || '').trim();
+  const id = 'wiki_' + wikiPageId;
+
+  const cats = (page.categories || []).map(c => c.title.toLowerCase());
+  if (isFranchiseOverviewPage(pageTitle, extract, cats)) return rejectWikiParse(diagnostics, 'franchise or overview page, not one title');
+  const catText = cats.join(' ');
+  const leadText = extract.slice(0, 1400);
+  const storyText = extractNarrativeSection(extract);
+  if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return rejectWikiParse(diagnostics, 'no usable narrative section');
+
+  let language = '';
+  const englishEvidence = cats.some(c => c.includes('english-language'))
+    || /\benglish-language\b/i.test(leadText)
+    || /\b(american|british) (film|television|tv|web|streaming television)\b/i.test(leadText);
+  const hindiEvidence = cats.some(c => c.includes('hindi-language'))
+    || /\bhindi-language\b/i.test(leadText)
+    || /\bhindi (film|television|tv|web|streaming television)\b/i.test(leadText);
+  if (hindiEvidence) language = 'Hindi';
+  else if (englishEvidence) language = 'English';
+
+  let format = null;
+  if (cats.some(c => c.includes('television series') || c.includes('tv series') || c.includes('web series'))) format = 'series';
+  if (cats.some(c => c.includes('miniseries'))) format = 'miniseries';
+  if (!format && /\b(television series|tv series|web series|miniseries|streaming television series)\b/i.test(leadText)) format = 'series';
+  if (cats.some(c => c.includes('film series') || c.includes('media franchise') || c.includes('fictional universes'))) return rejectWikiParse(diagnostics, 'franchise page, not one movie or show');
+  if (mode === 'movies' && format) return rejectWikiParse(diagnostics, 'title is a show, not a movie');
+  if (mode === 'shows' && !format) return rejectWikiParse(diagnostics, 'title is a movie, not a show');
+
+  const year = deriveReleaseYear(leadText, extract, cats, format);
+
+  if (language !== 'English' && language !== 'Hindi') return rejectWikiParse(diagnostics, 'English or Hindi language evidence missing');
+
+  let country = 'USA';
+  if (language === 'Hindi') country = 'India';
+  else if (mode === 'shows' && (cats.some(c => c.includes('indian television') || c.includes('indian web series')) || /\bindian\b/i.test(leadText))) { country = 'India'; language = 'Hindi'; }
+  else if (cats.some(c => c.includes('british film') || c.includes('united kingdom') || c.includes('british television'))) country = 'UK';
+  else if (cats.some(c => c.includes('indian film') || c.includes('indian television'))) { country = 'India'; language = language || 'Hindi'; }
+
+  const dirMatch = leadText.match(/directed by ([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,3})/);
+  const creatorMatch = leadText.match(/created by ([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,3})/);
+  const director = dirMatch ? dirMatch[1] : (creatorMatch ? creatorMatch[1] : 'Unknown');
+
+  if (!year || !title || !wikiPageId) return rejectWikiParse(diagnostics, 'missing release year, title or Wikipedia page ID');
+
+  const tagMeta = { source: 'wikipedia', storyText, leadText, language, country, year, format: format||null, director };
+  const builtTags = buildStoryTagSet(storyText, tagMeta);
+  const genres = deriveGenres(leadText, cats);
+  return {
+    id, title, year, director, language, country, format: format||null,
+    genres, categoryText: cats.join(' '),
+    tags: builtTags.tags, coreTags: builtTags.coreTags, plotTags: builtTags.plotTags, descriptorTags: builtTags.descriptorTags, rawDescriptors: builtTags.rawDescriptors,
+    tagged: builtTags.tagged, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, thumbnailUrl, storyText, leadText, wikiVerified: true, retagStatus: 'verified', retagMessage: ''
+  };
+}
+
+function extractNarrativeSection(extract) {
+  const text = (extract || '').replace(/\r/g, '').trim();
+  if (!text) return '';
+  const lines = text.split('\n');
+  const candidates = [];
+  for (let i = 0; i < lines.length; i++) {
+    const heading = normaliseWikiHeading(lines[i]);
+    if (!heading) continue;
+    const out = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j].trim();
+      if (normaliseWikiHeading(line)) break;
+      if (line) out.push(line);
+      if (out.join(' ').length > 6500) break;
+    }
+    const section = out.join(' ').replace(/\s+/g, ' ').trim();
+    const score = narrativeSectionScore(heading, section);
+    if (score > 0) candidates.push({ section, score });
+  }
+  candidates.sort((a,b) => b.score - a.score || b.section.length - a.section.length);
+  return candidates[0]?.section || '';
+}
+
+function narrativeSectionScore(heading, section) {
+  const text = String(section || '').replace(/\s+/g, ' ').trim();
+  if (text.length < MIN_STORY_SECTION_CHARS) return 0;
+  const narrativeSignals = (text.match(/\b(revolves?|follows?|cent(?:er|re)s? on|chronicles?|depicts?|portrays?|focuses? on|story of|lives? of|protagonist|character|moves? into|falls? in love|discovers?|learns?|decides?|attempts?|struggles?|must|returns?|begins?|becomes?|finds?|joins?|leaves?|dies?|killed|marries?|divorces?|relationship|family|brother|sister|father|mother|son|daughter)\b/gi) || []).length;
+  const productionSignals = (text.match(/\b(production|filming|casting|cast members?|developed by|created by|executive producer|network|broadcast rights|renewed|canceled|cancelled|ratings|reception|viewership|episodes? ordered|premiered on|released on)\b/gi) || []).length;
+  const actionSentences = (text.match(/(?:^|[.!?]\s+)[A-Z][^.!?]{20,220}\b(?:is|are|was|were|has|have|must|tries?|attempts?|discovers?|learns?|finds?|meets?|returns?|becomes?|begins?|leaves?|joins?|kills?|dies?|falls?|struggles?|decides?)\b[^.!?]*[.!?]/g) || []).length;
+  const narrativeOpening = /\b(series|film|show|story)\s+(revolves?|follows?|cent(?:er|re)s?|chronicles?|depicts?|focuses?)\b/i.test(text.slice(0, 500));
+  const headingHint = /\b(plot|story|narrative|premise|synopsis|summary|overview|character)\b/i.test(heading) ? 2 : 0;
+  const nonStoryHeading = /\b(cast|casting|characters? list|episodes?|production|development|filming|release|broadcast|reception|ratings?|awards?|music|soundtrack|marketing|references?|external links?|see also)\b/i.test(heading);
+  const contentIsNarrative = narrativeSignals >= 3
+    && (narrativeOpening || actionSentences >= 2 || narrativeSignals >= productionSignals * 2 + 2);
+  if (!contentIsNarrative || (nonStoryHeading && narrativeSignals < productionSignals * 3 + 5)) return 0;
+  return narrativeSignals * 3 + actionSentences * 2 + headingHint - productionSignals * 4 - (nonStoryHeading ? 8 : 0);
+}
+
+function normaliseWikiHeading(line) {
+  const raw = String(line || '').trim();
+  if (!raw) return '';
+  const stripped = raw.replace(/^=+\s*/, '').replace(/\s*=+$/, '').trim();
+  if (stripped === raw && !/^=+.*=+$/.test(raw)) return '';
+  return stripped.toLowerCase();
+}
+
+function deriveReleaseYear(leadText, extract, cats, format) {
+  const catText = (cats || []).join(' ');
+  const catPatterns = format
+    ? [/\b(19[3-9]\d|20[0-3]\d) [a-z -]*television series debuts\b/, /\b(19[3-9]\d|20[0-3]\d) [a-z -]*web series debuts\b/]
+    : [/\b(19[3-9]\d|20[0-3]\d) [a-z -]*films\b/];
+  for (const rx of catPatterns) {
+    const m = catText.match(rx);
+    if (m) return parseInt(m[1], 10);
+  }
+  const lead = leadText || '';
+  const releaseMatch = lead.match(/\b(released|premiered|debuted|aired|broadcast|streamed)\D{0,80}\b(19[3-9]\d|20[0-3]\d)\b/i);
+  if (releaseMatch) return parseInt(releaseMatch[2], 10);
+  const firstYear = (lead.match(/\b(19[3-9]\d|20[0-3]\d)\b/) || String(extract || '').match(/\b(19[3-9]\d|20[0-3]\d)\b/));
+  return firstYear ? parseInt(firstYear[1], 10) : null;
+}
+
+// ─────────────────────────────────────────────
+// TAG DERIVATION FROM PLOT TEXT
+// This is the core intelligence — no API needed.
+// We match plot keywords to a comprehensive tag vocabulary.
+// ─────────────────────────────────────────────
+function deriveTagsFromText(text, meta) {
+  const story = (text || '').toLowerCase();
+  const lead = (meta.leadText || '').toLowerCase();
+  const cat = (meta.categoryText || '').toLowerCase();
+  const all = `${lead} ${story}`;
+  const tags = new Set();
+  const add = tag => { if (tag) tags.add(tag); };
+  const has = rx => rx.test(all);
+  const storyHas = rx => rx.test(story);
+  const leadHas = rx => rx.test(lead);
+  const catHas = rx => rx.test(cat);
+
+  const lang = (meta.language || 'English').toLowerCase().replace(/\s+/g,'-') + '-language';
+  const country = (meta.country || 'usa').toLowerCase().replace(/\s+/g,'-');
+  const decade = meta.year ? Math.floor(meta.year/10)*10 + 's' : '2000s';
+  const fmt = meta.format || 'film';
+  add(lang); add(country); add(decade); add(fmt);
+  if (fmt !== 'film') add('prestige-tv');
+
+  // Broad genre labels require corroborating evidence; one plot word must not classify the whole title.
+  const crimeSignals = [
+    /\b(murder|homicide|killing)\b/,
+    /\b(detective|investigation|investigates|police procedural)\b/,
+    /\b(heist|robbery|theft)\b/,
+    /\b(gangster|mob|mafia|cartel|crime syndicate)\b/,
+    /\b(criminal conspiracy|crime lord|organised crime|organized crime)\b/
+  ].filter(rx => rx.test(story)).length;
+  if (crimeSignals >= 2 || leadHas(/\b(crime thriller|crime drama|mystery thriller|detective drama)\b/) || catHas(/\bcrime (films|television series)\b/)) add('crime-thriller');
+  if (has(/\b(serial killer|psychopath|criminal profiler|profiling unit|fbi profiler)\b/)) add('serial-killer-thriller');
+  if (has(/\b(ghost|haunted|supernatural|demon|possession|exorcism|exorcist|witchcraft|occult)\b/)) add('supernatural-horror');
+  if (has(/\b(zombie|undead|global outbreak|viral outbreak|post-apocalyptic|wasteland)\b/)) add('apocalyptic');
+  if (has(/\b(spacecraft|astronaut|alien|extraterrestrial|interstellar|planetary mission|space mission|nasa|spaceship|space station)\b/)) add('space-sci-fi');
+  if (has(/\b(robot|android|artificial intelligence|\bai\b|sentient machine|cyborg|simulation|virtual reality)\b/)) add('artificial-intelligence');
+  if (has(/\b(time travel|travels? (back|forward) in time|time loop|temporal|paradox|alternate timeline|parallel timeline)\b/)) add('time-manipulation');
+  if (has(/\b(dream world|subconscious|surreal|hallucination|psychedelic|blurs reality|dreams within dreams)\b/)) add('surreal-dreamlike');
+  if (has(/\b(world war|wwii|world war ii|nazi|nazis|soldier|military unit|army officer|battlefield|combat mission|war-torn|wartime)\b/) || catHas(/\bwar films\b|\bworld war ii films\b/)) add('war-drama');
+  if (has(/\b(prison|inmate|incarcerated|jail|penitentiary|wrongfully imprisoned)\b/)) add('prison-setting');
+  if (has(/\b(courtroom|trial|judge|jury|lawyer|attorney|verdict|legal case)\b/)) add('courtroom-drama');
+  if (has(/\b(political conspiracy|government corruption|election campaign|regime|authoritarian government|state corruption)\b/)) add('political-thriller');
+  if (has(/\b(spy|espionage|secret agent|intelligence agency|cia|mi6|undercover agent|surveillance operation)\b/)) add('spy-thriller');
+  if (has(/\b(drug cartel|narcotics|drug trafficking|drug dealer|addiction|heroin|cocaine|methamphetamine)\b/)) add('drug-trade');
+  if (has(/\b(heist|bank robbery|vault|steal|theft|con artist|confidence trick|grift)\b/)) add('heist-thriller');
+  if (has(/\b(western|cowboy|frontier|gunfighter|outlaw|sheriff|saloon)\b/)) add('western');
+  if (has(/\b(musician|band|concert|jazz singer|rock band|composer|music career|recording artist)\b/)) add('music-world');
+  if (has(/\b(cricket|football|basketball|baseball|tennis|boxing|wrestling|racing driver|athlete|sports coach|tournament|championship|world cup|olympics|sports team|hockey|kabaddi)\b/)) add('sports-drama');
+  if (leadHas(/\bcomedy\b/) || catHas(/\bcomedy (films|television series)\b/) || storyHas(/\b(comic misunderstanding|farce|satirical comedy|dark comedy)\b/)) add('comedy');
+  if (leadHas(/\bromantic\b/) || has(/\b(falls in love|love affair|romantic relationship|heartbreak|wedding|marriage proposal)\b/)) add('romance');
+  if (leadHas(/\bhorror\b/) || catHas(/\bhorror films\b/) || has(/\b(terrifying|monster attacks|slasher|haunting|creature stalks)\b/)) add('horror');
+  if (has(/\b(based on a true story|based on actual events|true story|real-life|biographical|biopic|historical figure)\b/) || catHas(/\bbiographical films\b/)) add('based-on-true-story');
+  if (leadHas(/\banimated\b/) || catHas(/\banimated films\b/)) add('animated');
+  if (leadHas(/\bdocumentary\b/) || catHas(/\bdocumentary films\b/)) add('documentary');
+  if (has(/\b(superhero|marvel comics|dc comics|batman|spider-man|avenger|x-men)\b/)) add('superhero');
+  if (has(/\b(magic|wizard|dragon|mythical kingdom|fairy tale|enchanted|fantasy world)\b/) || leadHas(/\bfantasy\b/)) add('fantasy');
+  if (has(/\b(mythology|folklore|legendary creature|ancient legend|gods|goddess)\b/)) add('mythology-folklore');
+
+  // Narrative and character tags. These require clear phrases, not generic single words.
+  if (has(/\b(plot twist|twist ending|shocking revelation|final revelation|unexpected revelation)\b/)) add('twist-ending');
+  if (has(/\b(non-linear|nonlinear|flashback sequence|parallel timelines|interwoven storylines|fragmented narrative)\b/)) add('non-linear-narrative');
+  if (has(/\b(unreliable narrator|false memory|subjective reality|ambiguous reality)\b/)) add('unreliable-narration');
+  if (has(/\b(ensemble cast|multiple protagonists|interwoven lives|anthology)\b/)) add('ensemble-cast');
+  if (has(/\b(single location|one room|confined space|trapped in a room|claustrophobic setting)\b/)) add('single-location');
+  if (has(/\b(real time|one night|one day|24 hours|single night)\b/)) add('compressed-timeline');
+  if (has(/\b(anti-hero|antihero|morally ambiguous|morally grey|flawed protagonist)\b/)) add('morally-ambiguous-protagonist');
+  if (has(/\b(main antagonist|ruthless villain|primary villain|crime lord|serial killer)\b/)) add('compelling-villain');
+  if (has(/\b(female protagonist|woman protagonist|female lead|women-led|heroine)\b/)) add('female-lead-protagonist');
+  if (has(/\b(coming of age|teenage protagonist|adolescent protagonist|child protagonist|growing up)\b/)) add('coming-of-age-story');
+  if (has(/\b(father and son|father-son|mother and daughter|mother-daughter|family business|estranged family|dysfunctional family|family conflict)\b/)) add('family-dynamics');
+  if (has(/\b(close friendship|best friends|unlikely friendship|bond between friends|brotherhood|sisterhood)\b/)) add('friendship-bond');
+  if (has(/\b(mentor and student|teacher and student|master and pupil|coach and student)\b/)) add('mentor-student');
+  if (has(/\b(obsessed with|obsession with|becomes obsessed|fixated on)\b/)) add('obsession');
+  if (has(/\b(seeks revenge|takes revenge|vengeance|avenges|payback)\b/)) add('revenge-driven');
+  if (has(/\b(redemption|atone|second chance|seeks forgiveness)\b/)) add('redemption-arc');
+  if (has(/\b(grief|mourning|bereavement|death of his|death of her|widow|widower)\b/)) add('grief-and-loss');
+  if (has(/\b(identity crisis|secret identity|double life|mistaken identity|false identity)\b/)) add('identity-crisis');
+  if (has(/\b(power struggle|political ambition|rises to power|greed|corrupt ambition)\b/)) add('power-and-ambition');
+  if (has(/\b(class divide|poverty|wealth inequality|working class|upper class|rich and poor)\b/)) add('class-divide');
+  if (has(/\b(racism|discrimination|prejudice|segregation|caste discrimination|social stigma)\b/)) add('social-discrimination');
+
+  // Tone and setting.
+  if (leadHas(/\bneo-noir\b/) || has(/\b(bleak atmosphere|grim world|gritty crime|disturbing events|harrowing ordeal)\b/)) add('dark-tone');
+  if (has(/\b(slow burn|contemplative|meditative|quiet character study|understated drama|atmospheric)\b/)) add('slow-burn');
+  if (leadHas(/\bpsychological\b/) || has(/\b(mental illness|psychiatrist|therapy|psychological manipulation|mind games)\b/)) add('psychological');
+  if (leadHas(/\bsatirical\b/) || has(/\b(satire|satirizes|social satire|political satire|darkly comic)\b/)) add('satirical');
+  if (has(/\b(heartwarming|inspiring|optimistic ending|feel-good|joyful)\b/)) add('uplifting-tone');
+  if (has(/\b(epic scale|sweeping saga|grand spectacle|large-scale battle)\b/)) add('epic-scale');
+  if (has(/\b(intimate portrait|small-scale story|chamber drama|personal story)\b/)) add('intimate-scale');
+  if (has(/\b(visually stunning|beautiful cinematography|striking imagery|visual spectacle)\b/)) add('visually-striking');
+  if (has(/\b(emotionally devastating|deeply moving|heartbreaking|tragic ending)\b/)) add('emotionally-devastating');
+
+  const cityMatch = all.match(/\b(new york|manhattan|brooklyn|los angeles|chicago|london|paris|berlin|mumbai|delhi|lahore)\b/);
+  if (cityMatch) add(cityMatch[1].replace(/\s/g,'-') + '-setting');
+  if (has(/\b(rural village|small town|remote village|isolated village|countryside)\b/)) add('rural-setting');
+  if (has(/\b(urban crime|city streets|metropolis|downtown|inner city)\b/)) add('urban-setting');
+  if (leadHas(/\bperiod\b/) || has(/\b(19th century|18th century|medieval|ancient kingdom|victorian era|1920s|1930s|1940s|1950s|1960s)\b/)) add('period-drama');
+  if (has(/\b(dystopian|totalitarian state|surveillance state|authoritarian regime)\b/)) add('dystopian');
+  if (has(/\b(post-apocalyptic|after the apocalypse|wasteland|ruined world)\b/)) add('post-apocalyptic');
+  if (meta.country === 'India' || has(/\b(mumbai|delhi|kolkata|chennai|punjab|rajasthan|bengal|maharashtra)\b/)) add('india-setting');
+
+  if (meta.director) {
+    const d = meta.director.toLowerCase();
+    if (/nolan/.test(d)) add('nolan-style');
+    if (/fincher/.test(d)) add('fincher-style');
+    if (/tarantino/.test(d)) add('tarantino-style');
+    if (/villeneuve/.test(d)) add('villeneuve-style');
+    if (/scorsese/.test(d)) add('scorsese-style');
+    if (/kubrick/.test(d)) add('kubrick-style');
+    if (/kurosawa/.test(d)) add('kurosawa-style');
+    if (/anurag kashyap|kashyap/.test(d)) add('anurag-kashyap-style');
+    if (/mani ratnam/.test(d)) add('mani-ratnam-style');
+  }
+
+  if (has(/\b(fight sequence|car chase|rescue mission|assassin|mercenary|kidnapping|gunfight|martial arts)\b/) || leadHas(/\baction thriller\b/)) add('action-thriller');
+  if (has(/\b(mystery|missing person|hidden clue|solves the case|unknown killer|secret behind)\b/)) add('mystery-thriller');
+  if (has(/\b(life of|biographical|memoir|real-life account)\b/)) add('biographical-drama');
+  if (has(/\b(expedition|quest|voyage|treasure hunt|dangerous journey|escape across)\b/)) add('adventure');
+  if (has(/\b(stranded|fight for survival|survive in|trapped underground|trapped inside|survival)\b/)) add('survival');
+  if (has(/\b(conspiracy|cover-up|classified secret|whistleblower|secret organization)\b/)) add('conspiracy');
+  if (has(/\b(betrayal|betrays|traitor|double-cross|deception)\b/)) add('betrayal');
+  if (has(/\b(loyalty to|duty to|honour|honor|allegiance)\b/)) add('loyalty-conflict');
+  if (has(/\b(marriage|husband and wife|divorce|spouse|wedding)\b/)) add('marriage-family');
+  if (has(/\b(father.*son|son.*father|father.*daughter|daughter.*father)\b/)) add('father-child-relationship');
+  if (has(/\b(mother.*son|son.*mother|mother.*daughter|daughter.*mother)\b/)) add('mother-child-relationship');
+  if (has(/\b(school|college|university|student life|campus)\b/)) add('school-college-setting');
+  if (has(/\b(office|corporate|workplace|employee|boss|business empire)\b/)) add('workplace-setting');
+  if (has(/\b(journalist|newspaper|reporter|newsroom|broadcast journalist)\b/)) add('media-world');
+  if (has(/\b(king|queen|prince|princess|royal family|throne|palace|empire)\b/)) add('royal-politics');
+  if (has(/\b(village council|panchayat|local election|village politics)\b/)) add('village-politics');
+  if (has(/\b(underdog|outsider|against the odds|unlikely hero)\b/)) add('underdog-story');
+  if (has(/\b(moral dilemma|ethical dilemma|must choose|crisis of conscience)\b/)) add('moral-dilemma');
+  if (has(/\b(two families|rival family|family feud|clan|dynasty)\b/)) add('family-dynasty');
+  if (has(/\b(detective|police officer|cop|inspector|constable)\b/)) add('detective-protagonist');
+  if (has(/\b(monster|creature|beast|kaiju)\b/)) add('creature-feature');
+  if (has(/\b(future society|space colony|fictional world|alternate world)\b/)) add('world-building');
+
+  return [...tags];
+}
+
+function ensureMinimumPlotTags(coreTags, text, meta={}) {
+  return cleanTagArray(coreTags || [], meta, false).filter(t => !isMetaTag(t));
+}
+
+function tagEvidenceOk(tag, movie) {
+  if (!movie || movie.source !== 'wikipedia') return true;
+  const t = `${movie.storyText || ''} ${movie.leadText || ''}`.toLowerCase();
+  if (!t.trim()) return !['time-manipulation','sports-drama','war-drama'].includes(tag);
+  if (tag === 'time-manipulation') return /\b(time travel|travels? (back|forward) in time|time loop|temporal|paradox|alternate timeline|parallel timeline)\b/.test(t);
+  if (tag === 'sports-drama') return /\b(cricket|football|basketball|baseball|tennis|boxing|wrestling|racing driver|athlete|sports coach|tournament|championship|world cup|olympics|sports team|hockey|kabaddi)\b/.test(t);
+  if (tag === 'war-drama') return /\b(world war|wwii|world war ii|nazi|nazis|soldier|military unit|army officer|battlefield|combat mission|war-torn|wartime)\b/.test(t);
+  return true;
+}
+
+function scoringTags(movie) {
+  if (!movie) return [];
+  if (movie.canonicalTagVersion === CANONICAL_TAG_VERSION && Array.isArray(movie.canonicalTags)) return [...new Set(movie.canonicalTags)].filter(tag => conceptAllowed(movie, tag));
+  return [...new Set(rawScoringTags(movie).map(tag => canonicalTagFeatures(tag).phrase).filter(Boolean))].filter(tag => conceptAllowed(movie, tag));
+}
+
+function abortableSleep(ms) {
+  if (fetchAbortRequested || ms <= 0) return Promise.resolve();
+  return new Promise(resolve => {
+    let timer = null;
+    const done = () => {
+      if (timer) clearTimeout(timer);
+      if (currentSleepCancel === done) currentSleepCancel = null;
+      resolve();
+    };
+    currentSleepCancel = done;
+    timer = setTimeout(done, ms);
+  });
+}
+
+function sleep(ms) { return abortableSleep(ms); }
+
+function showFetchProgress(label, pct, sub) {
+  const el = document.getElementById('fetchProgress');
+  el.classList.add('visible');
+  document.getElementById('fetchLabel').textContent = label;
+  document.getElementById('fetchFill').style.width = pct + '%';
+  document.getElementById('fetchSub').textContent = sub;
+}
+function hideFetchProgress() {
+  document.getElementById('fetchProgress').classList.remove('visible');
+}
+
+// ─────────────────────────────────────────────
+// HARDCODED TAGS for seed movies (instant, no fetch needed)
+// ─────────────────────────────────────────────
+const SEED_TAGS = {
+  'tt0111161':['drama','english-language','usa','1990s','film','wrongful-imprisonment','prison-setting','friendship-bond','hope-and-redemption','institutional-oppression','slow-burn','uplifting-tone','moral-courage','based-on-novella','corrupt-authority','long-haul-narrative'],
+  'tt0068646':['crime-thriller','english-language','usa','1970s','film','organised-crime-saga','family-dynasty','power-and-ambition','morally-ambiguous-protagonist','loyalty-and-betrayal','slow-burn','dark-tone','ensemble-cast','operatic-tone','patriarch-protagonist'],
+  'tt0468569':['superhero','english-language','usa','2000s','film','compelling-villain','moral-philosophy','chaos-vs-order','dark-tone','cat-and-mouse-thriller','morally-ambiguous-protagonist','action-thriller','psychological','nolan-style','iconic-villain'],
+  'tt0137523':['psychological-thriller','english-language','usa','1990s','film','unreliable-narration','twist-ending','identity-crisis','dark-comedy','satirical','non-linear-narrative','morally-ambiguous-protagonist','anti-establishment','fincher-style','dark-tone'],
+  'tt0816692':['space-sci-fi','english-language','usa','2010s','film','time-manipulation','parent-child-relationship','grief-and-loss','hard-sci-fi','emotionally-devastating','non-linear-narrative','nolan-style','visually-striking','slow-burn'],
+  'tt1375666':['space-sci-fi','english-language','usa','2010s','film','surreal-dreamlike','heist-thriller','non-linear-narrative','nolan-style','ensemble-cast','twist-ending','action-thriller','layered-reality'],
+  'tt0110912':['crime-thriller','english-language','usa','1990s','film','non-linear-narrative','dark-comedy','ensemble-cast','tarantino-style','multiple-storylines','morally-ambiguous-protagonist','violence-and-humor','dialogue-driven'],
+  'tt0133093':['space-sci-fi','english-language','usa','1990s','film','dystopian','chosen-one','action-thriller','philosophical','twist-ending','artificial-intelligence','cyberpunk','visually-striking'],
+  'tt0114369':['crime-thriller','english-language','usa','1990s','film','serial-killer-thriller','detective-protagonist','dark-tone','urban-setting','fincher-style','cat-and-mouse-thriller','seven-deadly-sins','bleak-worldview'],
+  'tt0102926':['psychological-thriller','english-language','usa','1990s','film','serial-killer-thriller','female-lead-protagonist','cat-and-mouse-thriller','compelling-villain','suspense','gender-dynamics'],
+  'tt0317248':['crime-thriller','english-language','brazil','2000s','film','coming-of-age-story','urban-poverty','non-linear-narrative','ensemble-cast','based-on-true-story','gang-culture','kinetic-direction','dark-tone'],
+  'tt0482571':['mystery-thriller','english-language','usa','2000s','film','twist-ending','rivalry','obsession','non-linear-narrative','unreliable-narration','nolan-style','period-drama','dark-tone'],
+  'tt0209144':['psychological-thriller','english-language','usa','2000s','film','unreliable-narration','non-linear-narrative','twist-ending','identity-crisis','nolan-style','revenge-driven'],
+  'tt2267998':['psychological-thriller','english-language','usa','2010s','film','unreliable-narration','twist-ending','toxic-marriage','dark-tone','fincher-style','female-villain','media-manipulation','suburban-setting'],
+  'tt1291584':['crime-thriller','english-language','usa','2010s','film','missing-child','moral-dilemma','vigilante-justice','dark-tone','villeneuve-style','emotionally-devastating','parallel-investigation'],
+  'tt6751668':['crime-thriller','english-language','south-korea','2010s','film','class-divide','dark-comedy','twist-ending','ensemble-cast','satirical','emotionally-devastating','visually-striking'],
+  'tt2582802':['drama','english-language','usa','2010s','film','music-world','obsession','mentor-student','psychological','dark-tone','intense-pacing','coming-of-age-story'],
+  'tt0816711':['space-sci-fi','english-language','usa','2010s','film','linguistics','time-manipulation','grief-and-loss','slow-burn','female-lead-protagonist','philosophical','villeneuve-style'],
+  'tt0364569':['psychological-thriller','english-language','south-korea','2000s','film','revenge-driven','twist-ending','dark-tone','identity-crisis','disturbing','isolation'],
+  'tt0338013':['romance','english-language','usa','2000s','film','memory-and-identity','non-linear-narrative','grief-and-loss','surreal-dreamlike','emotionally-devastating'],
+  'tt0172495':['historical-action','english-language','usa','2000s','film','ancient-rome','revenge-driven','epic-scale','compelling-villain','honour-and-duty'],
+  'tt0120689':['drama','english-language','usa','1990s','film','death-row','prison-setting','supernatural','empathy-and-compassion','slow-burn','uplifting-tone'],
+  'tt1853728b':['western','english-language','usa','2010s','film','slavery','revenge-driven','dark-comedy','tarantino-style','violence-and-humor','morally-ambiguous-protagonist'],
+  'tt0120586':['drama','english-language','usa','1990s','film','social-discrimination','redemption-arc','prison','dark-tone','emotionally-devastating'],
+  'tt1853728c':['space-sci-fi','english-language','usa','2010s','film','artificial-intelligence','identity-crisis','slow-burn','visually-striking','dystopian','villeneuve-style'],
+  'tt0047478':['historical-action','english-language','japan','1950s','film','honour-and-duty','class-divide','ensemble-cast','kurosawa-style','action-choreography','slow-burn'],
+  'tt0087843':['crime-thriller','english-language','usa','1980s','film','organised-crime-saga','memory-and-identity','friendship-bond','non-linear-narrative','slow-burn','period-drama'],
+  'tt0253474':['war-drama','english-language','poland','2000s','film','world-war-ii','survival','based-on-true-story','emotionally-devastating','historical-drama','slow-burn'],
+  'tt0405094':['political-thriller','english-language','germany','2000s','film','surveillance','cold-war','redemption-arc','slow-burn','dark-tone'],
+  'tt0050083':['courtroom-drama','english-language','usa','1950s','film','single-location','ensemble-cast','justice-system','class-divide','slow-burn','moral-courage'],
+  // Hindi seeds
+  'in001':['action-adventure','hindi-language','india','1970s','film','revenge-driven','friendship-bond','rural-setting','ensemble-cast','classic-bollywood','dacoit-western'],
+  'in002':['coming-of-age-story','hindi-language','india','2000s','film','friendship-bond','romance','urban-setting','feel-good','dialogue-driven'],
+  'in003':['sports-drama','hindi-language','india','2000s','film','underdog-story','epic-scale','based-on-true-story','period-drama','ensemble-cast','uplifting-tone'],
+  'in004':['comedy','hindi-language','india','2000s','film','coming-of-age-story','friendship-bond','satirical','uplifting-tone','ensemble-cast'],
+  'in005':['crime-thriller','hindi-language','india','2010s','film','organised-crime-saga','revenge-driven','dark-tone','non-linear-narrative','anurag-kashyap-style','ensemble-cast'],
+  'in006':['crime-thriller','hindi-language','india','2010s','film','twist-ending','unreliable-narration','dark-comedy','cat-and-mouse-thriller','non-linear-narrative'],
+  'in007':['horror','hindi-language','india','2010s','film','mythology-folklore','greed-and-curse','slow-burn','visually-striking','supernatural-horror','dark-tone'],
+  'in008':['political-thriller','hindi-language','india','2010s','film','social-discrimination','police-procedural','dark-tone','institutional-corruption','based-on-true-story'],
+  'in009':['drama','hindi-language','india','2010s','film','grief-and-loss','class-divide','slow-burn','emotionally-devastating','romance'],
+  'in010':['sports-drama','hindi-language','india','2010s','film','father-child-relationship','based-on-true-story','female-lead-protagonist','underdog-story','uplifting-tone'],
+  'in011':['political-drama','hindi-language','india','2000s','film','youth-activism','india-setting','ensemble-cast','non-linear-narrative','emotionally-devastating'],
+  'in012':['drama','hindi-language','india','2000s','film','disability-representation','child-protagonist','mentor-student','emotionally-devastating','uplifting-tone'],
+  'in013':['spy-thriller','hindi-language','india','2010s','film','based-on-true-story','female-lead-protagonist','india-setting','emotional','cold-war'],
+  'in014':['drama','hindi-language','india','2010s','film','social-discrimination','female-lead-protagonist','courtroom-drama','dark-tone','india-setting'],
+  'in015':['crime-thriller','hindi-language','india','2010s','film','missing-person','mystery','twist-ending','female-lead-protagonist','india-setting'],
+  // Shows
+  'tv001':['crime-thriller','english-language','usa','2000s','series','prestige-tv','drug-trade','anti-hero','transformation-arc','morally-ambiguous-protagonist','slow-burn','dark-tone','ensemble-cast'],
+  'tv002':['historical-drama','english-language','uk','2010s','miniseries','prestige-tv','nuclear-disaster','based-on-true-story','slow-burn','emotionally-devastating','ensemble-cast'],
+  'tv003':['crime-thriller','english-language','usa','2010s','series','prestige-tv','detective-protagonist','psychological','serial-killer-thriller','slow-burn','non-linear-narrative','dark-tone'],
+  'tv004':['drama','english-language','usa','2010s','series','prestige-tv','family-dynamics','power-and-ambition','dark-comedy','satirical','ensemble-cast'],
+  'tv005':['crime-thriller','english-language','usa','2000s','series','prestige-tv','drug-trade','ensemble-cast','social-discrimination','slow-burn','institutional-corruption'],
+  'tv006':['crime-thriller','english-language','usa','2010s','series','prestige-tv','serial-killer-profiling','psychological','based-on-true-story','slow-burn','dark-tone'],
+  'tv007':['mystery-thriller','english-language','germany','2010s','series','prestige-tv','time-manipulation','non-linear-narrative','family-mystery','dark-tone','ensemble-cast'],
+  'tv008':['biographical-drama','hindi-language','india','2020s','series','prestige-tv','based-on-true-story','financial-thriller','india-setting','ensemble-cast'],
+  'tv009':['crime-drama','hindi-language','india','2010s','series','prestige-tv','organised-crime-saga','power-and-ambition','ensemble-cast','dark-tone','india-setting'],
+  'tv010':['comedy','hindi-language','india','2020s','series','prestige-tv','rural-setting','satirical','feel-good','india-setting','ensemble-cast'],
+  'tv011':['crime-thriller','hindi-language','india','2010s','series','prestige-tv','political-thriller','dark-tone','india-setting','ensemble-cast'],
+  'tv012':['crime-thriller','english-language','uk','2010s','series','prestige-tv','organised-crime-saga','period-drama','family-dynasty','anti-hero'],
+  'tv013':['crime-thriller','english-language','usa','2000s','series','prestige-tv','organised-crime-saga','family-dynamics','anti-hero','ensemble-cast','slow-burn'],
+  'tv014':['war-drama','english-language','usa','2000s','miniseries','prestige-tv','world-war-ii','based-on-true-story','ensemble-cast','heroism','emotionally-devastating'],
+  'tv015':['mystery-thriller','english-language','usa','2020s','series','prestige-tv','corporate-dystopia','identity-crisis','slow-burn','visually-striking','ensemble-cast'],
+};
+
+function tagMovie(movie) {
+  if (!movie) return;
+  if (movie.source === 'wikipedia' && movie.storyText) {
+    const built = buildStoryTagSet(movie.storyText, movie);
+    movie.rawDescriptors = built.rawDescriptors;
+    movie.descriptorTags = built.descriptorTags;
+    movie.coreTags = built.coreTags;
+    movie.plotTags = built.plotTags;
+    movie.tags = built.tags;
+    movie.tagged = built.tagged;
+  } else {
+    movie.source = movie.source || 'legacy';
+    movie.tags = [];
+    movie.coreTags = [];
+    movie.plotTags = [];
+    movie.descriptorTags = [];
+    movie.tagged = false;
+    movie.needsManualUrl = true;
+    movie.retagStatus = 'needs-url';
+    movie.retagMessage = 'needs Wikipedia URL';
+  }
+}
+
+function tagAllUntagged() {
+  const untagged = Object.values(state.movies).filter(m => m.rating > 0 && !m.tagged);
+  if (!untagged.length) { showToast('Nothing to tag',''); return; }
+  untagged.forEach(m => tagMovie(m));
+  runHousekeeping(false);
+  saveLocalState(); syncDrive(); render();
+  showToast(`Tagged ${untagged.length} movies`, 'success');
+}
+
+// ─────────────────────────────────────────────
+// TABS
+// ─────────────────────────────────────────────
+function setTab(tab, btn) {
+  activeTab = tab;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  if (!recommendationPageActive()) stopFetching({silent:true});
+  recVisibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
+  render();
+}
+function isShow(m) { return !!m.format; }
+function matchesTab(m) {
+  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return true;
+  if (activeTab === 'show') return isShow(m);
+  if (activeTab === 'movie') return !isShow(m);
+  return true;
+}
+
+// ─────────────────────────────────────────────
+// RENDER
+// ─────────────────────────────────────────────
+function render() {
+  updateStats();
+  updateVisibleSections();
+  if (activeTab === 'rated') renderRatedGrid();
+  else if (activeTab === 'watchlist') renderWatchlist();
+  else if (activeTab === 'tags') renderTagBrain();
+  else if (activeTab === 'pool') renderPoolGrid();
+  else if (activeTab === 'hidden') renderHiddenGrid();
+  else if (activeTab === 'rejected') renderRejectedGrid();
+  else renderRecs();
+  maybeAutoExpandPool();
+}
+
+function updateLanguageFilter(language) {
+  state.settings.languageFilter = language || 'all';
+  saveLocalState();
+  renderActiveCards();
+}
+
+function renderActiveCards() {
+  if (activeTab === 'pool') renderPoolGrid();
+  else if (activeTab === 'tags') renderTagBrain();
+  else if (activeTab === 'rated') renderRatedGrid();
+  else if (activeTab === 'watchlist') renderWatchlist();
+  else renderRecs();
+}
+
+function discoveryPool() {
+  return Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && !m.watchlist && matchesTab(m) && matchesLanguageFilter(m) && meetsYearCutoff(m));
+}
+
+function matchesLanguageFilter(movie) {
+  const filter = state.settings.languageFilter || 'all';
+  return filter === 'all' || movie.language === filter;
+}
+
+function meetsYearCutoff(m) {
+  return !m.year || m.year >= state.settings.minYear;
+}
+
+function personalizedEnough() {
+  return Object.values(state.movies).filter(m => m.rating > 0 && m.tagged).length >= 3;
+}
+
+function recommendationCandidates() {
+  return scoreMovies().filter(x => matchesTab(x.movie) && matchesLanguageFilter(x.movie) && !x.movie.watchlist && meetsYearCutoff(x.movie));
+}
+
+function perfectRecommendationCount(scored) {
+  if (!scored || !scored.length) return 0;
+  const maxOverlap = scored[0].posOverlap || 0;
+  const maxFit = scored[0].tasteFit || 0;
+  return scored.filter(x => x.posOverlap === maxOverlap && (!maxFit || x.tasteFit / maxFit >= PERFECT_REC_MIN_RATIO)).length;
+}
+
+function needsMorePerfectRecommendations(target=PERFECT_REC_TARGET) {
+  if (!personalizedEnough()) return false;
+  return perfectRecommendationCount(recommendationCandidates()) < target;
+}
+
+function maybeAutoExpandPool() {
+  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'tags' || autoFetchPaused) return;
+  const available = discoveryPool().length;
+  const needsPerfect = needsMorePerfectRecommendations();
+  const gap = needsPerfect ? 2000 : 120000;
+  if ((available < 30 || needsPerfect) && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > gap) {
+    lastAutoExpandAt = Date.now();
+    scheduleAutoExpand(600);
+  }
+}
+
+function scheduleAutoExpand(delay=600) {
+  if (autoExpandTimer || autoFetchPaused) return;
+  autoExpandTimer = setTimeout(() => {
+    autoExpandTimer = null;
+    if (!recommendationPageActive() || autoFetchPaused || poolExpansionInProgress) return;
+    expandPool(false);
+  }, delay);
+}
+
+function renderRecs() {
+  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return;
+  const grid = document.getElementById('recsGrid');
+  const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
+  grid.innerHTML = '';
+
+  if (ratedTagged.length >= 3) {
+    const scored = recommendationCandidates();
+    const visibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10));
+    const top = scored.slice(0, visibleLimit);
+    const perfectCount = perfectRecommendationCount(scored);
+    if (perfectCount < PERFECT_REC_TARGET && !poolExpansionInProgress && !autoFetchPaused) {
+      lastAutoExpandAt = Date.now();
+      scheduleAutoExpand(100);
+    }
+    if (top.length) {
+      document.getElementById('recCount').textContent = perfectCount < PERFECT_REC_TARGET
+        ? `finding ${PERFECT_REC_TARGET} strongest overlap matches · showing ${top.length} of ${scored.length}`
+        : `showing ${top.length} of ${scored.length} matches`;
+      top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit })));
+      return;
+    }
+  }
+
+  const browseLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
+  const batch = discoveryPool().slice(0, browseLimit);
+  if (ratedTagged.length >= 3 && !poolExpansionInProgress && !autoFetchPaused) {
+    lastAutoExpandAt = Date.now();
+    scheduleAutoExpand(100);
+  }
+  document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building stronger overlap matches · showing ${batch.length} unrated`;
+  if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expanding the pool in the background.</p></div>`; return; }
+  batch.forEach(m => grid.appendChild(buildCard(m, {})));
+}
+
+function renderRatedGrid() {
+  const grid = document.getElementById('ratedGrid');
+  if (!grid) return;
+  const rated = Object.values(state.movies || {}).filter(m => Number(m.rating || 0) > 0).sort((a,b) => Number(b.rating||0)-Number(a.rating||0)||String(a.title||'').localeCompare(String(b.title||'')));
+  const untaggedCount = rated.filter(m => !m.tagged && m.source === 'wikipedia').length;
+  const btn = document.getElementById('tagUntaggedBtn');
+  if (btn) {
+    btn.style.display = untaggedCount > 0 ? 'inline-flex' : 'none';
+    if (untaggedCount > 0) btn.textContent = `Tag ${untaggedCount} Untagged`;
+  }
+  const count = document.getElementById('ratedCount');
+  if (count) count.textContent = rated.length ? `${rated.length} titles` : 'none yet';
+  grid.innerHTML = '';
+  if (!rated.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">★</div><h3>Nothing Rated Yet</h3></div>`; return; }
+  rated.forEach(m => grid.appendChild(buildCard(m, { showEdit:true })));
+}
+
+function renderWatchlist() {
+  const grid = document.getElementById('watchlistGrid');
+  const watchlist = Object.values(state.movies).filter(m => m.watchlist && matchesTab(m)).sort((a,b)=>a.title.localeCompare(b.title));
+  document.getElementById('watchlistCount').textContent = watchlist.length ? `${watchlist.length} saved` : 'nothing saved yet';
+  grid.innerHTML = '';
+  if (!watchlist.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">+</div><h3>Nothing Saved Yet</h3></div>`; return; }
+  watchlist.forEach(m => grid.appendChild(buildCard(m, { watchlistView:true })));
+}
+
+
+function updateVisibleSections() {
+  const recMode = activeTab === 'all' || activeTab === 'movie' || activeTab === 'show';
+  const ratedMode = activeTab === 'rated';
+  const watchlistMode = activeTab === 'watchlist';
+  const tagMode = activeTab === 'tags';
+
+  setSectionVisibility('.normal-only', recMode);
+  setSectionVisibility('.rated-only', ratedMode);
+  setSectionVisibility('.watchlist-only', watchlistMode);
+  setSectionVisibility('.tag-only', tagMode);
+  document.querySelectorAll('.audit-only').forEach(el => el.style.display = 'none');
+  document.querySelectorAll('.control-deck').forEach(el => el.style.display = recMode || activeTab === 'pool' ? '' : 'none');
+
+  if (activeTab === 'pool') {
+    ['poolSep','poolHeader','poolGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
+  }
+  if (activeTab === 'hidden') {
+    ['hiddenSep','hiddenHeader','hiddenGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
+  }
+  if (activeTab === 'rejected') {
+    ['rejectedSep','rejectedHeader','rejectedGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
+  }
+}
+
+function setSectionVisibility(selector, visible) {
+  document.querySelectorAll(selector).forEach(el => {
+    if (!visible) {
+      el.style.display = 'none';
+      return;
+    }
+    if (el.classList.contains('movies-grid')) el.style.display = 'grid';
+    else if (el.classList.contains('section-header') || el.classList.contains('tag-brain-controls')) el.style.display = 'flex';
+    else el.style.display = 'block';
+  });
+}
+
+function renderPoolGrid() {
+  const grid = document.getElementById('poolGrid');
+  if (!grid) return;
+  const rows = Object.values(state.movies).filter(matchesTab).filter(matchesLanguageFilter).filter(meetsYearCutoff).sort((a,b)=>(b.rating||0)-(a.rating||0)||a.title.localeCompare(b.title));
+  document.getElementById('poolCount').textContent = rows.length ? `${rows.length} titles` : 'nothing loaded';
+  grid.innerHTML = '';
+  if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>Pool Empty</h3></div>`; return; }
+  rows.forEach(m => grid.appendChild(buildCard(m, { poolView:true })));
+}
+
+function renderHiddenGrid() {
+  const grid = document.getElementById('hiddenGrid');
+  if (!grid) return;
+  const rows = Object.values(state.hiddenTitles || {}).sort((a,b)=>(b.hiddenAt||'').localeCompare(a.hiddenAt||'') || a.title.localeCompare(b.title));
+  document.getElementById('hiddenCount').textContent = rows.length ? `${rows.length} hidden` : 'nothing hidden';
+  grid.innerHTML = '';
+  if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">x</div><h3>Nothing Hidden</h3></div>`; return; }
+  rows.forEach(m => grid.appendChild(buildCard({ ...m, _expanded:true }, { hiddenView:true })));
+}
+
+function renderRejectedGrid() {
+  const grid = document.getElementById('rejectedGrid');
+  if (!grid) return;
+  const rows = rejectedEntries();
+  document.getElementById('rejectedCount').textContent = rows.length ? `${rows.length} rejected` : 'nothing rejected';
+  if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>Nothing Rejected Yet</h3></div>`; return; }
+  grid.innerHTML = rows.map(r => {
+    const title = (r.title || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const reason = (r.reason || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const key = r.key.replace(/'/g,"\\'");
+    const retries = Number(r.retryCount || 0);
+    const retryText = retries ? `auto retry ${retries}/${REJECTED_REFRESH_MAX_ATTEMPTS}` : 'awaiting refresh lane';
+    return `<div class="audit-row">
+      <div class="audit-title">${title}</div>
+      <div class="audit-muted">—</div>
+      <div>${r.mode||'all'}</div>
+      <div class="audit-muted">${r.source||'wiki'}</div>
+      <div class="audit-muted">${reason} · ${retryText}</div>
+      <div class="audit-muted">${r.at ? new Date(r.at).toLocaleString() : ''}</div>
+      <div class="audit-actions"><button class="card-act" onclick="retryRejectedTitle('${key}',event)">retry</button><button class="card-act del" onclick="forgetRejectedTitle('${key}',event)">✕</button></div>
+    </div>`;
+  }).join('');
+}
+
+async function retryRejectedTitle(key, e) {
+  if (e) e.stopPropagation();
+  const item = rejectedEntries().find(x => x.key === key);
+  if (!item) return;
+  const mode = item.mode || 'all';
+  showFetchProgress('Retrying rejected title...', 12, item.title || '');
+  try {
+    const movie = await fetchWikiMovie(item.title, mode);
+    hideFetchProgress();
+    if (!movie) {
+      recordRejectedTitle(item.title, mode, 'still not a usable Hindi/English movie or show', item.source || 'retry', { retry:true });
+      saveLocalState(); render();
+      showToast(`Still rejected: "${item.title}"`, 'error');
+      return;
+    }
+    if (state.movies[movie.id]) {
+      delete state.rejectedWikiTitles[key];
+      saveLocalState();
+      showToast(`Already in pool: "${state.movies[movie.id].title}"`, '');
+      render();
+      return;
+    }
+    if (isMovieHidden(movie)) {
+      delete state.rejectedWikiTitles[key];
+      saveLocalState();
+      showToast(`Still hidden: "${movie.title}"`, '');
+      render();
+      return;
+    }
+    delete state.rejectedWikiTitles[key];
+    state.movies[movie.id] = movie;
+    runHousekeeping(false);
+    saveLocalState(); syncDrive(); render();
+    showToast(`Added "${movie.title}" from rejected`, 'success');
+  } catch(err) {
+    hideFetchProgress();
+    recordRejectedTitle(item.title, mode, err.message || 'retry failed', item.source || 'retry', { retry:true });
+    saveLocalState(); render();
+    showToast(`Retry failed: "${item.title}"`, 'error');
+  }
+}
+
+function forgetRejectedTitle(key, e) {
+  if (e) e.stopPropagation();
+  delete state.rejectedWikiTitles[key];
+  saveLocalState(); render();
+}
+
+function renderRateGrid() { renderRecs(); }
+function renderStars(id, rating=0) {
+  const safeId = String(id).replace(/'/g,"\\'");
+  const current = Number(rating || 0);
+  return `<div class="star-rating" data-rating="${current}">${[1,2,3,4,5].map(s => `<span class="star${current >= s ? ' active' : ''}" data-star="${s}" onclick="rateMovie('${safeId}',${s})" onmouseenter="previewStars(this,${s})" onmouseleave="restoreStars(this)">★</span>`).join('')}</div>`;
+}
+function previewStars(el, n) {
+  const box = el.closest('.star-rating');
+  if (!box) return;
+  box.querySelectorAll('.star').forEach(st => st.classList.toggle('active', Number(st.dataset.star) <= n));
+}
+function restoreStars(el) {
+  const box = el.closest('.star-rating');
+  if (!box) return;
+  const rating = Number(box.dataset.rating || 0);
+  box.querySelectorAll('.star').forEach(st => st.classList.toggle('active', Number(st.dataset.star) <= rating));
+}
+function previewManualStars(n) {
+  const box = document.getElementById('manualStars');
+  if (!box) return;
+  box.querySelectorAll('.star').forEach(st => st.classList.toggle('active', Number(st.dataset.rating) <= n));
+}
+function restoreManualStars() {
+  const box = document.getElementById('manualStars');
+  if (!box) return;
+  box.querySelectorAll('.star').forEach(st => st.classList.remove('active'));
+}
+function buildCard(movie, opts={}) {
+  const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextConcept } = opts;
+  const card = document.createElement('div');
+  card.className = 'movie-card' + (movie.rating > 0 ? ' rated' : '');
+  card.id = 'card-' + movie.id;
+  const matchPct = rank ? Math.round((tasteFit || 0) * 100) : 0;
+  const safeId = movie.id.replace(/'/g,"\\'");
+  card.innerHTML = `
+    <div class="card-poster">
+      <div class="card-poster-inner" style="background:${posterGrad(movie.title)}">
+        <div class="card-poster-year">${movie.year||''}${movie.format?' · '+movie.format.toUpperCase():''}</div>
+        <div class="card-poster-title">${movie.title}</div>
+        <div class="card-poster-dir">${movie.director||''}</div>
+      </div>
+      ${rank?`<div class="rank-badge">#${rank}</div>`:''}
+      ${movie.rating>0?`<div class="score-badge">${'★'.repeat(movie.rating)}${'☆'.repeat(5-movie.rating)}</div>`:''}
+    </div>
+    <div class="card-body">
+      <div class="card-head">
+        ${movie.thumbnailUrl ? `<img class="card-thumb" src="${movie.thumbnailUrl}" alt="" loading="lazy" decoding="async">` : ''}
+        <div class="card-head-copy"><div class="card-title">${movie.title}</div>
+        <div class="card-meta">${movie.language}·${movie.country}·${movie.year||'?'}</div>
+        ${rank?`<div class="match-label">${posOverlap || 0} shared concept${posOverlap===1?'':'s'}${genreOverlap?` · ${genreOverlap} genre match${genreOverlap===1?'':'es'}`:''} · ${matchPct}% weighted fit${negativeOverlap?` · ${negativeOverlap} disliked`:''}</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
+      </div>
+      ${renderStars(safeId, movie.rating || 0)}
+      ${renderGenres(movie, matchedGenres)}
+      ${poolView?`<div class="pool-card-note">${cardStatusLabel(movie)}${movie.retagMessage ? ` · ${movie.retagMessage}` : ''}</div>`:''}
+      ${movie.retagStatus === 'failed' || movie.needsManualUrl ? renderWikiRepairRow(safeId, movie.retagMessage) : ''}
+      <div class="card-tags" id="tags-${movie.id}">${renderConceptChips(movie, safeId, movie._expanded, matchedTags, contextConcept)}</div>
+      <div class="card-actions">
+        ${movie.tagged?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ concepts'}</button>`:''}
+        <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
+        ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
+        <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
+      </div>
+      ${contextLabel ? `<div class="concept-status">${contextLabel}</div>` : ''}
+    </div>`;
+  if (hiddenView) {
+    const stars = card.querySelector('.star-rating');
+    if (stars) stars.querySelectorAll('.star').forEach(star => {
+      star.removeAttribute('onclick');
+      star.removeAttribute('onmouseenter');
+      star.removeAttribute('onmouseleave');
+    });
+    const tags = card.querySelector('.card-tags');
+    if (tags) tags.querySelectorAll('.concept-chip').forEach(tag => {
+      tag.removeAttribute('onclick');
+      tag.removeAttribute('title');
+      tag.classList.remove('removable');
+    });
+    const repair = card.querySelector('.wiki-repair-row');
+    if (repair) repair.remove();
+    const actions = card.querySelector('.card-actions');
+    if (actions) actions.innerHTML = `<button class="card-act retag" onclick="restoreHiddenMovie('${safeId}',event)">restore</button><button class="card-act del" onclick="forgetHiddenMovie('${safeId}',event)">forget</button>`;
+  }
+  return card;
+}
+
+function renderGenres(movie, matchedGenres=null) {
+  const genres = movieGenres(movie);
+  if (!genres.length) return '';
+  const matched = matchedGenres || new Set();
+  return `<div class="genre-row"><span class="genre-label">Genres</span>${genres.map(genre => `<span class="genre-chip${matched.has?.(genre) ? ' matched' : ''}">${genre}</span>`).join('')}</div>`;
+}
+
+function renderWikiRepairRow(movieId, message='') {
+  return `<div class="wiki-repair-row">
+    <input id="wiki-url-${movieId}" class="wiki-repair-input" type="text" placeholder="paste Wikipedia URL" onclick="event.stopPropagation()" onkeydown="handleWikiRepairKey(event,'${movieId}')">
+    <button class="card-act retag" onclick="repairMovieFromUrl('${movieId}',event)">repair</button>
+    ${message ? `<span>${message}</span>` : ''}
+  </div>`;
+}
+
+function handleWikiRepairKey(event, id) {
+  if (event.key === 'Enter') repairMovieFromUrl(id, event);
+}
+
+async function repairMovieFromUrl(id, event) {
+  if (event) event.stopPropagation();
+  const movie = state.movies[id];
+  if (!movie) return;
+  const input = document.getElementById(`wiki-url-${id}`);
+  const rawUrl = (input?.value || '').trim();
+  const wikiTitle = wikipediaTitleFromUrl(rawUrl);
+  if (!wikiTitle) {
+    showToast('Paste a valid Wikipedia URL on the card.', 'error');
+    return;
+  }
+
+  showFetchProgress('Repairing from Wikipedia URL...', 15, wikiTitle);
+  try {
+    const mode = movie.format ? 'shows' : 'movies';
+    let fresh = await fetchWikiMovie(wikiTitle, mode);
+    if (!fresh) fresh = await fetchWikiMovie(wikiTitle, 'all');
+    hideFetchProgress();
+    if (!fresh) {
+      movie.retagStatus = 'failed';
+      movie.retagMessage = 'URL did not pass CineLens rules';
+      saveLocalState(); render();
+      showToast(`Could not repair "${movie.title}" from that URL.`, 'error');
+      return;
+    }
+    const updated = applyFreshWikiMovie(id, fresh, movie);
+    runHousekeeping(false);
+    saveLocalState(); syncDrive(); render();
+    showToast(`Repaired "${updated.title}"`, 'success');
+  } catch(err) {
+    hideFetchProgress();
+    movie.retagStatus = 'failed';
+    movie.retagMessage = err.message || 'repair failed';
+    saveLocalState(); render();
+    showToast(`Repair failed for "${movie.title}"`, 'error');
+  }
+}
+
+function renderTagChips(tags, matchedTags, expanded) {
+  if (!tags||!tags.length) return '';
+  const matched = matchedTags||new Set();
+  const ordered = [...tags].sort((a,b)=>(matched.has&&matched.has(b)?1:0)-(matched.has&&matched.has(a)?1:0));
+  const list = expanded ? ordered : ordered.slice(0,5);
+  return list.map(t=>`<span class="tag${matched.has&&matched.has(t)?' matched':''}">${t}</span>`).join('')
+    + (tags.length>5&&!expanded?`<span class="tag" style="color:var(--muted2)">+${tags.length-5}</span>`:'');
+}
+
+function conceptChipHtml(tag, movieId, kind='', impact='') {
+    const safeTag = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    const weight = Number(state.tagWeights[tag] || 0);
+    const title = weight ? `Taste weight ${weight > 0 ? '+' : ''}${weight}. Click to ${state.settings.tagDeleteMode ? 'remove permanently from this title' : 'explore this concept'}.` : `Click to ${state.settings.tagDeleteMode ? 'remove permanently from this title' : 'explore this concept'}.`;
+    return `<span class="concept-chip ${kind}" title="${title}" onclick="handleConceptClick('${movieId}','${safeTag}',event)">${tag}${impact ? `<span class="impact">${impact}</span>` : ''}</span>`;
+}
+
+function cardConceptGroups(movie, matchedTags=null, contextConcept='') {
+  const concepts=scoringTags(movie).filter(conceptIsPresentable).filter(tag=>tag!==contextConcept);
+  const matched=matchedTags || new Set();
+  const allWhy=concepts.filter(tag=>matched.has?.(tag) && Number(state.tagWeights[tag]||0)>0)
+    .sort((a,b)=>(state.tagWeights[b]*conceptSpecificity(b))-(state.tagWeights[a]*conceptSpecificity(a)))
+  const why=allWhy.slice(0,2);
+  const whySet=new Set(why);
+  const distinctive=concepts.filter(tag=>!whySet.has(tag) && conceptSpecificity(tag)>=0.2)
+    .sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||Math.abs(state.tagWeights[b]||0)-Math.abs(state.tagWeights[a]||0)||a.localeCompare(b))
+    .slice(0,3);
+  const shown=new Set([...why,...distinctive]);
+  const more=concepts.filter(tag=>!shown.has(tag)).sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||a.localeCompare(b));
+  return {why,distinctive,more,matchedTotal:allWhy.length};
+}
+
+function renderConceptChips(movie, movieId, expanded, matchedTags=null, contextConcept='') {
+  const groups=cardConceptGroups(movie,matchedTags,contextConcept);
+  if (!groups.why.length && !groups.distinctive.length && !groups.more.length) return '';
+  const line=(label,items,kind='')=>items.length?`<div class="concept-line"><span class="concept-line-label">${label}</span><div class="concept-line-items">${items.map(tag=>{
+    const impact=kind==='why'?`+${(Number(state.tagWeights[tag]||0)*conceptSpecificity(tag)).toFixed(1)}`:'';
+    return conceptChipHtml(tag,movieId,kind,impact);
+  }).join('')}</div></div>`:'';
+  const visibleMore=expanded?groups.more.slice(0,12):[];
+  const hiddenCount=groups.more.length-visibleMore.length;
+  const sharedRemainder=Math.max(0,groups.matchedTotal-groups.why.length);
+  const sharedNote=sharedRemainder?`<span class="concept-chip" title="The recommendation score uses all ${groups.matchedTotal} shared positive concepts">+${sharedRemainder} shared</span>`:'';
+  return `<div class="concept-explanation">${line('Why',groups.why,'why').replace('</div></div>',`${sharedNote}</div></div>`)}${line('Distinct',groups.distinctive)}${line('More',visibleMore)}${!expanded&&groups.more.length?`<div class="concept-line"><span class="concept-line-label"></span><span class="concept-chip">+${groups.more.length} more</span></div>`:''}${expanded&&hiddenCount>0?`<div class="concept-line"><span class="concept-line-label"></span><span class="concept-chip">+${hiddenCount} more</span></div>`:''}</div>`;
+}
+
+function handleConceptClick(id, tag, event) {
+  if (event) event.stopPropagation();
+  if (state.settings.tagDeleteMode) removeTagFromMovie(id, tag, event);
+  else openConceptFromCard(tag);
+}
+
+function removeTagFromMovie(id, tag, event) {
+  if (event) event.stopPropagation();
+  const movie = state.movies[id] || state.hiddenTitles?.[id];
+  if (!movie) return;
+  movie.suppressedConcepts = [...new Set([...(movie.suppressedConcepts || []), normaliseTagName(tag)])];
+  movie.canonicalTags = (movie.canonicalTags || []).filter(t => normaliseTagName(t) !== normaliseTagName(tag));
+  movie.tagged = scoringTags(movie).length > 0;
+  computeTagWeights();
+  saveLocalState();
+  syncDrive();
+  render();
+  showToast(`Removed concept from "${movie.title}": ${tag}`, 'success');
+}
+
+function posterGrad(title) {
+  const h=[...title].reduce((a,c)=>a+c.charCodeAt(0),0);
+  return `linear-gradient(135deg,hsl(${h%360},15%,10%) 0%,hsl(${(h*7)%360},20%,16%) 100%)`;
+}
+
+// ─────────────────────────────────────────────
+// SCORING
+// ─────────────────────────────────────────────
+function tasteEvidenceMovies() {
+  return [
+    ...Object.values(state.movies || {}),
+    ...Object.values(state.hiddenTitles || {}).filter(m => Number(m.rating || 0) > 0)
+  ];
+}
+
+function computeTagWeights() {
+  const w={}, genres={};
+  tasteEvidenceMovies().forEach(m => {
+    const tags = scoringTags(m);
+    if (m.rating>0) {
+      const wt = m.rating-3;
+      tags.forEach(t => { w[t]=(w[t]||0)+wt; });
+      movieGenres(m).forEach(genre => { genres[genre]=(genres[genre]||0)+wt; });
+    }
+  });
+  state.tagWeights=w;
+  state.genreWeights=genres;
+}
+
+function scoreMovies() {
+  computeTagWeights();
+  const totalPositiveWeight=Object.entries(state.tagWeights).reduce((sum,[tag,weight])=>weight>0?sum+weight*conceptSpecificity(tag):sum,0);
+  const totalPositiveGenreWeight=Object.values(state.genreWeights).reduce((sum,weight)=>weight>0?sum+weight*GENRE_SCORE_FACTOR:sum,0);
+  return Object.values(state.movies)
+    .filter(m => m.rating===0&&scoringTags(m).length>0)
+    .map(m => {
+      let score=0, posOverlap=0, genreOverlap=0, negativeOverlap=0, positiveScore=0, negativePenalty=0;
+      const matched=new Set();
+      const matchedGenres=new Set();
+      const tags = scoringTags(m);
+      tags.forEach(t => {
+        const w=state.tagWeights[t] || 0;
+        const specificity=conceptSpecificity(t);
+        if (w>0) { positiveScore+=w*specificity; matched.add(t); posOverlap++; }
+        else if (w<0) { negativePenalty+=Math.abs(w)*specificity*0.5; negativeOverlap++; }
+      });
+      movieGenres(m).forEach(genre => {
+        const weight=state.genreWeights[genre] || 0;
+        if (weight>0) { positiveScore+=weight*GENRE_SCORE_FACTOR; matchedGenres.add(genre); genreOverlap++; }
+        else if (weight<0) { negativePenalty+=Math.abs(weight)*GENRE_SCORE_FACTOR*0.5; }
+      });
+      score = positiveScore - negativePenalty;
+      const totalTasteWeight=totalPositiveWeight+totalPositiveGenreWeight;
+      const tasteFit=totalTasteWeight?Math.max(0,Math.min(1,positiveScore/totalTasteWeight)):0;
+      return { movie:m, score, matchedTags:matched, matchedGenres, posOverlap, genreOverlap, negativeOverlap, positiveScore, negativePenalty, tasteFit };
+    })
+    .filter(x => x.posOverlap>0&&x.positiveScore>0&&x.score>0)
+    .sort((a,b) => b.posOverlap-a.posOverlap||a.negativeOverlap-b.negativeOverlap||b.score-a.score||b.genreOverlap-a.genreOverlap||b.positiveScore-a.positiveScore||a.movie.title.localeCompare(b.movie.title));
+}
+
+// ─────────────────────────────────────────────
+// RATING
+// ─────────────────────────────────────────────
+function rateMovie(id, rating) {
+  const movie = state.movies[id];
+  if (!movie) return;
+  movie.rating = rating;
+  movie.watchlist = false;
+  if (!movie.tagged) {
+    tagMovie(movie);
+    rebuildCanonicalTagBrain();
+  }
+  computeTagWeights();
+  saveLocalState(); syncDrive(); render();
+  showToast(`"${movie.title}" → ${rating}/5`, 'success');
+}
+
+// ─────────────────────────────────────────────
+// CARD ACTIONS
+// ─────────────────────────────────────────────
+function deleteMovie(id, e) {
+  if (e) e.stopPropagation();
+  const m = state.movies[id];
+  if (!m||!confirm(`Hide "${m.title}"? It will not be fetched again.`)) return;
+  state.hiddenTitles[id] = { ...m, hiddenAt: new Date().toISOString() };
+  delete state.movies[id];
+  computeTagWeights();
+  saveLocalState(); syncDrive(); render();
+  showToast(`Hidden "${m.title}"`, '');
+}
+function restoreHiddenMovie(id, e) {
+  if (e) e.stopPropagation();
+  const movie = state.hiddenTitles?.[id];
+  if (!movie) return;
+  const { hiddenAt, ...restored } = movie;
+  state.movies[id] = restored;
+  delete state.hiddenTitles[id];
+  computeTagWeights();
+  saveLocalState(); syncDrive(); render();
+  showToast(`Restored "${movie.title}"`, 'success');
+}
+function forgetHiddenMovie(id, e) {
+  if (e) e.stopPropagation();
+  const movie = state.hiddenTitles?.[id];
+  if (!movie || !confirm(`Forget "${movie.title}" permanently? It may be fetched again later.`)) return;
+  delete state.hiddenTitles[id];
+  rebuildCanonicalTagBrain();
+  computeTagWeights();
+  saveLocalState(); syncDrive(); render();
+  showToast(`Forgot "${movie.title}"`, '');
+}
+function toggleWatchlist(id, e) {
+  if (e) e.stopPropagation();
+  const m = state.movies[id];
+  if (!m) return;
+  m.watchlist = !m.watchlist;
+  m.skipped = false;
+  saveLocalState(); syncDrive(); render();
+  showToast(m.watchlist?`Added "${m.title}" to watchlist`:`Removed "${m.title}" from watchlist`, m.watchlist?'success':'');
+}
+function skipMovie(id, e) { toggleWatchlist(id, e); }
+
+function applyFreshWikiMovie(oldId, fresh, previous={}) {
+  const preserved = {
+    rating: Number(previous.rating || 0),
+    watchlist: !!previous.watchlist,
+    skipped: !!previous.skipped,
+    userNotes: previous.userNotes || '',
+    suppressedConcepts: previous.suppressedConcepts || [],
+    thumbnailUrl: fresh.thumbnailUrl || previous.thumbnailUrl || '',
+    // Explicitly preserve wiki metadata if fresh doesn't have it
+    wikiPageId: fresh.wikiPageId || previous.wikiPageId,
+    wikiTitle: fresh.wikiTitle || previous.wikiTitle,
+    pageTitle: fresh.pageTitle || previous.pageTitle,
+    wikiUrl: fresh.wikiUrl || previous.wikiUrl
+  };
+  const next = {
+    ...fresh,
+    ...preserved,
+    descriptorTags: fresh.descriptorTags || fresh.coreTags || [],
+    rawDescriptors: fresh.rawDescriptors || [],
+    retagStatus: 'verified',
+    retagMessage: ''
+  };
+  if (oldId && oldId !== next.id) delete state.movies[oldId];
+  state.movies[next.id] = next;
+  return next;
+}
+
+async function findFreshWikiForMovie(movie) {
+  const mode = movie.format ? 'shows' : 'movies';
+  
+  // Ensure wikiPageId is reconstructed if missing
+  if (!movie.wikiPageId && String(movie.id || '').startsWith('wiki_')) {
+    movie.wikiPageId = String(movie.id).replace(/^wiki_/, '');
+  }
+  
+  const pageId = wikiPageIdFromMovie(movie);
+  
+  // Try pageId-based fetch first (fastest if successful)
+  if (pageId) {
+    try {
+      const fresh = await fetchWikiMovieByPageId(pageId, mode);
+      if (fresh) return fresh;
+    } catch(e) {}
+    // Add a small delay before trying title candidates to avoid rate limiting
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+
+  // Build comprehensive candidate list, with best guesses first
+  const candidates = [
+    movie.wikiTitle,
+    movie.pageTitle,
+    movie.title,
+    movie.format ? `${movie.title} (TV series)` : `${movie.title} (film)`,
+    movie.year ? `${movie.title} (${movie.year} film)` : '',
+    movie.year ? `${movie.title} (${movie.year} TV series)` : '',
+    movie.format ? `${movie.title} television series` : `${movie.title} film`,
+    // Additional candidates for robustness
+    movie.director && movie.year ? `${movie.title} (${movie.year}) ${movie.director}` : '',
+    movie.language === 'Hindi' && movie.country === 'India' ? `${movie.title} (Hindi film)` : '',
+    movie.language === 'Hindi' && movie.country === 'India' && movie.format ? `${movie.title} (Hindi TV series)` : '',
+  ].filter(Boolean);
+
+  // Try each title candidate with a small delay between attempts
+  for (const title of [...new Set(candidates)]) {
+    try {
+      const fresh = await fetchWikiMovie(title, mode);
+      if (fresh && (sameCanonicalTitle(fresh.title, movie.title) || sameCanonicalTitle(fresh.pageTitle, movie.pageTitle || movie.title))) {
+        return fresh;
+      }
+    } catch(e) {}
+    // Stagger requests to avoid rate limiting
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+
+  // Final fallback: try Wikipedia search
+  try {
+    const searchTitles = await fetchWikiSearchTitles(`${movie.title} ${movie.year || ''} ${movie.format ? 'television series' : 'film'}`);
+    for (const title of searchTitles) {
+      try {
+        const fresh = await fetchWikiMovie(title, mode);
+        if (fresh && sameCanonicalTitle(fresh.title, movie.title)) return fresh;
+      } catch(e) {}
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  } catch(e) {}
+  
+  return null;
+}
+
+async function retagMovie(id, e) {
+  if (e) e.stopPropagation();
+  const m = state.movies[id];
+  if (!m) return;
+
+  if (poolExpansionInProgress || autoExpandTimer) {
+    stopFetching({silent:true});
+    await waitForPoolIdle();
+    if (poolExpansionInProgress) {
+      showToast('Stopping fetch. Try re-tag again in a moment.', 'error');
+      return;
+    }
+  }
+
+  showFetchProgress('Re-tagging from Wikipedia plot...', 20, m.wikiTitle || m.pageTitle || m.title);
+  try {
+    const fresh = await findFreshWikiForMovie(m);
+    hideFetchProgress();
+    if (!fresh) {
+      m.retagStatus = 'failed';
+      m.retagMessage = 'needs correct Wikipedia URL';
+      saveLocalState(); render();
+      showToast(`Could not re-tag "${m.title}" automatically. Add its Wikipedia URL on the card.`, 'error');
+      return;
+    }
+    const updated = applyFreshWikiMovie(id, fresh, m);
+    runHousekeeping(false);
+    saveLocalState(); syncDrive(); render();
+    showToast(`Re-tagged "${updated.title}"`, 'success');
+  } catch(err) {
+    hideFetchProgress();
+    m.retagStatus = 'failed';
+    m.retagMessage = 'retag failed';
+    saveLocalState(); render();
+    showToast(`Could not re-tag "${m.title}"`, 'error');
+  }
+}
+function toggleTags(id, e) {
+  if (e) e.stopPropagation();
+  const m = state.movies[id];
+  if (!m) return;
+  const tags = scoringTags(m);
+  if (!tags||!tags.length) return;
+  m._expanded = !m._expanded;
+  const el = document.getElementById('tags-'+id);
+  if (el) el.innerHTML = renderConceptChips(m, id, m._expanded);
+  const card = document.getElementById('card-'+id);
+  if (card) { const b=card.querySelector('.card-act'); if(b&&(b.textContent.includes('concepts')||b.textContent.includes('less'))) b.textContent=m._expanded?'▲ less':'▼ concepts'; }
+}
+
+// ─────────────────────────────────────────────
+// HOUSEKEEPING (local dedup)
+// ─────────────────────────────────────────────
+function runHousekeeping(manual=true, deferCanonical=false) {
+  const descriptorStats = descriptorCorpusStats();
+  Object.values(state.movies).forEach(m => {
+    m.genres = movieGenres(m);
+    const existing = cleanTagArray(m.tags || [], null, false);
+    if (m.source === 'wikipedia' && m.storyText) {
+      const built = buildStoryTagSet(m.storyText, m, descriptorStats);
+      m.rawDescriptors = built.rawDescriptors;
+      m.descriptorTags = built.descriptorTags;
+      m.tags = built.tags;
+      m.coreTags = built.coreTags;
+      m.plotTags = built.plotTags;
+    } else {
+      m.tags = cleanTagArray(existing, m, false);
+      m.coreTags = cleanTagArray(recommendationTags(m.tags), m, false);
+      m.plotTags = [];
+      m.descriptorTags = [];
+    }
+    m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length || (m.descriptorTags && m.descriptorTags.length));
+  });
+  if (!deferCanonical) {
+    rebuildCanonicalTagBrain();
+    computeTagWeights();
+  }
+  if (manual) {
+    saveLocalState();
+    syncDrive();
+    showToast('Tags cleaned', 'success');
+  }
+  updateHKStatus(canonicalStatusText());
+}
+
+function countUniqueTags() { const s=new Set(); Object.values(state.movies).forEach(m=>scoringTags(m).forEach(t=>s.add(t))); return s.size; }
+function countRawTags() { const s=new Set(); Object.values(state.movies).forEach(m=>rawScoringTags(m).forEach(t=>s.add(t))); return s.size; }
+function canonicalStatusText() { return `concepts: ${countUniqueTags()} · raw: ${countRawTags()}`; }
+function updateHKStatus(msg) { document.getElementById('hkStatus').textContent=msg; }
+
+// ─────────────────────────────────────────────
+// TAG BRAIN
+// ─────────────────────────────────────────────
+function setTagFilter(filter, btn) {
+  tagFilter=filter;
+  document.querySelectorAll('.taste-filter-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTagBrain();
+}
+function renderTagBrain() {
+  computeTagWeights();
+  const grid=document.getElementById('tagBrainGrid');
+  const countEl=document.getElementById('tagBrainCount');
+  const search=(document.getElementById('conceptSearch')?.value || '').trim().toLowerCase();
+  const modeBtn=document.getElementById('tagDeleteModeBtn');
+  if (modeBtn) {
+    modeBtn.classList.toggle('active', !!state.settings.tagDeleteMode);
+    modeBtn.textContent=state.settings.tagDeleteMode ? 'Concept clicks: remove' : 'Concept clicks: explore';
+  }
+  const map={};
+  [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(m => {
+    if (!m.tagged) return;
+    scoringTags(m).filter(conceptIsPresentable).forEach(tag => {
+      if (!map[tag]) map[tag]={weight:state.tagWeights[tag]||0,movieCount:0,movies:[]};
+      map[tag].movieCount++; map[tag].movies.push(m);
+    });
+  });
+  let entries=Object.entries(map);
+  if (!entries.length) { grid.innerHTML='<span style="font-size:12px;color:var(--muted)">No useful concepts yet.</span>'; countEl.textContent='rate movies to populate'; return; }
+  if (tagFilter==='positive') entries=entries.filter(([,v])=>v.weight>0);
+  else if (tagFilter==='negative') entries=entries.filter(([,v])=>v.weight<0);
+  else if (tagFilter==='neutral') entries=entries.filter(([,v])=>v.weight===0);
+  if (search) entries=entries.filter(([tag])=>tag.includes(search));
+  entries.sort((a,b)=>Math.abs(b[1].weight)-Math.abs(a[1].weight)||a[0].localeCompare(b[0]));
+  countEl.textContent=`${entries.length} concepts${tagFilter!=='all'||search?' · filtered':''}`;
+  grid.innerHTML=entries.map(([tag,data])=>{
+    const cls=data.weight>0?'positive':data.weight<0?'negative':'neutral';
+    const ws=data.weight>0?'+'+data.weight:data.weight===0?'~':data.weight;
+    const safe=tag.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return `<span class="tb-tag ${cls}" onclick="openTagPanel('${safe}')">${tag}<span class="tb-weight">${ws}</span><span class="tb-count">${data.movieCount}</span></span>`;
+  }).join('');
+  renderConceptDetail();
+}
+function openTagPanel(tag) {
+  selectedConcept=tag;
+  conceptVisibleLimit=40;
+  renderConceptDetail();
+  document.getElementById('conceptDetail')?.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function openConceptFromCard(tag) {
+  selectedConcept=tag;
+  conceptView='all';
+  conceptVisibleLimit=40;
+  activeTab='tags';
+  document.querySelectorAll('.tab-btn').forEach(button=>button.classList.toggle('active', button.textContent.trim()==='Tags'));
+  if (!recommendationPageActive()) stopFetching({silent:true});
+  render();
+  document.getElementById('conceptDetail')?.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function toggleTagDeleteMode() {
+  state.settings.tagDeleteMode=!state.settings.tagDeleteMode;
+  saveLocalState();
+  renderTagBrain();
+}
+
+function setConceptView(view, btn) {
+  conceptView=view;
+  conceptVisibleLimit=40;
+  document.querySelectorAll('.concept-view-btn').forEach(button=>button.classList.remove('active'));
+  btn?.classList.add('active');
+  renderConceptDetail();
+}
+
+function clearSelectedConcept() {
+  selectedConcept='';
+  renderConceptDetail();
+}
+
+function showMoreConceptTitles() {
+  conceptVisibleLimit+=40;
+  renderConceptDetail();
+}
+
+function renderConceptDetail() {
+  const detail=document.getElementById('conceptDetail');
+  const grid=document.getElementById('conceptMoviesGrid');
+  if (!detail || !grid) return;
+  if (!selectedConcept) { detail.hidden=true; grid.innerHTML=''; return; }
+  detail.hidden=false;
+  computeTagWeights();
+  document.getElementById('conceptDetailName').textContent=selectedConcept;
+  const activeMovies=Object.values(state.movies || {}).filter(m=>m.tagged&&scoringTags(m).includes(selectedConcept));
+  const hiddenMovies=Object.values(state.hiddenTitles || {}).filter(m=>m.tagged&&scoringTags(m).includes(selectedConcept));
+  const all=[...activeMovies.map(movie=>({movie,status:movie.rating>0?'rated':'pool'})),...hiddenMovies.map(movie=>({movie,status:'hidden'}))];
+  const weight=state.tagWeights[selectedConcept]||0;
+  const ws=weight>0?`+${weight} (you like this)`:weight<0?`${weight} (you dislike this)`:'~ unweighted';
+  const counts={rated:all.filter(x=>x.status==='rated').length,pool:all.filter(x=>x.status==='pool').length,hidden:all.filter(x=>x.status==='hidden').length};
+  document.getElementById('conceptDetailStat').textContent=`weight ${ws} · ${all.length} titles · ${counts.rated} rated · ${counts.pool} pool · ${counts.hidden} hidden`;
+  let rows=conceptView==='all'?all:all.filter(item=>item.status===conceptView);
+  rows.sort((a,b)=>(a.status==='rated'?0:a.status==='pool'?1:2)-(b.status==='rated'?0:b.status==='pool'?1:2)||Number(b.movie.rating||0)-Number(a.movie.rating||0)||a.movie.title.localeCompare(b.movie.title));
+  grid.innerHTML='';
+  if (!rows.length) { grid.innerHTML='<div class="empty-state"><h3>No Titles In This Group</h3></div>'; return; }
+  rows.slice(0,conceptVisibleLimit).forEach(({movie,status})=>grid.appendChild(buildCard(movie,{hiddenView:status==='hidden',showEdit:status==='rated',poolView:status==='pool',contextLabel:status==='rated'?'Rated':status==='hidden'?'Hidden':'In Pool',contextConcept:selectedConcept})));
+  if (rows.length>conceptVisibleLimit) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreConceptTitles()">Show 40 more · ${rows.length-conceptVisibleLimit} remaining</button></div>`);
+}
+// ─────────────────────────────────────────────
+// STATS
+// ─────────────────────────────────────────────
+function updateStats() {
+  const movies=Object.values(state.movies);
+  const rated=movies.filter(m=>m.rating>0);
+  const tagged=movies.filter(m=>m.tagged);
+  const avg=rated.length?(rated.reduce((s,m)=>s+m.rating,0)/rated.length).toFixed(1):'—';
+  document.getElementById('statRated').textContent=rated.length;
+  document.getElementById('statTagged').textContent=tagged.length;
+  document.getElementById('statTags').textContent=countUniqueTags();
+  document.getElementById('statPool').textContent=movies.length;
+  document.getElementById('statAvg').textContent=avg;
+  updateHKStatus(canonicalStatusText());
+}
+function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveLocalState(); renderRecs(); }
+function updateMinYear(val) {
+  const year = Math.max(1900, Math.min(new Date().getFullYear(), parseInt(val, 10) || 1970));
+  state.settings.minYear = year;
+  const input = document.getElementById('minYear');
+  if (input) input.value = year;
+  saveLocalState();
+  renderActiveCards();
+}
+
+async function resetAllData() {
+  if (!confirm('Reset CineLens? This clears ratings, watchlist, pool, hidden titles, rejected titles and tag brain.')) return;
+  stopFetching({silent:true});
+  state.movies = {};
+      state.tagWeights = {};
+      state.genreWeights = {};
+  state.hiddenTitles = {};
+  state.canonicalTagStats = { raw:0, canonical:0, rebuiltAt:'' };
+  state.rejectedWikiTitles = {};
+  state.rejectedRefresh = { additionsSinceRefresh:0, lastRunAt:0, totalRuns:0 };
+  state.poolFetched = false;
+  autoFetchPaused = true;
+  recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
+  saveLocalState();
+  render();
+  if (state.drive.connected || state.drive.accessToken) await syncDrive(false);
+  showToast('CineLens reset. Pool, hidden titles and ratings cleared.', 'success');
+}
+
+// ─────────────────────────────────────────────
+// PERSISTENCE
+// ─────────────────────────────────────────────
+function saveLocalState() {
+  try {
+    localStorage.setItem('cinelens_v2',JSON.stringify({
+      movies:state.movies,
+      settings:state.settings,
+      hiddenTitles:state.hiddenTitles,
+      canonicalTagStats:state.canonicalTagStats,
+      rejectedWikiTitles:state.rejectedWikiTitles,
+      rejectedRefresh:state.rejectedRefresh,
+      drive:{
+        enabled:state.drive.enabled,
+        folderId:state.drive.folderId,
+        fileId:state.drive.fileId,
+        lastConnectedAt:state.drive.lastConnectedAt
+      }
+    }));
+  } catch(e) {}
+  updateStats();
+}
+function loadLocalState() {
+  try {
+    const raw=localStorage.getItem('cinelens_v2');
+    if (raw) {
+      const s=JSON.parse(raw);
+      if (s.movies) state.movies=s.movies;
+      if (s.settings) state.settings={...state.settings,...s.settings};
+      if (s.hiddenTitles) state.hiddenTitles=s.hiddenTitles;
+      if (s.canonicalTagStats) state.canonicalTagStats=s.canonicalTagStats;
+      if (s.rejectedWikiTitles) state.rejectedWikiTitles=s.rejectedWikiTitles;
+      if (s.rejectedRefresh) state.rejectedRefresh={...state.rejectedRefresh,...s.rejectedRefresh};
+      ensureRejectedRefreshState(!s.rejectedRefresh);
+      if (s.drive) {
+        state.drive.connected=false;
+        state.drive.enabled=!!s.drive.enabled || !!s.drive.fileId;
+        state.drive.folderId=s.drive.folderId||'';
+        state.drive.fileId=s.drive.fileId||'';
+        state.drive.lastConnectedAt=s.drive.lastConnectedAt||0;
+      }
+      state.drive.accessToken=getStoredDriveToken()||'';
+      document.getElementById('minYear').value=state.settings.minYear;
+      document.getElementById('languageFilter').value=state.settings.languageFilter||'all';
+      
+      // Ensure wikiPageId is reconstructed for all Wikipedia movies
+      Object.values(state.movies || {}).forEach(m => {
+        if (m.source === 'wikipedia' && !m.wikiPageId && String(m.id || '').startsWith('wiki_')) {
+          m.wikiPageId = String(m.id).replace(/^wiki_/, '');
+        }
+      });
+    }
+  } catch(e) {}
+  Object.values(state.movies).forEach(m => {
+    m.tags = cleanTagArray(m.tags || [], m, false);
+    m.coreTags = cleanTagArray(m.coreTags && m.coreTags.length ? m.coreTags : recommendationTags(m.tags), m, false);
+    m.plotTags = cleanTagArray(m.plotTags || [], m, false);
+    m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length);
+  });
+}
+
+// ─────────────────────────────────────────────
+// GOOGLE DRIVE
+// ─────────────────────────────────────────────
+const DRIVE_FILE='cinelens_data.json';
+const GOOGLE_CLIENT_ID='984899607223-h5oadg1cfb7o7ksfb4400vhidknk9soc.apps.googleusercontent.com';
+const DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
+let driveTokenClient=null;
+let driveRestoreInProgress=false;
+let gisScriptLoading=false;
+const DRIVE_TOKEN_KEY='cinelens_drive_token_v1';
+const DRIVE_TOKEN_EXPIRY_KEY='cinelens_drive_token_expiry_v1';
+
+
+function rememberDriveToken(token, expiresInSeconds=3300) {
+  if (!token) return;
+  const expiry=Date.now()+Math.max(60, Number(expiresInSeconds)||3300)*1000;
+  try {
+    sessionStorage.setItem('cinelens_drive_token', token);
+    sessionStorage.setItem('cinelens_drive_token_expiry', String(expiry));
+    localStorage.setItem(DRIVE_TOKEN_KEY, token);
+    localStorage.setItem(DRIVE_TOKEN_EXPIRY_KEY, String(expiry));
+  } catch(e) {}
+}
+function getStoredDriveToken() {
+  try {
+    const sessionToken=sessionStorage.getItem('cinelens_drive_token')||'';
+    const sessionExpiry=parseInt(sessionStorage.getItem('cinelens_drive_token_expiry')||'0',10);
+    if (sessionToken && sessionExpiry>Date.now()+30000) return sessionToken;
+    const localToken=localStorage.getItem(DRIVE_TOKEN_KEY)||'';
+    const localExpiry=parseInt(localStorage.getItem(DRIVE_TOKEN_EXPIRY_KEY)||'0',10);
+    if (localToken && localExpiry>Date.now()+30000) {
+      sessionStorage.setItem('cinelens_drive_token', localToken);
+      sessionStorage.setItem('cinelens_drive_token_expiry', String(localExpiry));
+      return localToken;
+    }
+  } catch(e) {}
+  return '';
+}
+function clearStoredDriveToken() {
+  try {
+    sessionStorage.removeItem('cinelens_drive_token');
+    sessionStorage.removeItem('cinelens_drive_token_expiry');
+    localStorage.removeItem(DRIVE_TOKEN_KEY);
+    localStorage.removeItem(DRIVE_TOKEN_EXPIRY_KEY);
+  } catch(e) {}
+}
+
+function openDriveModal() { connectDrive(); }
+function skipDrive() { showToast('Using local storage',''); }
+
+function googleIdentityReady() {
+  return !!window.google?.accounts?.oauth2;
+}
+
+function loadGoogleIdentityScript() {
+  if (googleIdentityReady()) return Promise.resolve();
+  if (gisScriptLoading) return new Promise((resolve,reject) => {
+    let tries=0;
+    const timer=setInterval(() => {
+      tries++;
+      if (googleIdentityReady()) { clearInterval(timer); resolve(); }
+      if (tries > 60) { clearInterval(timer); reject(new Error('Google Identity Services unavailable')); }
+    },100);
+  });
+  gisScriptLoading=true;
+  return new Promise((resolve,reject) => {
+    const existing=[...document.scripts].find(sc => (sc.src||'').includes('accounts.google.com/gsi/client'));
+    if (existing) {
+      existing.addEventListener('load', () => resolve(), {once:true});
+      existing.addEventListener('error', () => reject(new Error('Google Identity Services blocked')), {once:true});
+      setTimeout(() => googleIdentityReady() ? resolve() : reject(new Error('Google Identity Services unavailable')), 6000);
+      return;
+    }
+    const sc=document.createElement('script');
+    sc.src='https://accounts.google.com/gsi/client';
+    sc.async=true;
+    sc.defer=true;
+    sc.onload=() => resolve();
+    sc.onerror=() => reject(new Error('Google Identity Services blocked'));
+    document.head.appendChild(sc);
+  }).finally(() => { gisScriptLoading=false; });
+}
+
+function initDriveTokenClient() {
+  if (driveTokenClient) return driveTokenClient;
+  if (!googleIdentityReady()) throw new Error('Google sign-in script not loaded yet');
+  driveTokenClient=google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: DRIVE_SCOPE,
+    callback: () => {},
+    error_callback: err => console.error('Drive token error', err)
+  });
+  return driveTokenClient;
+}
+
+window.addEventListener('load', () => {
+  loadGoogleIdentityScript().then(() => {
+    try { initDriveTokenClient(); } catch(e) {}
+  }).catch(e => console.warn(e));
+});
+
+async function connectDrive() {
+  if (!GOOGLE_CLIENT_ID) { showToast('Missing Google client ID','error'); return; }
+  setDriveStatus('syncing');
+  try {
+    if (!googleIdentityReady()) await waitForGoogleIdentity();
+    await requestDriveTokenInteractive();
+    state.drive.enabled=true;
+    const fileId=state.drive.fileId||await findDriveFile();
+    if (fileId) { state.drive.fileId=fileId; await loadFromDrive(); }
+    else await createDriveFile();
+    state.drive.connected=true;
+    state.drive.lastConnectedAt=Date.now();
+    saveLocalState();
+    setDriveStatus('connected');
+    render();
+    showToast('Drive connected','success');
+  } catch(e) {
+    console.error('Drive sign-in failed', e);
+    state.drive.connected=false;
+    setDriveStatus('');
+    showToast(driveErrorMessage(e),'error');
+  }
+}
+
+async function restoreDriveSession(showFailure=false) {
+  if (driveRestoreInProgress) return;
+  if (!state.drive.enabled || (!state.drive.fileId && !state.drive.accessToken)) return;
+  driveRestoreInProgress=true;
+  setDriveStatus('syncing');
+  try {
+    await requestDriveTokenSilent();
+    if (!state.drive.fileId) state.drive.fileId=await findDriveFile();
+    if (state.drive.fileId) await loadFromDrive();
+    state.drive.connected=true;
+    state.drive.lastConnectedAt=Date.now();
+    saveLocalState();
+    setDriveStatus('connected');
+  } catch(e) {
+    state.drive.connected=false;
+    state.drive.accessToken='';
+    clearStoredDriveToken();
+    setDriveStatus('');
+    if (showFailure) showToast(driveErrorMessage(e),'error');
+  } finally {
+    driveRestoreInProgress=false;
+  }
+}
+
+function setDriveStatus(s) { document.getElementById('driveDot').className='drive-dot '+s; document.getElementById('driveLabel').textContent=s==='connected'?'drive connected':s==='syncing'?'syncing...':'not connected'; }
+function driveErrorMessage(e) {
+  const code = e?.error || e?.message || 'unknown';
+  if (String(code).includes('Google sign-in script not loaded')) return 'Google sign-in loading. Tap Drive again.';
+  if (String(code).includes('unavailable')) return 'Google sign-in script unavailable';
+  if (String(code).includes('blocked')) return 'Google sign-in blocked by browser settings';
+  if (String(code).includes('popup')) return 'Allow popups for Drive sign-in';
+  if (code === 'access_denied') return 'Drive access was denied';
+  if (code === 'idpiframe_initialization_failed') return 'Google sign-in blocked by browser settings';
+  if (code === 'interaction_required') return 'Tap Drive to reconnect';
+  if (code === 'popup_failed_to_open') return 'Allow popups for Drive sign-in';
+  if (code === 'redirect_uri_mismatch' || code === 'origin_mismatch') return 'Google OAuth origin is not allowed for this site';
+  return `Drive sign-in failed: ${code}`;
+}
+async function waitForGoogleIdentity() {
+  if (googleIdentityReady()) return;
+  await loadGoogleIdentityScript();
+  for (let i=0; i<20; i++) {
+    if (googleIdentityReady()) return;
+    await sleep(100);
+  }
+  throw new Error('Google Identity Services unavailable');
+}
+function tokenRequest(prompt) {
+  initDriveTokenClient();
+  return new Promise((resolve,reject) => {
+    driveTokenClient.callback = resp => {
+      if (resp.error) { reject(resp); return; }
+      state.drive.accessToken=resp.access_token;
+      rememberDriveToken(resp.access_token, resp.expires_in || 3300);
+      resolve(resp.access_token);
+    };
+    try { driveTokenClient.requestAccessToken({prompt}); }
+    catch(e) { reject(e); }
+  });
+}
+async function requestDriveTokenInteractive() {
+  const stored=getStoredDriveToken();
+  if (stored) { state.drive.accessToken=stored; return stored; }
+  await waitForGoogleIdentity();
+  return tokenRequest('consent');
+}
+async function requestDriveTokenSilent() {
+  if (state.drive.accessToken) return state.drive.accessToken;
+  const stored=getStoredDriveToken();
+  if (stored) { state.drive.accessToken=stored; return stored; }
+  await waitForGoogleIdentity();
+  return tokenRequest('');
+}
+async function requestDriveToken(prompt='consent') {
+  return prompt === '' ? requestDriveTokenSilent() : requestDriveTokenInteractive();
+}
+function clearDriveToken() {
+  state.drive.accessToken='';
+  clearStoredDriveToken();
+}
+function driveHeaders(extra={}) { return {...extra, Authorization:`Bearer ${state.drive.accessToken}`}; }
+async function driveFetch(url, opts={}) {
+  if (!state.drive.accessToken) await requestDriveTokenSilent();
+  let resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
+  if (resp.status===401) {
+    clearDriveToken();
+    await requestDriveTokenSilent();
+    resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
+  }
+  return resp;
+}
+async function findDriveFile() {
+  try {
+    const q=`name='${DRIVE_FILE}' and trashed=false`;
+    const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&fields=files(id,name,modifiedTime)`);
+    const d=await resp.json();
+    return d.files?.[0]?.id||null;
+  } catch(e){return null;}
+}
+async function loadFromDrive() {
+  if(!state.drive.fileId)return;
+  try {
+    setDriveStatus('syncing');
+    const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media`);
+    if (!resp.ok) throw new Error('Drive load failed');
+    const d=await resp.json();
+    let cleaned = 0;
+    if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};if(d.hiddenTitles)state.hiddenTitles=d.hiddenTitles;if(d.canonicalTagStats)state.canonicalTagStats=d.canonicalTagStats;if(d.rejectedWikiTitles)state.rejectedWikiTitles=d.rejectedWikiTitles;if(d.rejectedRefresh)state.rejectedRefresh={...state.rejectedRefresh,...d.rejectedRefresh};ensureRejectedRefreshState(!d.rejectedRefresh);migrateLegacyPoolItems();cleaned=cleanContaminatedTags(true);saveLocalState();render();showToast('Loaded from Drive','success');}
+    state.drive.connected=true;
+    setDriveStatus('connected');
+    if (cleaned) await syncDrive(false);
+  } catch(e){
+    state.drive.connected=false;
+    setDriveStatus('');
+    throw e;
+  }
+}
+async function createDriveFile() {
+  if(!state.drive.accessToken)return;
+  try {
+    const meta={name:DRIVE_FILE,mimeType:'application/json'};
+    const form=new FormData();
+    form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));
+    form.append('file',new Blob([JSON.stringify({movies:state.movies,settings:state.settings,hiddenTitles:state.hiddenTitles,canonicalTagStats:state.canonicalTagStats,rejectedWikiTitles:state.rejectedWikiTitles,rejectedRefresh:state.rejectedRefresh})],{type:'application/json'}));
+    const resp=await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',{method:'POST',body:form});
+    if (!resp.ok) throw new Error('Drive create failed');
+    const d=await resp.json();
+    state.drive.fileId=d.id; saveLocalState();
+  } catch(e){showToast('Drive file create failed','error');}
+}
+async function syncDrive(manual=false) {
+  if(!state.drive.connected&&!state.drive.accessToken){
+    if(state.drive.enabled) await restoreDriveSession(manual);
+    if(!state.drive.connected&&!state.drive.accessToken){ if(manual) await connectDrive(); return; }
+  }
+  if(!state.drive.fileId){await createDriveFile(); if(!state.drive.fileId)return;}
+  setDriveStatus('syncing');
+  try {
+    const resp=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${state.drive.fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({movies:state.movies,settings:state.settings,hiddenTitles:state.hiddenTitles,canonicalTagStats:state.canonicalTagStats,rejectedWikiTitles:state.rejectedWikiTitles,rejectedRefresh:state.rejectedRefresh})});
+    if (!resp.ok) throw new Error('Drive sync failed');
+    state.drive.connected=true;
+    state.drive.lastConnectedAt=Date.now();
+    saveLocalState();
+    setDriveStatus('connected'); showToast('Synced to Drive','success');
+  } catch(e){state.drive.connected=false; setDriveStatus(''); showToast(driveErrorMessage(e)||'Drive sync failed','error');}
+}
+
+// ─────────────────────────────────────────────
+// INFINITE RECOMMENDATIONS + GO TO TOP
+// ─────────────────────────────────────────────
+function recommendationPageActive() {
+  return activeTab === 'all' || activeTab === 'movie' || activeTab === 'show';
+}
+
+function handleScroll() {
+  const btn = document.getElementById('goTopBtn');
+  if (btn) btn.classList.toggle('visible', window.scrollY > 520);
+  if (!recommendationPageActive()) return;
+  if (window.innerHeight + window.scrollY < document.documentElement.scrollHeight - 700) return;
+  const total = personalizedEnough() ? recommendationCandidates().length : discoveryPool().length;
+  if (recVisibleLimit >= total) return;
+  recVisibleLimit += REC_INFINITE_PAGE_SIZE;
+  renderRecs();
+}
+
+function goToTop() {
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+// ─────────────────────────────────────────────
+// TOAST
+// ─────────────────────────────────────────────
+let _tt;
+function showToast(msg,type='') { const el=document.getElementById('toast'); el.textContent=msg; el.className='show '+type; clearTimeout(_tt); _tt=setTimeout(()=>el.className='',3000); }

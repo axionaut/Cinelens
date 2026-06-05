@@ -2,7 +2,7 @@
 
 ## 1. Product Summary
 
-CineLens is a single-file browser app for building a personal movie and TV recommendation engine using Wikipedia as the title and plot source, local browser storage as the primary data store and optional Google Drive sync for persistence across sessions/devices.
+CineLens is a static browser app for building a personal movie and TV recommendation engine using Wikipedia as the title and plot source, local browser storage as the primary data store and optional Google Drive sync for persistence across sessions/devices.
 
 The app is designed for Hindi and English movies and shows only. It must collect candidate titles automatically, process them only when a real plot/synopsis/premise/story section exists, derive meaningful plot tags from that story text, learn from the user’s ratings and recommend titles based on the user’s positive and negative taste signals.
 
@@ -10,22 +10,41 @@ The app must behave like a recommendation engine, not like a Wikipedia category 
 
 ## 2. Current Packaging
 
-The app is currently implemented as one complete HTML file containing:
-
-- HTML layout
-- CSS styling
-- JavaScript app logic
-- Wikipedia API integration
-- Google Drive sync
-- Local storage persistence
-
-Current working file basis used for this specification:
+The browser app is split by responsibility:
 
 ```text
-index.html
+index.html  HTML layout and external script/style references
+styles.css  visual styling and responsive rules
+app.js      application logic, integrations and persistence
 ```
 
-The file should remain self-contained unless a deliberate refactor is planned.
+`index.html` loads the Google Identity Services client followed by `app.js` at
+the end of the body. The files must remain deployable together as a static site.
+
+Repository text files use LF line endings through `.gitattributes` so edits do
+not produce misleading whole-file diffs on Windows.
+
+### 2.1 Genre Signal
+
+Genres are stored separately from story concepts. They are derived only from
+Wikipedia lead/category metadata, not guessed from isolated plot words.
+
+- Existing saved Wikipedia titles derive genres from their stored lead text
+  during housekeeping; they do not require an immediate refetch.
+- Fresh and re-tagged titles also use Wikipedia categories.
+- Rated-title genre preferences contribute to recommendation weight at 35% of
+  a concept weight.
+- Positive concept overlap remains the primary ranking rule. Genre preference
+  influences weighted ordering within the same concept-overlap tier.
+- Cards show their genres explicitly and highlight genres shared with the
+  user's positive taste profile.
+
+The release smoke test must confirm that the split stylesheet and application
+script load in headless Chrome, the app executes its initial render, removed
+availability controls remain absent and every temporary browser profile/output
+file is deleted. Genre changes additionally require JavaScript syntax checks
+and targeted source assertions for extraction, weighting, card display and
+overlap-first ordering.
 
 ## 3. Core User Requirements
 
