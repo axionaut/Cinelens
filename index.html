@@ -717,6 +717,7 @@ let pendingManualRatingId = '';
 const PERFECT_REC_TARGET = 5;
 const PERFECT_REC_MIN_RATIO = 0.995;
 const MIN_PLOT_TAGS = 0;
+const MIN_STORY_SECTION_CHARS = 140;
 const LOW_CONFIDENCE_PLOT_TAGS = new Set([
   'protagonist-driven','conflict-driven','character-driven','plot-driven','dramatic-stakes',
   'goal-oriented-plot','relationship-conflict','moral-choice','escalating-conflict','personal-cost',
@@ -823,7 +824,8 @@ function selectContrastiveDescriptors(raw, stats) {
 function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats()) {
   const rawDescriptors = extractRawDescriptors(storyText || '');
   const descriptors = selectContrastiveDescriptors(rawDescriptors, stats).slice(0, 10);
-  const evidenceTags = cleanTagArray(deriveTagsFromText(storyText || '', meta), meta, false)
+  const storyOnlyMeta = { ...meta, leadText: '', categoryText: '' };
+  const evidenceTags = cleanTagArray(deriveTagsFromText(storyText || '', storyOnlyMeta), meta, false)
     .filter(t => !isMetaTag(t))
     .filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t))
     .slice(0, 14);
@@ -1442,10 +1444,7 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all') {
   const catText = cats.join(' ');
   const leadText = extract.slice(0, 1400);
   const storyText = extractStoryText(extract);
-  if (!storyText || storyText.length < 250) return null;
-
-  const yearMatch = leadText.match(/\b(19[3-9]\d|20[012]\d)\b/) || extract.match(/\b(19[3-9]\d|20[012]\d)\b/);
-  const year = yearMatch ? parseInt(yearMatch[1]) : null;
+  if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return null;
 
   let language = '';
   const englishEvidence = cats.some(c => c.includes('english-language'))
@@ -1464,6 +1463,8 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all') {
   if (cats.some(c => c.includes('film series') || c.includes('media franchise') || c.includes('fictional universes'))) return null;
   if (mode === 'movies' && format) return null;
   if (mode === 'shows' && !format) return null;
+
+  const year = deriveReleaseYear(leadText, extract, cats, format);
 
   if (language !== 'English' && language !== 'Hindi') return null;
 
@@ -1495,19 +1496,45 @@ function extractStoryText(extract) {
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
-    if (headings.some(h => line.toLowerCase() === h.toLowerCase())) {
+    const heading = normaliseWikiHeading(line);
+    if (headings.some(h => heading === h.toLowerCase())) {
       const out = [];
       for (let j = i + 1; j < lines.length; j++) {
         const l = lines[j].trim();
+        if (normaliseWikiHeading(l) && out.length) break;
         if (/^[A-Z][A-Za-z0-9 &,'’():;\-]{1,55}$/.test(l) && !/^(the|a|an)\b/i.test(l) && out.join(' ').length > 500) break;
         if (l) out.push(l);
         if (out.join(' ').length > 6500) break;
       }
       const section = out.join(' ');
-      if (section.length > 400) return section;
+      if (section.length >= MIN_STORY_SECTION_CHARS) return section;
     }
   }
   return '';
+}
+
+function normaliseWikiHeading(line) {
+  const raw = String(line || '').trim();
+  if (!raw) return '';
+  const stripped = raw.replace(/^=+\s*/, '').replace(/\s*=+$/, '').trim();
+  if (stripped === raw && !/^=+.*=+$/.test(raw)) return '';
+  return stripped.toLowerCase();
+}
+
+function deriveReleaseYear(leadText, extract, cats, format) {
+  const catText = (cats || []).join(' ');
+  const catPatterns = format
+    ? [/\b(19[3-9]\d|20[0-3]\d) [a-z -]*television series debuts\b/, /\b(19[3-9]\d|20[0-3]\d) [a-z -]*web series debuts\b/]
+    : [/\b(19[3-9]\d|20[0-3]\d) [a-z -]*films\b/];
+  for (const rx of catPatterns) {
+    const m = catText.match(rx);
+    if (m) return parseInt(m[1], 10);
+  }
+  const lead = leadText || '';
+  const releaseMatch = lead.match(/\b(released|premiered|debuted|aired|broadcast|streamed)\D{0,80}\b(19[3-9]\d|20[0-3]\d)\b/i);
+  if (releaseMatch) return parseInt(releaseMatch[2], 10);
+  const firstYear = (lead.match(/\b(19[3-9]\d|20[0-3]\d)\b/) || String(extract || '').match(/\b(19[3-9]\d|20[0-3]\d)\b/));
+  return firstYear ? parseInt(firstYear[1], 10) : null;
 }
 
 // ─────────────────────────────────────────────

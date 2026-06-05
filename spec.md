@@ -1394,6 +1394,58 @@ No batchSize input
 Fallback browse cards render from recVisibleLimit
 ```
 
+## 22. Current Fix Changelog — Wikipedia Story Heading Parser
+
+### 22.1 Problem fixed
+
+Pool expansion could show real Wikipedia titles in the progress bar while adding `0` titles. The failure was in the page parser, not the UI.
+
+Root cause:
+
+- Wikipedia plaintext extracts expose headings as MediaWiki-style lines such as `== Plot ==`, `== Premise ==` and `== Series overview ==`.
+- The app only matched bare heading text such as `Plot`.
+- As a result, obvious usable pages like `Inception`, `Arrival`, `13 Reasons Why`, `Delhi Crime` and `Panchayat` produced `storyText = ''` and were rejected.
+
+### 22.2 Implementation changes
+
+- Added heading normalization for Wikipedia extract lines.
+- Story extraction now recognizes `== Plot ==`, `== Premise ==`, `== Synopsis ==`, `== Story ==`, `== Plot summary ==` and `== Series overview ==`.
+- Story extraction stops cleanly at the next Wikipedia heading.
+- Lowered the required story-section length to allow short but real `Premise` sections.
+- Release year detection now prefers film/TV category years and TV debut categories before falling back to the first year in the lead.
+- Story tag generation now uses the story section only for plot evidence, preventing lead/production text from contaminating plot tags.
+
+### 22.3 Verification
+
+Runtime smoke test was performed in headless Chrome against the real `index.html` served from localhost with live Wikipedia API calls.
+
+Direct parser smoke:
+
+```text
+13 Reasons Why: ok, year 2017, English, series, 12 tags
+Inception: ok, year 2010, English, movie, 19 tags
+Arrival: ok, year 2016, English, movie, 14 tags
+Panchayat: ok, year 2020, Hindi, series, 13 tags
+Delhi Crime: ok, year 2019, Hindi, series, 13 tags
+```
+
+Expand-pool smoke using the real `expandPool()` path with controlled candidate titles:
+
+```text
+added: 5
+tagged: 5
+rejected: 0
+titles: 13 Reasons Why, Inception, Arrival, Panchayat, Delhi Crime
+expandText: ＋ Expand Pool
+fetchVisible: false
+```
+
+The extracted inline JavaScript also passes:
+
+```text
+node --check
+```
+
 ## 20. Current Fix Changelog — Tagging Rethink and Reset
 
 ### 20.1 Problem fixed
