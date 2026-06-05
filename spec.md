@@ -1585,6 +1585,44 @@ persistedAcrossReload: true
 candidate scores: discovery variant 6, named discovery variant 4, science-fiction variant 2
 ```
 
+## 24. Narrative Overview Parser Fix
+
+### 24.1 Problem
+
+Some valid movie and television pages still failed manual URL add because Wikipedia does not always use `Plot`, `Premise` or `Series overview`. For example, `Two and a Half Men` uses an `Overview` section containing the full narrative summary.
+
+The manual-add error also hid the actual parser rejection reason behind the generic message `Could not process`.
+
+### 24.2 Implementation
+
+- Accept `Storyline` and `Series summary` as direct narrative headings.
+- Accept `Overview` only when a generic narrative-content validator finds multiple character/action/story signals and the text is not dominated by production, casting, broadcast, ratings or reception language.
+- Continue rejecting production-only Overview sections.
+- Add parser diagnostics for missing pages, franchise pages, missing story sections, type mismatch, missing language evidence and missing core identity fields.
+- Show the specific parser or network reason in manual-add errors and store it in the Rejected tab.
+
+No title-specific exception is used.
+
+### 24.3 Verification
+
+Runtime smoke test was performed in headless Chrome against the real `index.html` served from localhost with the live Wikipedia API.
+
+Observed result:
+
+```text
+status: PASS
+title: Two and a Half Men
+manual URL flow added title: true
+format: series
+year: 2003
+storyLength: 5000
+tagCount: 17
+rating prompt visible: true
+Series summary accepted: true
+production-only Overview rejected: true
+missing-page diagnostic: Wikipedia page not found
+```
+
 ## 21. Current Fix Changelog — Remove Browse Cards Slider
 
 ### 21.1 Problem fixed

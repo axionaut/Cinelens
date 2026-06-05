@@ -1561,20 +1561,28 @@ async function addManualTitle() {
   showFetchProgress('Fetching Wikipedia URL...', 8, wikiTitle);
 
   let movie = null;
+  const diagnostics = {};
   try {
-    movie = await fetchWikiMovie(wikiTitle, mode);
+    movie = await fetchWikiMovie(wikiTitle, mode, diagnostics);
   } catch(e) {
-    recordRejectedTitle(wikiTitle, mode, e.message || 'Wikipedia URL could not be processed', 'manual-url');
+    const reason = e.message || 'Wikipedia request failed';
+    recordRejectedTitle(wikiTitle, mode, reason, 'manual-url');
     saveLocalState();
     render();
-    showToast(`Could not process "${wikiTitle}"`, 'error');
+    showToast(`Could not process "${wikiTitle}": ${reason}`, 'error');
     return;
   } finally {
     hideFetchProgress();
     if (btn) { btn.disabled = false; btn.textContent = 'fetch from URL'; }
   }
 
-  if (!movie) { recordRejectedTitle(wikiTitle, mode, 'Wikipedia URL could not be processed', 'manual-url'); saveLocalState(); render(); showToast(`Could not process "${wikiTitle}"`, 'error'); return; }
+  if (!movie) {
+    const reason = diagnostics.reason || 'Wikipedia URL could not be processed';
+    recordRejectedTitle(wikiTitle, mode, reason, 'manual-url');
+    saveLocalState(); render();
+    showToast(`Could not process "${wikiTitle}": ${reason}`, 'error');
+    return;
+  }
   if (isMovieHidden(movie)) { showToast(`"${movie.title}" is hidden. Restore it from the Hidden tab.`, ''); return; }
   if (existing) {
     const keep = { rating: Number(existing.rating || 0), watchlist: !!existing.watchlist, skipped: !!existing.skipped, userNotes: existing.userNotes || '' };
@@ -1623,10 +1631,10 @@ function ratePendingManualMovie(rating) {
   rateMovie(id, rating);
 }
 
-async function fetchWikiMovie(wikiTitle, mode='all') {
+async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null) {
   const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories&explaintext=1&exlimit=1&cllimit=80&format=json&origin=*`;
   const data = await wikiApiJson(url);
-  return parseWikiMovieResponse(data, wikiTitle, mode);
+  return parseWikiMovieResponse(data, wikiTitle, mode, diagnostics);
 }
 
 async function fetchWikiMovieByPageId(pageId, mode='all') {
@@ -1637,11 +1645,16 @@ async function fetchWikiMovieByPageId(pageId, mode='all') {
   return parseWikiMovieResponse(data, clean, mode);
 }
 
-function parseWikiMovieResponse(data, requestedTitle, mode='all') {
+function rejectWikiParse(diagnostics, reason) {
+  if (diagnostics) diagnostics.reason = reason;
+  return null;
+}
+
+function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=null) {
   const pages = data.query?.pages;
-  if (!pages) return null;
+  if (!pages) return rejectWikiParse(diagnostics, 'Wikipedia returned no page data');
   const page = Object.values(pages)[0];
-  if (!page || page.missing !== undefined) return null;
+  if (!page || page.missing !== undefined) return rejectWikiParse(diagnostics, 'Wikipedia page not found');
 
   const extract = page.extract || '';
   const pageTitle = page.title || requestedTitle;
@@ -1650,11 +1663,11 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all') {
   const id = 'wiki_' + wikiPageId;
 
   const cats = (page.categories || []).map(c => c.title.toLowerCase());
-  if (isFranchiseOverviewPage(pageTitle, extract, cats)) return null;
+  if (isFranchiseOverviewPage(pageTitle, extract, cats)) return rejectWikiParse(diagnostics, 'franchise or overview page, not one title');
   const catText = cats.join(' ');
   const leadText = extract.slice(0, 1400);
   const storyText = extractStoryText(extract);
-  if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return null;
+  if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return rejectWikiParse(diagnostics, 'no usable plot, premise, story or narrative overview section');
 
   let language = '';
   const englishEvidence = cats.some(c => c.includes('english-language'))
@@ -1670,13 +1683,13 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all') {
   if (cats.some(c => c.includes('television series') || c.includes('tv series') || c.includes('web series'))) format = 'series';
   if (cats.some(c => c.includes('miniseries'))) format = 'miniseries';
   if (!format && /\b(television series|tv series|web series|miniseries|streaming television series)\b/i.test(leadText)) format = 'series';
-  if (cats.some(c => c.includes('film series') || c.includes('media franchise') || c.includes('fictional universes'))) return null;
-  if (mode === 'movies' && format) return null;
-  if (mode === 'shows' && !format) return null;
+  if (cats.some(c => c.includes('film series') || c.includes('media franchise') || c.includes('fictional universes'))) return rejectWikiParse(diagnostics, 'franchise page, not one movie or show');
+  if (mode === 'movies' && format) return rejectWikiParse(diagnostics, 'title is a show, not a movie');
+  if (mode === 'shows' && !format) return rejectWikiParse(diagnostics, 'title is a movie, not a show');
 
   const year = deriveReleaseYear(leadText, extract, cats, format);
 
-  if (language !== 'English' && language !== 'Hindi') return null;
+  if (language !== 'English' && language !== 'Hindi') return rejectWikiParse(diagnostics, 'English or Hindi language evidence missing');
 
   let country = 'USA';
   if (language === 'Hindi') country = 'India';
@@ -1688,7 +1701,7 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all') {
   const creatorMatch = leadText.match(/created by ([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,3})/);
   const director = dirMatch ? dirMatch[1] : (creatorMatch ? creatorMatch[1] : 'Unknown');
 
-  if (!year || !title || !wikiPageId) return null;
+  if (!year || !title || !wikiPageId) return rejectWikiParse(diagnostics, 'missing release year, title or Wikipedia page ID');
 
   const tagMeta = { source: 'wikipedia', storyText, leadText, language, country, year, format: format||null, director };
   const builtTags = buildStoryTagSet(storyText, tagMeta);
@@ -1702,12 +1715,13 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all') {
 function extractStoryText(extract) {
   const text = (extract || '').replace(/\r/g, '').trim();
   if (!text) return '';
-  const headings = ['Plot', 'Synopsis', 'Premise', 'Story', 'Plot summary', 'Series overview'];
+  const headings = ['Plot', 'Synopsis', 'Premise', 'Story', 'Plot summary', 'Series overview', 'Series summary', 'Storyline'];
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i].trim();
     const heading = normaliseWikiHeading(line);
-    if (headings.some(h => heading === h.toLowerCase())) {
+    const isStandardStoryHeading = headings.some(h => heading === h.toLowerCase());
+    if (isStandardStoryHeading || heading === 'overview') {
       const out = [];
       for (let j = i + 1; j < lines.length; j++) {
         const l = lines[j].trim();
@@ -1717,10 +1731,19 @@ function extractStoryText(extract) {
         if (out.join(' ').length > 6500) break;
       }
       const section = out.join(' ');
-      if (section.length >= MIN_STORY_SECTION_CHARS) return section;
+      if (section.length >= MIN_STORY_SECTION_CHARS && (isStandardStoryHeading || narrativeOverviewLooksUsable(section))) return section;
     }
   }
   return '';
+}
+
+function narrativeOverviewLooksUsable(section) {
+  const text = String(section || '').replace(/\s+/g, ' ').trim();
+  if (text.length < MIN_STORY_SECTION_CHARS) return false;
+  const narrativeSignals = (text.match(/\b(revolves?|follows?|cent(?:er|re)s? on|chronicles?|depicts?|portrays?|focuses? on|story of|lives? of|protagonist|character|moves? into|falls? in love|discovers?|learns?|decides?|attempts?|struggles?|must|returns?|begins?|becomes?|finds?|joins?|leaves?|dies?|killed|marries?|divorces?|relationship|family|brother|sister|father|mother|son|daughter)\b/gi) || []).length;
+  const productionSignals = (text.match(/\b(production|filming|casting|cast members?|developed by|created by|executive producer|network|broadcast rights|renewed|canceled|cancelled|ratings|reception|viewership|episodes? ordered|premiered on|released on)\b/gi) || []).length;
+  const narrativeOpening = /\b(series|film|show|story)\s+(revolves?|follows?|cent(?:er|re)s?|chronicles?|depicts?|focuses?)\b/i.test(text.slice(0, 500));
+  return narrativeSignals >= 3 && (narrativeOpening || narrativeSignals >= productionSignals * 2 + 2);
 }
 
 function normaliseWikiHeading(line) {
