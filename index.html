@@ -411,6 +411,7 @@
       <button class="tab-btn" onclick="setTab('watchlist',this)">Watchlist</button>
       <button class="tab-btn" onclick="setTab('tags',this)">Tags</button>
       <button class="tab-btn" onclick="setTab('pool',this)">Pool</button>
+      <button class="tab-btn" onclick="setTab('hidden',this)">Hidden</button>
       <button class="tab-btn" onclick="setTab('rejected',this)">Rejected</button>
     </div>
   </div>
@@ -508,6 +509,14 @@
     <div class="section-count" id="poolCount">nothing loaded</div>
   </div>
   <div class="movies-grid audit-only" id="poolGrid"></div>
+
+  <hr class="sep audit-only" id="hiddenSep">
+
+  <div class="section-header audit-only" id="hiddenHeader">
+    <div class="section-title">Hidden</div>
+    <div class="section-count" id="hiddenCount">nothing hidden</div>
+  </div>
+  <div class="movies-grid audit-only" id="hiddenGrid"></div>
 
   <hr class="sep audit-only" id="rejectedSep">
 
@@ -705,6 +714,7 @@ let state = {
   tagWeights: {},
   settings: { topN: 10, minYear: 1970, watchCountry: 'IN', platforms: ['Netflix','Prime Video','Hotstar'] },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
+  hiddenTitles: {},
   rejectedWikiTitles: {},
   poolFetched: false
 };
@@ -1089,6 +1099,19 @@ function rejectedEntries() {
   }).sort((a,b)=>(b.at||'').localeCompare(a.at||''));
 }
 
+function hiddenTitleMatches(value) {
+  const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
+  if (!key) return false;
+  return Object.values(state.hiddenTitles || {}).some(movie => [movie.title, movie.wikiTitle, movie.pageTitle]
+    .some(title => normaliseTitleKey(title) === key));
+}
+
+function isMovieHidden(movie) {
+  if (!movie) return false;
+  if (movie.id && state.hiddenTitles?.[movie.id]) return true;
+  return [movie.title, movie.wikiTitle, movie.pageTitle].some(title => hiddenTitleMatches(title));
+}
+
 function stopOrExpandPool() {
   if (poolExpansionInProgress) stopFetching();
   else {
@@ -1259,7 +1282,7 @@ async function expandPool(manual=true) {
     const existing = new Set(Object.values(state.movies).map(m => normaliseTitleKey(m.title)));
     const toFetch = allTitles.filter(t => {
       const clean = normaliseTitleKey(t);
-      return clean && !existing.has(clean) && !seenThisRun.has(clean) && !state.rejectedWikiTitles[rejectKey(t, mode)] && !obviousNonMovieTitle(t);
+      return clean && !existing.has(clean) && !hiddenTitleMatches(t) && !seenThisRun.has(clean) && !state.rejectedWikiTitles[rejectKey(t, mode)] && !obviousNonMovieTitle(t);
     });
 
     if (!toFetch.length) {
@@ -1282,7 +1305,9 @@ async function expandPool(manual=true) {
       }
       try {
         const movie = await fetchWikiMovie(title, mode);
-        if (movie && !state.movies[movie.id]) {
+        if (movie && isMovieHidden(movie)) {
+          // Keep explicitly hidden titles out of both the pool and rejected list.
+        } else if (movie && !state.movies[movie.id]) {
           if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, mode)) {
             state.movies[movie.id] = movie;
             added++;
@@ -1355,6 +1380,7 @@ async function addManualTitle() {
 
   const mode = expansionMode();
   const existing = Object.values(state.movies).find(m => sameCanonicalTitle(m.title, wikiTitle) || sameCanonicalTitle(m.wikiTitle, wikiTitle) || sameCanonicalTitle(m.pageTitle, wikiTitle));
+  if (hiddenTitleMatches(wikiTitle)) { showToast(`"${wikiTitle}" is hidden. Restore it from the Hidden tab.`, ''); return; }
 
   if (btn) { btn.disabled = true; btn.textContent = 'fetching...'; }
   showFetchProgress('Fetching Wikipedia URL...', 8, wikiTitle);
@@ -1374,6 +1400,7 @@ async function addManualTitle() {
   }
 
   if (!movie) { recordRejectedTitle(wikiTitle, mode, 'Wikipedia URL could not be processed', 'manual-url'); saveLocalState(); render(); showToast(`Could not process "${wikiTitle}"`, 'error'); return; }
+  if (isMovieHidden(movie)) { showToast(`"${movie.title}" is hidden. Restore it from the Hidden tab.`, ''); return; }
   if (existing) {
     const keep = { rating: Number(existing.rating || 0), watchlist: !!existing.watchlist, skipped: !!existing.skipped, userNotes: existing.userNotes || '' };
     delete state.movies[existing.id];
@@ -1839,7 +1866,7 @@ function setTab(tab, btn) {
 }
 function isShow(m) { return !!m.format; }
 function matchesTab(m) {
-  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return true;
+  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return true;
   if (activeTab === 'show') return isShow(m);
   if (activeTab === 'movie') return !isShow(m);
   return true;
@@ -1848,7 +1875,7 @@ function matchesTab(m) {
 // ─────────────────────────────────────────────
 // RENDER
 // ─────────────────────────────────────────────
-function render() { renderPlatformBar(); renderRecs(); renderRatedGrid(); renderWatchlist(); renderTagBrain(); renderPoolGrid(); renderRejectedGrid(); updateStats(); updateVisibleSections(); maybeAutoExpandPool(); }
+function render() { renderPlatformBar(); renderRecs(); renderRatedGrid(); renderWatchlist(); renderTagBrain(); renderPoolGrid(); renderHiddenGrid(); renderRejectedGrid(); updateStats(); updateVisibleSections(); maybeAutoExpandPool(); }
 
 function renderPlatformBar() {
   const bar = document.getElementById('platformBar');
@@ -1927,7 +1954,7 @@ function needsMorePerfectRecommendations(target=PERFECT_REC_TARGET) {
 }
 
 function maybeAutoExpandPool() {
-  if (activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated' || autoFetchPaused) return;
+  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rejected' || activeTab === 'rated' || autoFetchPaused) return;
   const available = discoveryPool().length;
   const needsPerfect = needsMorePerfectRecommendations();
   const gap = needsPerfect ? 2000 : 120000;
@@ -1947,7 +1974,7 @@ function scheduleAutoExpand(delay=600) {
 }
 
 function renderRecs() {
-  if (activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return;
+  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return;
   const grid = document.getElementById('recsGrid');
   const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
   grid.innerHTML = '';
@@ -2024,6 +2051,9 @@ function updateVisibleSections() {
   if (activeTab === 'pool') {
     ['poolSep','poolHeader','poolGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
   }
+  if (activeTab === 'hidden') {
+    ['hiddenSep','hiddenHeader','hiddenGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
+  }
   if (activeTab === 'rejected') {
     ['rejectedSep','rejectedHeader','rejectedGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
   }
@@ -2049,6 +2079,16 @@ function renderPoolGrid() {
   grid.innerHTML = '';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>Pool Empty</h3></div>`; return; }
   rows.forEach(m => grid.appendChild(buildCard(m, { poolView:true })));
+}
+
+function renderHiddenGrid() {
+  const grid = document.getElementById('hiddenGrid');
+  if (!grid) return;
+  const rows = Object.values(state.hiddenTitles || {}).sort((a,b)=>(b.hiddenAt||'').localeCompare(a.hiddenAt||'') || a.title.localeCompare(b.title));
+  document.getElementById('hiddenCount').textContent = rows.length ? `${rows.length} hidden` : 'nothing hidden';
+  grid.innerHTML = '';
+  if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">x</div><h3>Nothing Hidden</h3></div>`; return; }
+  rows.forEach(m => grid.appendChild(buildCard({ ...m, _expanded:true }, { hiddenView:true })));
 }
 
 function renderRejectedGrid() {
@@ -2092,6 +2132,11 @@ async function retryRejectedTitle(key, e) {
     }
     if (state.movies[movie.id]) {
       showToast(`Already in pool: "${state.movies[movie.id].title}"`, '');
+      render();
+      return;
+    }
+    if (isMovieHidden(movie)) {
+      showToast(`Still hidden: "${movie.title}"`, '');
       render();
       return;
     }
@@ -2141,7 +2186,7 @@ function restoreManualStars() {
   box.querySelectorAll('.star').forEach(st => st.classList.remove('active'));
 }
 function buildCard(movie, opts={}) {
-  const { rank, score, matchedTags, maxScore, showEdit, watchlistView, poolView } = opts;
+  const { rank, score, matchedTags, maxScore, showEdit, watchlistView, poolView, hiddenView } = opts;
   const card = document.createElement('div');
   card.className = 'movie-card' + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
@@ -2174,6 +2219,25 @@ function buildCard(movie, opts={}) {
         <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
       </div>
     </div>`;
+  if (hiddenView) {
+    const stars = card.querySelector('.star-rating');
+    if (stars) stars.querySelectorAll('.star').forEach(star => {
+      star.removeAttribute('onclick');
+      star.removeAttribute('onmouseenter');
+      star.removeAttribute('onmouseleave');
+    });
+    const tags = card.querySelector('.card-tags');
+    if (tags) tags.querySelectorAll('.tag.removable').forEach(tag => {
+      tag.removeAttribute('onclick');
+      tag.removeAttribute('title');
+      tag.classList.remove('removable');
+      tag.querySelector('.tag-remove')?.remove();
+    });
+    const repair = card.querySelector('.wiki-repair-row');
+    if (repair) repair.remove();
+    const actions = card.querySelector('.card-actions');
+    if (actions) actions.innerHTML = `<button class="card-act retag" onclick="restoreHiddenMovie('${safeId}',event)">restore</button><button class="card-act del" onclick="forgetHiddenMovie('${safeId}',event)">forget</button>`;
+  }
   return card;
 }
 
@@ -2285,9 +2349,16 @@ function posterGrad(title) {
 // ─────────────────────────────────────────────
 // SCORING
 // ─────────────────────────────────────────────
+function tasteEvidenceMovies() {
+  return [
+    ...Object.values(state.movies || {}),
+    ...Object.values(state.hiddenTitles || {}).filter(m => Number(m.rating || 0) > 0)
+  ];
+}
+
 function computeTagWeights() {
   const w={};
-  Object.values(state.movies).forEach(m => {
+  tasteEvidenceMovies().forEach(m => {
     const tags = scoringTags(m);
     if (m.rating>0&&tags&&tags.length) {
       const wt = m.rating-3;
@@ -2337,10 +2408,31 @@ function rateMovie(id, rating) {
 function deleteMovie(id, e) {
   if (e) e.stopPropagation();
   const m = state.movies[id];
-  if (!m||!confirm(`Remove "${m.title}"?`)) return;
+  if (!m||!confirm(`Hide "${m.title}"? It will not be fetched again.`)) return;
+  state.hiddenTitles[id] = { ...m, hiddenAt: new Date().toISOString() };
   delete state.movies[id];
+  runHousekeeping(false);
   saveLocalState(); syncDrive(); render();
-  showToast(`Removed "${m.title}"`, '');
+  showToast(`Hidden "${m.title}"`, '');
+}
+function restoreHiddenMovie(id, e) {
+  if (e) e.stopPropagation();
+  const movie = state.hiddenTitles?.[id];
+  if (!movie) return;
+  const { hiddenAt, ...restored } = movie;
+  state.movies[id] = restored;
+  delete state.hiddenTitles[id];
+  runHousekeeping(false);
+  saveLocalState(); syncDrive(); render();
+  showToast(`Restored "${movie.title}"`, 'success');
+}
+function forgetHiddenMovie(id, e) {
+  if (e) e.stopPropagation();
+  const movie = state.hiddenTitles?.[id];
+  if (!movie || !confirm(`Forget "${movie.title}" permanently? It may be fetched again later.`)) return;
+  delete state.hiddenTitles[id];
+  saveLocalState(); syncDrive(); render();
+  showToast(`Forgot "${movie.title}"`, '');
 }
 function toggleWatchlist(id, e) {
   if (e) e.stopPropagation();
@@ -2620,7 +2712,7 @@ function renderTagBrain() {
   const grid=document.getElementById('tagBrainGrid');
   const countEl=document.getElementById('tagBrainCount');
   const map={};
-  Object.values(state.movies).forEach(m => {
+  tasteEvidenceMovies().forEach(m => {
     if (!m.tagged) return;
     scoringTags(m).forEach(tag => {
       if (!map[tag]) map[tag]={weight:state.tagWeights[tag]||0,movieCount:0,movies:[]};
@@ -2644,7 +2736,8 @@ function renderTagBrain() {
 function openTagPanel(tag) {
   computeTagWeights();
   document.getElementById('tagPanelName').textContent=tag;
-  const movies=Object.values(state.movies).filter(m=>m.tagged&&scoringTags(m).includes(tag));
+  const hiddenIds = new Set(Object.keys(state.hiddenTitles || {}));
+  const movies=tasteEvidenceMovies().filter(m=>m.tagged&&scoringTags(m).includes(tag));
   const weight=state.tagWeights[tag]||0;
   const ws=weight>0?`+${weight} (you like this)`:weight<0?`${weight} (you dislike this)`:'~ unweighted';
   document.getElementById('tagPanelStat').innerHTML=`weight: <span style="color:var(--accent)">${ws}</span> · ${movies.length} titles`;
@@ -2653,7 +2746,7 @@ function openTagPanel(tag) {
   let html='';
   if (rated.length) {
     html+=`<div style="font-size:10px;color:var(--muted);margin-bottom:7px;font-family:'DM Mono',monospace;text-transform:uppercase;letter-spacing:1px">Rated</div>`;
-    html+=rated.map(m=>`<div class="tag-panel-movie"><div style="flex:1"><div class="tag-panel-movie-title">${m.title}</div><div class="tag-panel-movie-meta">${m.year}·${m.language}</div></div><div style="color:var(--accent);font-size:11px">${'★'.repeat(m.rating)}</div></div>`).join('');
+    html+=rated.map(m=>`<div class="tag-panel-movie"><div style="flex:1"><div class="tag-panel-movie-title">${m.title}</div><div class="tag-panel-movie-meta">${m.year}·${m.language}${hiddenIds.has(m.id)?' · hidden':''}</div></div><div style="color:var(--accent);font-size:11px">${'★'.repeat(m.rating)}</div></div>`).join('');
   }
   if (unrated.length) {
     html+=`<div style="font-size:10px;color:var(--muted);margin:10px 0 7px;font-family:'DM Mono',monospace;text-transform:uppercase;letter-spacing:1px">In Pool</div>`;
@@ -2684,10 +2777,11 @@ function updateTopN(val) { document.getElementById('topNVal').textContent=val; s
 function updateMinYear(val) { document.getElementById('minYearVal').textContent=val; state.settings.minYear=parseInt(val); saveLocalState(); renderRecs(); }
 
 async function resetAllData() {
-  if (!confirm('Reset CineLens? This clears ratings, watchlist, pool, rejected titles and tag brain.')) return;
+  if (!confirm('Reset CineLens? This clears ratings, watchlist, pool, hidden titles, rejected titles and tag brain.')) return;
   stopFetching({silent:true});
   state.movies = {};
   state.tagWeights = {};
+  state.hiddenTitles = {};
   state.rejectedWikiTitles = {};
   state.poolFetched = false;
   autoFetchPaused = true;
@@ -2695,7 +2789,7 @@ async function resetAllData() {
   saveLocalState();
   render();
   if (state.drive.connected || state.drive.accessToken) await syncDrive(false);
-  showToast('CineLens reset. Pool and ratings cleared.', 'success');
+  showToast('CineLens reset. Pool, hidden titles and ratings cleared.', 'success');
 }
 
 // ─────────────────────────────────────────────
@@ -2706,6 +2800,7 @@ function saveLocalState() {
     localStorage.setItem('cinelens_v2',JSON.stringify({
       movies:state.movies,
       settings:state.settings,
+      hiddenTitles:state.hiddenTitles,
       rejectedWikiTitles:state.rejectedWikiTitles,
       drive:{
         enabled:state.drive.enabled,
@@ -2724,6 +2819,7 @@ function loadLocalState() {
       const s=JSON.parse(raw);
       if (s.movies) state.movies=s.movies;
       if (s.settings) state.settings={...state.settings,...s.settings};
+      if (s.hiddenTitles) state.hiddenTitles=s.hiddenTitles;
       if (s.rejectedWikiTitles) state.rejectedWikiTitles=s.rejectedWikiTitles;
       if (s.drive) {
         state.drive.connected=false;
@@ -2986,7 +3082,7 @@ async function loadFromDrive() {
     if (!resp.ok) throw new Error('Drive load failed');
     const d=await resp.json();
     let cleaned = 0;
-    if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};if(d.rejectedWikiTitles)state.rejectedWikiTitles=d.rejectedWikiTitles;state.settings.platforms=state.settings.platforms||[];state.settings.watchCountry=state.settings.watchCountry||'IN';migrateLegacyPoolItems();cleaned=cleanContaminatedTags(true);saveLocalState();render();showToast('Loaded from Drive','success');}
+    if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};if(d.hiddenTitles)state.hiddenTitles=d.hiddenTitles;if(d.rejectedWikiTitles)state.rejectedWikiTitles=d.rejectedWikiTitles;state.settings.platforms=state.settings.platforms||[];state.settings.watchCountry=state.settings.watchCountry||'IN';migrateLegacyPoolItems();cleaned=cleanContaminatedTags(true);saveLocalState();render();showToast('Loaded from Drive','success');}
     state.drive.connected=true;
     setDriveStatus('connected');
     if (cleaned) await syncDrive(false);
@@ -3002,7 +3098,7 @@ async function createDriveFile() {
     const meta={name:DRIVE_FILE,mimeType:'application/json'};
     const form=new FormData();
     form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));
-    form.append('file',new Blob([JSON.stringify({movies:state.movies,settings:state.settings,rejectedWikiTitles:state.rejectedWikiTitles})],{type:'application/json'}));
+    form.append('file',new Blob([JSON.stringify({movies:state.movies,settings:state.settings,hiddenTitles:state.hiddenTitles,rejectedWikiTitles:state.rejectedWikiTitles})],{type:'application/json'}));
     const resp=await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',{method:'POST',body:form});
     if (!resp.ok) throw new Error('Drive create failed');
     const d=await resp.json();
@@ -3017,7 +3113,7 @@ async function syncDrive(manual=false) {
   if(!state.drive.fileId){await createDriveFile(); if(!state.drive.fileId)return;}
   setDriveStatus('syncing');
   try {
-    const resp=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${state.drive.fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({movies:state.movies,settings:state.settings,rejectedWikiTitles:state.rejectedWikiTitles})});
+    const resp=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${state.drive.fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({movies:state.movies,settings:state.settings,hiddenTitles:state.hiddenTitles,rejectedWikiTitles:state.rejectedWikiTitles})});
     if (!resp.ok) throw new Error('Drive sync failed');
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();

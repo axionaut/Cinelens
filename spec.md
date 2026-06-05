@@ -1197,6 +1197,21 @@ Expected:
 9. Keep design consistent: same cards across Recommendations, Rated, Watchlist and Pool.
 10. Treat tagging as the core engine, not cosmetic metadata.
 
+### 14.1 Required Delivery Workflow
+
+Every completed code change must follow this sequence before it is reported as done:
+
+1. Update `spec.md` with the new behavior, migration rule or bugfix notes.
+2. Extract and syntax-check the inline JavaScript from the real `index.html`.
+3. Run a targeted runtime smoke test in headless Chrome against the real app, preferably served from localhost when storage or browser behavior is involved.
+4. Exercise the changed user flow and verify its persisted state, not only function presence.
+5. Run `git diff --check` and review the final diff for unintended changes.
+6. Commit only the intended project files with a descriptive commit message.
+7. Push the commit to the active branch's configured remote.
+8. Report the smoke-test result, commit hash and pushed branch.
+
+Do not describe a change as complete after static checks alone when a browser-visible or persistence behavior was changed.
+
 ## 15. Recommended Future Refactor
 
 The app is now large for a single inline script. A safe future refactor would separate the code into logical modules while keeping deployment simple.
@@ -1446,6 +1461,50 @@ The extracted inline JavaScript also passes:
 
 ```text
 node --check
+```
+
+## 22. Persistent Hidden Titles
+
+Pressing the x action on a title must hide it instead of deleting all knowledge of it.
+
+- Hidden titles are removed from recommendations, rated, watchlist and pool views.
+- Hidden titles are stored in `state.hiddenTitles` and persisted locally and through Google Drive sync.
+- Automatic collection, manual Wikipedia add and rejected-title retry must not re-add a hidden title.
+- Hidden titles appear as normal cards in a dedicated `Hidden` tab.
+- Hidden cards provide `restore` and `forget` actions.
+- Restore returns the saved title, rating, watchlist state and tags to the pool.
+- Forget permanently removes the hidden record, allowing the title to be fetched again later.
+- Rated hidden titles keep contributing their existing rating-based tag weights.
+- Unrated hidden titles do not affect tag weights; hiding alone is not treated as a dislike.
+- Tag Brain includes rated hidden evidence and labels those source titles as hidden.
+- Reset All clears hidden titles as part of the complete app reset.
+
+### 22.1 Hidden Title Acceptance Test
+
+The browser smoke test must verify:
+
+- Pressing x moves a title from `state.movies` to `state.hiddenTitles`.
+- The title appears in the Hidden tab and does not remain in Pool.
+- A subsequent candidate fetch check excludes the hidden title.
+- A rated hidden title continues contributing its rating-based tag weight.
+- An unrated hidden title contributes no tag weight.
+- Restore returns the title to Pool and removes it from Hidden.
+- The hidden state survives local storage serialization and reload.
+
+### 22.2 Verification
+
+Runtime smoke test was performed in headless Chrome against the real `index.html` served from localhost.
+
+Observed result:
+
+```text
+status: PASS
+hiddenCards: 2
+poolCardsBeforeRestore: 0
+ratedHiddenWeight: 2
+unratedHiddenWeight: 0
+persistedAcrossReload: true
+restored: true
 ```
 
 ## 21. Current Fix Changelog — Remove Browse Cards Slider
