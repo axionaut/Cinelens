@@ -282,7 +282,6 @@ Recommended grouping:
 Row 1:
 
 - Top Recs slider
-- Batch slider
 - Since/year slider
 - Tag count/housekeeping status
 
@@ -388,7 +387,6 @@ state = {
   tagWeights: {},
   settings: {
     topN,
-    batchSize,
     minYear,
     watchCountry,
     platforms
@@ -1364,13 +1362,43 @@ The extracted inline JavaScript also passes:
 node --check
 ```
 
-## 20. Current Fix Changelog — Tagging Rethink, Reset and Browse Cards
+## 21. Current Fix Changelog — Remove Browse Cards Slider
+
+### 21.1 Problem fixed
+
+The old `Batch` / `Browse Cards` slider was redundant after infinite scrolling. It controlled how many fallback unrated browse cards appeared, but infinite scroll already owns progressive card reveal.
+
+### 21.2 Implementation changes
+
+- Removed the visible `Batch` / `Browse Cards` slider.
+- Removed `batchSize` from default settings and DOM loading.
+- Fallback unrated browse cards now use the same `recVisibleLimit` / infinite-scroll path as recommendations.
+- Internal fetch batching constants remain because they throttle Wikipedia requests and card refreshes; they are not user controls.
+
+### 21.3 Verification
+
+Runtime smoke test was performed in headless Chrome against the real `index.html` served from localhost.
+
+Expected control labels:
+
+```text
+Top Recs, Since
+```
+
+Expected behavior:
+
+```text
+No Batch label
+No Browse Cards label
+No batchSize input
+Fallback browse cards render from recVisibleLimit
+```
+
+## 20. Current Fix Changelog — Tagging Rethink and Reset
 
 ### 20.1 Problem fixed
 
 The app could show a large pool with zero tagged titles, leaving the recommendation engine with no usable brain. The descriptor-only tag path was too brittle: if contrastive phrase selection did not produce useful descriptors, a valid story-backed title could still end up effectively untagged.
-
-The visible `Batch` slider was also unclear. In the current UI it controls how many unrated browse cards appear before personalization, not a network fetch batch.
 
 Reset also needed to clear the entire app state, including the pool.
 
@@ -1382,7 +1410,6 @@ Reset also needed to clear the entire app state, including the pool.
   - no metadata-only scoring tags
   - no low-confidence filler tags
 - Routed Wikipedia parse, tag rebuild, housekeeping and rating-time tagging through the same story tag builder.
-- Renamed the visible `Batch` control to `Browse Cards`.
 - Added `Reset All` in the control deck.
 - `Reset All` clears:
   - ratings
@@ -1408,7 +1435,7 @@ hasTime: true
 Control label smoke:
 
 ```text
-labels: Top Recs, Browse Cards, Since
+labels: Top Recs, Since
 resetButton: true
 ```
 

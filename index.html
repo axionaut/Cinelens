@@ -441,11 +441,6 @@
     <label>Top Recs</label>
     <input type="range" id="topN" min="5" max="30" value="10" oninput="updateTopN(this.value)">
     <span class="val" id="topNVal">10</span>
-    <div class="sep-v"></div>
-    <label>Browse Cards</label>
-    <input type="range" id="batchSize" min="6" max="24" value="12" oninput="updateBatchSize(this.value)">
-    <span class="val" id="batchVal">12</span>
-    <div class="sep-v"></div>
     <label>Since</label>
     <input type="range" id="minYear" min="1940" max="2026" step="1" value="1970" oninput="updateMinYear(this.value)">
     <span class="val" id="minYearVal">1970</span>
@@ -712,7 +707,7 @@ const PROVIDER_ALIASES = {
 let state = {
   movies: {},
   tagWeights: {},
-  settings: { topN: 10, batchSize: 12, minYear: 1970, watchCountry: 'IN', platforms: ['Netflix','Prime Video','Hotstar'] },
+  settings: { topN: 10, minYear: 1970, watchCountry: 'IN', platforms: ['Netflix','Prime Video','Hotstar'] },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
   rejectedWikiTitles: {},
   poolFetched: false
@@ -1919,7 +1914,6 @@ function scheduleAutoExpand(delay=600) {
 function renderRecs() {
   if (activeTab === 'pool' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return;
   const grid = document.getElementById('recsGrid');
-  const batchSize = parseInt(document.getElementById('batchSize').value);
   const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
   grid.innerHTML = '';
 
@@ -1941,7 +1935,8 @@ function renderRecs() {
     }
   }
 
-  const batch = discoveryPool().slice(0, batchSize);
+  const browseLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
+  const batch = discoveryPool().slice(0, browseLimit);
   if (ratedTagged.length >= 3 && !poolExpansionInProgress && !autoFetchPaused) {
     lastAutoExpandAt = Date.now();
     scheduleAutoExpand(100);
@@ -2609,7 +2604,6 @@ function updateStats() {
   updateHKStatus('tags: '+countUniqueTags());
 }
 function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveLocalState(); renderRecs(); }
-function updateBatchSize(val) { document.getElementById('batchVal').textContent=val; state.settings.batchSize=parseInt(val); saveLocalState(); renderRecs(); }
 function updateMinYear(val) { document.getElementById('minYearVal').textContent=val; state.settings.minYear=parseInt(val); saveLocalState(); renderRecs(); }
 
 async function resetAllData() {
@@ -2664,8 +2658,6 @@ function loadLocalState() {
       state.drive.accessToken=getStoredDriveToken()||'';
       document.getElementById('topN').value=state.settings.topN;
       document.getElementById('topNVal').textContent=state.settings.topN;
-      document.getElementById('batchSize').value=state.settings.batchSize;
-      document.getElementById('batchVal').textContent=state.settings.batchSize;
       document.getElementById('minYear').value=state.settings.minYear;
       document.getElementById('minYearVal').textContent=state.settings.minYear;
       document.getElementById('watchCountry').value=state.settings.watchCountry||'IN';
