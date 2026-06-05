@@ -63,14 +63,10 @@
   .platform-btn:hover{border-color:var(--muted2);color:var(--text)}
   .platform-btn.danger{border-color:rgba(239,83,80,.45);color:#ff7c78}
   .platform-btn.danger:hover{border-color:var(--danger);background:rgba(239,83,80,.12);color:#fff}
-  .platform-select,.tmdb-token,.manual-title-input,.year-input,.concept-search{background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:'DM Mono',monospace;font-size:10px;padding:4px 7px;outline:none;color-scheme:dark}
+  .platform-select,.manual-title-input,.year-input,.concept-search{background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:'DM Mono',monospace;font-size:10px;padding:4px 7px;outline:none;color-scheme:dark}
   .platform-select option{background:#181614;color:#f6efe5}
   .year-input{width:72px}
-  .tmdb-token{width:170px}
   .manual-title-input{width:220px}
-  .where-line{display:flex;flex-wrap:wrap;gap:3px;margin-top:5px;font-family:'DM Mono',monospace;font-size:9px;color:var(--muted)}
-  .where-chip{border:1px solid var(--tag-border);background:rgba(255,255,255,.03);border-radius:3px;padding:2px 5px}
-  .where-chip.selected{border-color:var(--accent2);color:var(--accent);background:rgba(242,193,78,.07)}
 
   .movies-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:7px}
 
@@ -164,7 +160,6 @@
   .concept-detail-stat{font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);margin-top:3px}
   .concept-status{display:inline-flex;margin-top:8px;padding:2px 6px;border-radius:999px;background:rgba(0,0,0,.72);border:1px solid rgba(255,255,255,.16);font-family:'DM Mono',monospace;font-size:9px;color:var(--text)}
   .tag-delete-mode.active{background:rgba(239,83,80,.14);border-color:var(--danger);color:#ff8a86}
-  .availability-help{font-family:'DM Mono',monospace;font-size:9px;color:var(--muted);max-width:330px;line-height:1.45}
 
 
   /* FETCH PROGRESS */
@@ -195,7 +190,7 @@
   .settings-bar label{color:#d3bca4;font-size:11px}
   .settings-bar input[type=range]{width:112px}
   .platform-bar{margin:0;gap:8px}
-  .platform-btn,.platform-select,.tmdb-token,.manual-title-input,.btn{border-color:rgba(242,193,78,.14);background:rgba(255,255,255,.045);border-radius:5px}
+  .platform-btn,.platform-select,.manual-title-input,.btn{border-color:rgba(242,193,78,.14);background:rgba(255,255,255,.045);border-radius:5px}
   .platform-btn.active,.tab-btn.active{background:#ffd05a;color:#17100b;border-color:#ffd05a}
   .tab-bar{background:rgba(255,255,255,.055);border-color:rgba(242,193,78,.14);border-radius:6px}
   .tab-btn{padding:5px 12px;border-radius:4px}
@@ -218,9 +213,6 @@
   .star-rating{gap:4px;margin:4px 0 8px}
   .star{font-size:16px;color:#5d5552}
   .star:hover,.star.active{color:#ffd05a}
-  .where-line{margin:6px 0 7px;color:#a99380}
-  .where-chip{border-color:rgba(255,255,255,.11);background:rgba(255,255,255,.045);color:#cdb9a5}
-  .where-chip.selected{background:rgba(255,208,90,.12);border-color:rgba(255,208,90,.5);color:#ffd05a}
   .card-tags{gap:4px;margin-top:6px}
   .tag{font-size:9px;border-radius:999px;padding:3px 7px;background:rgba(255,255,255,.045);border-color:rgba(255,255,255,.09);color:#bca895}
   .tag.matched{border-color:rgba(255,208,90,.56);color:#ffd05a;background:rgba(255,208,90,.1)}
@@ -297,7 +289,7 @@
   .stats-bar{border-bottom-color:rgba(255,204,51,.13);gap:34px}
   .stat-val{color:var(--accent)}
   .settings-bar label,.platform-label,.section-count,.stat-label{color:var(--muted)}
-  .platform-btn,.platform-select,.tmdb-token,.manual-title-input,.btn,.tab-bar{background:rgba(255,255,255,.045);border-color:rgba(255,204,51,.16);color:var(--text)}
+  .platform-btn,.platform-select,.manual-title-input,.btn,.tab-bar{background:rgba(255,255,255,.045);border-color:rgba(255,204,51,.16);color:var(--text)}
   .platform-btn.active,.tab-btn.active{background:var(--accent);border-color:var(--accent);color:#15100a}
   .btn-warning{background:var(--accent);border-color:var(--accent);color:#15100a}
   .btn-warning:hover{background:var(--accent2);border-color:var(--accent2);color:#fff}
@@ -329,9 +321,6 @@
   .match-fill{background:linear-gradient(90deg,var(--accent2),var(--accent))}
   .star{color:#5f5750}
   .star:hover,.star.active{color:var(--accent)}
-  .where-line{color:#998b7d}
-  .where-chip{background:rgba(255,255,255,.045);border-color:rgba(255,255,255,.1);color:#c5b5a4}
-  .where-chip.selected{background:rgba(255,204,51,.12);border-color:rgba(255,204,51,.48);color:var(--accent)}
   .tag{background:rgba(255,255,255,.045);border-color:rgba(255,255,255,.1);color:#bcae9c;border-radius:999px}
   .tag.matched{background:rgba(255,204,51,.1);border-color:rgba(255,204,51,.52);color:var(--accent)}
   .card-act{background:rgba(255,255,255,.035);border-color:rgba(255,255,255,.11);color:#b9ab9a}
@@ -359,7 +348,6 @@
   .control-deck{display:flex;flex-direction:column;gap:14px}
   .settings-bar{margin:0!important;row-gap:12px;column-gap:14px;align-items:center}
   .platform-bar{margin:0!important;gap:10px 12px;align-items:center;min-height:30px}
-  .availability-row{padding-top:2px}
   .manual-add-row{padding-top:12px;border-top:1px solid rgba(255,204,51,.12)}
   .manual-title-input{width:min(360px,42vw)}
   @media(max-width:768px){
@@ -450,20 +438,6 @@
     </select>
     <div class="sep-v"></div>
     <span id="hkStatus" style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace">tags: 0</span>
-  </div>
-
-  <div class="platform-bar availability-row">
-    <span class="platform-label">Country</span>
-    <select class="platform-select" id="watchCountry" onchange="updateWatchCountry(this.value)">
-      <option value="IN">India</option>
-      <option value="US">United States</option>
-      <option value="GB">United Kingdom</option>
-    </select>
-    <input class="tmdb-token" id="tmdbToken" type="password" placeholder="free TMDB token/key" onchange="saveTmdbToken(this.value)">
-    <button class="platform-btn" onclick="refreshVisibleAvailability()" title="Refresh streaming providers for the first 12 visible cards using your TMDB token">Refresh Streaming Info</button>
-    <span class="availability-help">Card “where” opens JustWatch; with a TMDB token it refreshes providers inside CineLens.</span>
-    <span class="platform-label">Services</span>
-    <span id="platformBar"></span>
   </div>
 
   <div class="platform-bar manual-add-row">
@@ -731,18 +705,10 @@ let currentWikiAbortController = null;
 let currentSleepCancel = null;
 let autoFetchPaused = false;
 let autoExpandTimer = null;
-const OTT_PLATFORMS = ['Netflix','Prime Video','Hotstar','JioCinema','SonyLIV','ZEE5','Apple TV+','YouTube'];
-const PROVIDER_ALIASES = {
-  'Prime Video':['Prime Video','Amazon Prime Video'],
-  'Hotstar':['Hotstar','Disney Plus Hotstar','Disney+ Hotstar'],
-  'JioCinema':['JioCinema','Jio Cinema'],
-  'Apple TV+':['Apple TV Plus','Apple TV+'],
-  'YouTube':['YouTube','YouTube Premium']
-};
 let state = {
   movies: {},
   tagWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', watchCountry: 'IN', platforms: ['Netflix','Prime Video','Hotstar'], tagDeleteMode:false },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', tagDeleteMode:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   canonicalTagStats: { raw:0, canonical:0, rebuiltAt:'' },
@@ -1583,7 +1549,7 @@ async function expandPool(manual=true) {
   if (btn) { btn.disabled = false; btn.textContent = 'Stop Fetching'; }
   const mode = expansionMode();
   const chasingPerfect = needsMorePerfectRecommendations();
-  if (manual || chasingPerfect) showFetchProgress(chasingPerfect ? `Finding ${PERFECT_REC_TARGET} × 100% matches...` : `Expanding ${mode === 'all' ? 'movies and shows' : mode} from Wikipedia...`, 0, '');
+  if (manual || chasingPerfect) showFetchProgress(chasingPerfect ? `Finding ${PERFECT_REC_TARGET} strongest overlap matches...` : `Expanding ${mode === 'all' ? 'movies and shows' : mode} from Wikipedia...`, 0, '');
 
   let added = 0;
   let recovered = 0;
@@ -1617,7 +1583,7 @@ async function expandPool(manual=true) {
       if (manual || chasingPerfect || needsMorePerfectRecommendations()) {
         const perfectCount = perfectRecommendationCount(recommendationCandidates());
         showFetchProgress(
-          needsMorePerfectRecommendations() ? `Finding ${PERFECT_REC_TARGET} × 100% matches · ${perfectCount}/${PERFECT_REC_TARGET} ready` : `Finding new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} · added ${added}`,
+          needsMorePerfectRecommendations() ? `Finding ${PERFECT_REC_TARGET} strongest overlap matches · ${perfectCount}/${PERFECT_REC_TARGET} ready` : `Finding new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} · added ${added}`,
           Math.min(96, (attempts % 100)),
           title
         );
@@ -2242,7 +2208,6 @@ function matchesTab(m) {
 // RENDER
 // ─────────────────────────────────────────────
 function render() {
-  renderPlatformBar();
   updateStats();
   updateVisibleSections();
   if (activeTab === 'rated') renderRatedGrid();
@@ -2253,31 +2218,6 @@ function render() {
   else if (activeTab === 'rejected') renderRejectedGrid();
   else renderRecs();
   maybeAutoExpandPool();
-}
-
-function renderPlatformBar() {
-  const bar = document.getElementById('platformBar');
-  if (!bar) return;
-  state.settings.platforms = state.settings.platforms || [];
-  const country = document.getElementById('watchCountry');
-  const language = document.getElementById('languageFilter');
-  const token = document.getElementById('tmdbToken');
-  if (country) country.value = state.settings.watchCountry || 'IN';
-  if (language) language.value = state.settings.languageFilter || 'all';
-  if (token && !token.value) token.value = localStorage.getItem('cinelens_tmdb_token') || '';
-  bar.innerHTML = OTT_PLATFORMS.map(p => `<button class="platform-btn ${state.settings.platforms.includes(p)?'active':''}" onclick="togglePlatform('${p.replace(/'/g,"\\'")}')">${p}</button>`).join('');
-}
-
-function togglePlatform(platform) {
-  const set = new Set(state.settings.platforms||[]);
-  if (set.has(platform)) set.delete(platform); else set.add(platform);
-  state.settings.platforms = [...set];
-  saveLocalState(); renderPlatformBar(); renderActiveCards();
-}
-
-function updateWatchCountry(country) {
-  state.settings.watchCountry = country;
-  saveLocalState(); renderActiveCards();
 }
 
 function updateLanguageFilter(language) {
@@ -2294,34 +2234,8 @@ function renderActiveCards() {
   else renderRecs();
 }
 
-function saveTmdbToken(token) {
-  const clean = token.trim();
-  if (clean) localStorage.setItem('cinelens_tmdb_token', clean);
-  else localStorage.removeItem('cinelens_tmdb_token');
-  showToast(clean?'TMDB token saved':'TMDB token cleared', clean?'success':'');
-}
-
-function providerAliases(platform) { return PROVIDER_ALIASES[platform] || [platform]; }
-function providerMatchesPlatform(providerName, platform) {
-  return providerAliases(platform).some(alias => providerName.toLowerCase().includes(alias.toLowerCase()));
-}
-
-function availabilityProviders(movie, country=state.settings.watchCountry) {
-  const data = movie.availability?.countries?.[country];
-  if (!data) return [];
-  return [...(data.flatrate||[]), ...(data.free||[]), ...(data.ads||[])].map(p => p.provider_name || p.name).filter(Boolean);
-}
-
-function matchesSelectedPlatforms(movie) {
-  const selected = state.settings.platforms || [];
-  if (!selected.length) return true;
-  const providers = availabilityProviders(movie);
-  if (!providers.length) return true;
-  return selected.some(platform => providers.some(provider => providerMatchesPlatform(provider, platform)));
-}
-
 function discoveryPool() {
-  return Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && !m.watchlist && matchesTab(m) && matchesLanguageFilter(m) && meetsYearCutoff(m) && matchesSelectedPlatforms(m));
+  return Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && !m.watchlist && matchesTab(m) && matchesLanguageFilter(m) && meetsYearCutoff(m));
 }
 
 function matchesLanguageFilter(movie) {
@@ -2338,13 +2252,14 @@ function personalizedEnough() {
 }
 
 function recommendationCandidates() {
-  return scoreMovies().filter(x => matchesTab(x.movie) && matchesLanguageFilter(x.movie) && !x.movie.watchlist && meetsYearCutoff(x.movie) && matchesSelectedPlatforms(x.movie));
+  return scoreMovies().filter(x => matchesTab(x.movie) && matchesLanguageFilter(x.movie) && !x.movie.watchlist && meetsYearCutoff(x.movie));
 }
 
 function perfectRecommendationCount(scored) {
   if (!scored || !scored.length) return 0;
-  const maxScore = scored[0].score || 1;
-  return scored.filter(x => x.score / maxScore >= PERFECT_REC_MIN_RATIO).length;
+  const maxOverlap = scored[0].posOverlap || 0;
+  const maxFit = scored[0].tasteFit || 0;
+  return scored.filter(x => x.posOverlap === maxOverlap && (!maxFit || x.tasteFit / maxFit >= PERFECT_REC_MIN_RATIO)).length;
 }
 
 function needsMorePerfectRecommendations(target=PERFECT_REC_TARGET) {
@@ -2389,9 +2304,9 @@ function renderRecs() {
     }
     if (top.length) {
       document.getElementById('recCount').textContent = perfectCount < PERFECT_REC_TARGET
-        ? `finding ${PERFECT_REC_TARGET} × 100% matches · showing ${top.length} of ${scored.length}`
+        ? `finding ${PERFECT_REC_TARGET} strongest overlap matches · showing ${top.length} of ${scored.length}`
         : `showing ${top.length} of ${scored.length} matches`;
-      top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, maxScore:scored[0]?.score||1 })));
+      top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, posOverlap:item.posOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit })));
       return;
     }
   }
@@ -2402,7 +2317,7 @@ function renderRecs() {
     lastAutoExpandAt = Date.now();
     scheduleAutoExpand(100);
   }
-  document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building 100% matches · showing ${batch.length} unrated`;
+  document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building stronger overlap matches · showing ${batch.length} unrated`;
   if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expanding the pool in the background.</p></div>`; return; }
   batch.forEach(m => grid.appendChild(buildCard(m, {})));
 }
@@ -2590,11 +2505,11 @@ function restoreManualStars() {
   box.querySelectorAll('.star').forEach(st => st.classList.remove('active'));
 }
 function buildCard(movie, opts={}) {
-  const { rank, score, matchedTags, maxScore, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextConcept } = opts;
+  const { rank, score, matchedTags, posOverlap, negativeOverlap, tasteFit, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextConcept } = opts;
   const card = document.createElement('div');
   card.className = 'movie-card' + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
-  const matchPct = maxScore ? Math.round((score/maxScore)*100) : 0;
+  const matchPct = rank ? Math.round((tasteFit || 0) * 100) : 0;
   const safeId = movie.id.replace(/'/g,"\\'");
   card.innerHTML = `
     <div class="card-poster">
@@ -2611,18 +2526,16 @@ function buildCard(movie, opts={}) {
         ${movie.thumbnailUrl ? `<img class="card-thumb" src="${movie.thumbnailUrl}" alt="" loading="lazy" decoding="async">` : ''}
         <div class="card-head-copy"><div class="card-title">${movie.title}</div>
         <div class="card-meta">${movie.language}·${movie.country}·${movie.year||'?'}</div>
-        ${rank?`<div class="match-label">${matchPct}% match</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
+        ${rank?`<div class="match-label">${posOverlap || 0} shared concept${posOverlap===1?'':'s'} · ${matchPct}% weighted fit${negativeOverlap?` · ${negativeOverlap} disliked`:''}</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
       </div>
       ${renderStars(safeId, movie.rating || 0)}
       ${poolView?`<div class="pool-card-note">${cardStatusLabel(movie)}${movie.retagMessage ? ` · ${movie.retagMessage}` : ''}</div>`:''}
       ${movie.retagStatus === 'failed' || movie.needsManualUrl ? renderWikiRepairRow(safeId, movie.retagMessage) : ''}
-      <div class="where-line" id="where-${movie.id}">${renderAvailability(movie)}</div>
       <div class="card-tags" id="tags-${movie.id}">${renderConceptChips(movie, safeId, movie._expanded, matchedTags, contextConcept)}</div>
       <div class="card-actions">
         ${movie.tagged?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ concepts'}</button>`:''}
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
         ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
-        <button class="card-act watch" title="Open JustWatch, or refresh providers here when a TMDB token is saved" onclick="checkAvailability('${safeId}',event)">where ↗</button>
         <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
       </div>
       ${contextLabel ? `<div class="concept-status">${contextLabel}</div>` : ''}
@@ -2717,16 +2630,16 @@ function conceptChipHtml(tag, movieId, kind='', impact='') {
 function cardConceptGroups(movie, matchedTags=null, contextConcept='') {
   const concepts=scoringTags(movie).filter(conceptIsPresentable).filter(tag=>tag!==contextConcept);
   const matched=matchedTags || new Set();
-  const why=concepts.filter(tag=>matched.has?.(tag) && Number(state.tagWeights[tag]||0)>0)
+  const allWhy=concepts.filter(tag=>matched.has?.(tag) && Number(state.tagWeights[tag]||0)>0)
     .sort((a,b)=>(state.tagWeights[b]*conceptSpecificity(b))-(state.tagWeights[a]*conceptSpecificity(a)))
-    .slice(0,2);
+  const why=allWhy.slice(0,2);
   const whySet=new Set(why);
   const distinctive=concepts.filter(tag=>!whySet.has(tag) && conceptSpecificity(tag)>=0.2)
     .sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||Math.abs(state.tagWeights[b]||0)-Math.abs(state.tagWeights[a]||0)||a.localeCompare(b))
     .slice(0,3);
   const shown=new Set([...why,...distinctive]);
   const more=concepts.filter(tag=>!shown.has(tag)).sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||a.localeCompare(b));
-  return {why,distinctive,more};
+  return {why,distinctive,more,matchedTotal:allWhy.length};
 }
 
 function renderConceptChips(movie, movieId, expanded, matchedTags=null, contextConcept='') {
@@ -2738,7 +2651,9 @@ function renderConceptChips(movie, movieId, expanded, matchedTags=null, contextC
   }).join('')}</div></div>`:'';
   const visibleMore=expanded?groups.more.slice(0,12):[];
   const hiddenCount=groups.more.length-visibleMore.length;
-  return `<div class="concept-explanation">${line('Why',groups.why,'why')}${line('Distinct',groups.distinctive)}${line('More',visibleMore)}${!expanded&&groups.more.length?`<div class="concept-line"><span class="concept-line-label"></span><span class="concept-chip">+${groups.more.length} more</span></div>`:''}${expanded&&hiddenCount>0?`<div class="concept-line"><span class="concept-line-label"></span><span class="concept-chip">+${hiddenCount} more</span></div>`:''}</div>`;
+  const sharedRemainder=Math.max(0,groups.matchedTotal-groups.why.length);
+  const sharedNote=sharedRemainder?`<span class="concept-chip" title="The recommendation score uses all ${groups.matchedTotal} shared positive concepts">+${sharedRemainder} shared</span>`:'';
+  return `<div class="concept-explanation">${line('Why',groups.why,'why').replace('</div></div>',`${sharedNote}</div></div>`)}${line('Distinct',groups.distinctive)}${line('More',visibleMore)}${!expanded&&groups.more.length?`<div class="concept-line"><span class="concept-line-label"></span><span class="concept-chip">+${groups.more.length} more</span></div>`:''}${expanded&&hiddenCount>0?`<div class="concept-line"><span class="concept-line-label"></span><span class="concept-chip">+${hiddenCount} more</span></div>`:''}</div>`;
 }
 
 function handleConceptClick(id, tag, event) {
@@ -2759,21 +2674,6 @@ function removeTagFromMovie(id, tag, event) {
   syncDrive();
   render();
   showToast(`Removed concept from "${movie.title}": ${tag}`, 'success');
-}
-
-function renderAvailability(movie) {
-  const country = state.settings.watchCountry || 'IN';
-  const providers = availabilityProviders(movie, country);
-  if (!providers.length) return `<span>where: unknown · ${country}</span>`;
-  return providers.slice(0,5).map(p => {
-    const selected = (state.settings.platforms||[]).some(platform => providerMatchesPlatform(p, platform));
-    return `<span class="where-chip ${selected?'selected':''}">${p}</span>`;
-  }).join('') + `<span>${country}</span>`;
-}
-
-function justWatchUrl(movie) {
-  const paths = {IN:'in', US:'us', GB:'uk'};
-  return `https://www.justwatch.com/${paths[state.settings.watchCountry]||'in'}/search?q=${encodeURIComponent(movie.title + ' ' + (movie.year||''))}`;
 }
 
 function posterGrad(title) {
@@ -2805,23 +2705,25 @@ function computeTagWeights() {
 
 function scoreMovies() {
   computeTagWeights();
+  const totalPositiveWeight=Object.entries(state.tagWeights).reduce((sum,[tag,weight])=>weight>0?sum+weight*conceptSpecificity(tag):sum,0);
   return Object.values(state.movies)
     .filter(m => m.rating===0&&scoringTags(m).length>0)
     .map(m => {
-      let score=0, posOverlap=0, positiveScore=0, negativePenalty=0;
+      let score=0, posOverlap=0, negativeOverlap=0, positiveScore=0, negativePenalty=0;
       const matched=new Set();
       const tags = scoringTags(m);
       tags.forEach(t => {
         const w=state.tagWeights[t] || 0;
         const specificity=conceptSpecificity(t);
         if (w>0) { positiveScore+=w*specificity; matched.add(t); posOverlap++; }
-        else if (w<0) negativePenalty+=Math.abs(w)*specificity*0.5;
+        else if (w<0) { negativePenalty+=Math.abs(w)*specificity*0.5; negativeOverlap++; }
       });
       score = positiveScore - negativePenalty;
-      return { movie:m, score, matchedTags:matched, posOverlap, positiveScore };
+      const tasteFit=totalPositiveWeight?Math.max(0,Math.min(1,positiveScore/totalPositiveWeight)):0;
+      return { movie:m, score, matchedTags:matched, posOverlap, negativeOverlap, positiveScore, negativePenalty, tasteFit };
     })
     .filter(x => x.posOverlap>0&&x.positiveScore>0&&x.score>0)
-    .sort((a,b) => b.score-a.score||b.posOverlap-a.posOverlap);
+    .sort((a,b) => b.posOverlap-a.posOverlap||a.negativeOverlap-b.negativeOverlap||b.score-a.score||b.positiveScore-a.positiveScore||a.movie.title.localeCompare(b.movie.title));
 }
 
 // ─────────────────────────────────────────────
@@ -2886,74 +2788,12 @@ function toggleWatchlist(id, e) {
 }
 function skipMovie(id, e) { toggleWatchlist(id, e); }
 
-function tmdbToken() { return localStorage.getItem('cinelens_tmdb_token') || ''; }
-function tmdbUrl(path, params={}) {
-  const token = tmdbToken();
-  const qs = new URLSearchParams(params);
-  if (token && !token.startsWith('ey')) qs.set('api_key', token);
-  return `https://api.themoviedb.org/3${path}?${qs.toString()}`;
-}
-function tmdbHeaders() {
-  const token = tmdbToken();
-  return token && token.startsWith('ey') ? {Authorization:`Bearer ${token}`} : {};
-}
-async function tmdbFetch(path, params={}) {
-  const resp = await fetch(tmdbUrl(path, params), {headers: tmdbHeaders()});
-  if (!resp.ok) throw new Error('TMDB request failed');
-  return resp.json();
-}
-async function checkAvailability(id, e) {
-  if (e) e.stopPropagation();
-  const movie = state.movies[id];
-  if (!movie) return;
-  const token = tmdbToken();
-  if (!token) { window.open(justWatchUrl(movie), '_blank', 'noopener'); return; }
-  const el = document.getElementById('where-'+id);
-  if (el) el.textContent = 'checking...';
-  try {
-    await fetchAvailability(movie);
-    saveLocalState(); render();
-    showToast('Availability updated','success');
-  } catch(err) {
-    if (el) el.textContent = 'where: unavailable';
-    showToast('Availability lookup failed','error');
-  }
-}
-async function refreshVisibleAvailability() {
-  if (!tmdbToken()) { showToast('Save a free TMDB token to refresh streaming providers inside CineLens. Card “where” still opens JustWatch.', 'error'); return; }
-  const visible = [...document.querySelectorAll('.movie-card')].map(el => state.movies[el.id.replace('card-','')]).filter(Boolean).slice(0,12);
-  for (const movie of visible) {
-    try { await fetchAvailability(movie); } catch(e) {}
-  }
-  saveLocalState(); render();
-  showToast(`Streaming info refreshed for ${visible.length} visible titles`, 'success');
-}
-async function fetchAvailability(movie) {
-  const country = state.settings.watchCountry || 'IN';
-  if (movie.availability?.countries?.[country]) return movie.availability;
-  const isTv = !!movie.format;
-  const searchPath = isTv ? '/search/tv' : '/search/movie';
-  const searchParams = isTv ? {query: movie.title, first_air_date_year: movie.year||''} : {query: movie.title, year: movie.year||''};
-  const search = await tmdbFetch(searchPath, searchParams);
-  const best = (search.results||[])[0];
-  if (!best) throw new Error('No TMDB match');
-  const id = best.id;
-  const providers = await tmdbFetch(isTv ? `/tv/${id}/watch/providers` : `/movie/${id}/watch/providers`);
-  movie.availability = movie.availability || {countries:{}};
-  movie.availability.tmdbId = id;
-  movie.availability.tmdbType = isTv ? 'tv' : 'movie';
-  movie.availability.countries[country] = providers.results?.[country] || {flatrate:[],free:[],ads:[],rent:[],buy:[]};
-  movie.availability.updatedAt = new Date().toISOString();
-  return movie.availability;
-}
-
 function applyFreshWikiMovie(oldId, fresh, previous={}) {
   const preserved = {
     rating: Number(previous.rating || 0),
     watchlist: !!previous.watchlist,
     skipped: !!previous.skipped,
     userNotes: previous.userNotes || '',
-    availability: previous.availability || fresh.availability,
     suppressedConcepts: previous.suppressedConcepts || [],
     thumbnailUrl: fresh.thumbnailUrl || previous.thumbnailUrl || '',
     // Explicitly preserve wiki metadata if fresh doesn't have it
@@ -3319,9 +3159,7 @@ function loadLocalState() {
       }
       state.drive.accessToken=getStoredDriveToken()||'';
       document.getElementById('minYear').value=state.settings.minYear;
-      document.getElementById('watchCountry').value=state.settings.watchCountry||'IN';
       document.getElementById('languageFilter').value=state.settings.languageFilter||'all';
-      const t=localStorage.getItem('cinelens_tmdb_token'); if(t) document.getElementById('tmdbToken').value=t;
       
       // Ensure wikiPageId is reconstructed for all Wikipedia movies
       Object.values(state.movies || {}).forEach(m => {
@@ -3571,7 +3409,7 @@ async function loadFromDrive() {
     if (!resp.ok) throw new Error('Drive load failed');
     const d=await resp.json();
     let cleaned = 0;
-    if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};if(d.hiddenTitles)state.hiddenTitles=d.hiddenTitles;if(d.canonicalTagStats)state.canonicalTagStats=d.canonicalTagStats;if(d.rejectedWikiTitles)state.rejectedWikiTitles=d.rejectedWikiTitles;if(d.rejectedRefresh)state.rejectedRefresh={...state.rejectedRefresh,...d.rejectedRefresh};ensureRejectedRefreshState(!d.rejectedRefresh);state.settings.platforms=state.settings.platforms||[];state.settings.watchCountry=state.settings.watchCountry||'IN';migrateLegacyPoolItems();cleaned=cleanContaminatedTags(true);saveLocalState();render();showToast('Loaded from Drive','success');}
+    if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};if(d.hiddenTitles)state.hiddenTitles=d.hiddenTitles;if(d.canonicalTagStats)state.canonicalTagStats=d.canonicalTagStats;if(d.rejectedWikiTitles)state.rejectedWikiTitles=d.rejectedWikiTitles;if(d.rejectedRefresh)state.rejectedRefresh={...state.rejectedRefresh,...d.rejectedRefresh};ensureRejectedRefreshState(!d.rejectedRefresh);migrateLegacyPoolItems();cleaned=cleanContaminatedTags(true);saveLocalState();render();showToast('Loaded from Drive','success');}
     state.drive.connected=true;
     setDriveStatus('connected');
     if (cleaned) await syncDrive(false);

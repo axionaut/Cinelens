@@ -16,7 +16,6 @@ The app is currently implemented as one complete HTML file containing:
 - CSS styling
 - JavaScript app logic
 - Wikipedia API integration
-- TMDB availability lookup
 - Google Drive sync
 - Local storage persistence
 
@@ -57,17 +56,17 @@ The app must reject or skip:
 Once the user has rated enough titles, automatic fetching should continue in the background until the app has at least:
 
 ```text
-5 recommendations at 100% match
+5 recommendations at the strongest available overlap tier
 ```
 
-A 100% match means the title’s recommendation score equals or nearly equals the current highest recommendation score. The implementation currently uses:
+The strongest tier means the title shares the current maximum number of positive concepts, then reaches nearly the best weighted fit inside that overlap tier. The implementation uses:
 
 ```js
 const PERFECT_REC_TARGET = 5;
 const PERFECT_REC_MIN_RATIO = 0.995;
 ```
 
-This is acceptable because floating-point scoring can make exact equality brittle.
+The ratio is used only inside the maximum-overlap tier because floating-point weighted fit can make exact equality brittle.
 
 ### 3.3 Manual Add
 
@@ -110,7 +109,6 @@ Pool cards must support:
 - Retag button
 - Watchlist button
 - Delete/remove button
-- Availability check where relevant
 
 ### 3.5 Rejected Visibility
 
@@ -288,13 +286,6 @@ Row 1:
 
 Row 2:
 
-- Country selector
-- TMDB token/key input
-- Refresh Streaming Info button
-- Service filters
-
-Row 3:
-
 - Add Wikipedia URL input
 - Fetch from URL button
 - Drive status
@@ -302,25 +293,6 @@ Row 3:
 - Expand Pool / Stop Fetching button
 
 The previous huddling issue came from cramped flex wrapping. Controls need `row-gap`, `column-gap` and/or dedicated rows.
-
-### 4.5 Streaming Availability Actions
-
-The bulk button is labeled:
-
-```text
-Refresh Streaming Info
-```
-
-Function:
-
-- Refreshes streaming/watch availability for up to 12 visible cards.
-- Uses TMDB watch providers.
-- Uses the selected country.
-- Does not tag.
-- Does not add recommendations.
-- Does not process the entire pool.
-- Requires a saved TMDB token and explains that requirement when absent.
-- Each card also has `where`: without TMDB it opens JustWatch; with TMDB it refreshes providers in CineLens.
 
 ### 4.6 Cards
 
@@ -333,14 +305,12 @@ Cards should include:
 - Year / language / country / format metadata
 - Match bar where applicable
 - Star rating control
-- Availability chips/line
 - Canonical concepts ordered by relevance
 - Actions
 
 Actions should include, where relevant:
 
 - Re-tag
-- Where / streaming lookup
 - Watchlist / Remove from Watchlist
 - Delete/remove title
 - Expand/collapse tags
@@ -390,8 +360,8 @@ state = {
   settings: {
     topN,
     minYear,
-    watchCountry,
-    platforms
+    languageFilter,
+    tagDeleteMode
   },
   drive: {
     connected,
@@ -427,8 +397,7 @@ A processed title should contain:
   watchlist,
   source,
   wikiTitle,
-  pageTitle,
-  availability
+  pageTitle
 }
 ```
 
@@ -879,23 +848,23 @@ Tags from rated titles update `state.tagWeights`.
 
 Recommendation candidates are unrated titles from the pool that match selected scope and filters.
 
-A candidate score is calculated from scoring tags and tag weights.
+A candidate is ranked first by the number of positively weighted concepts it shares with the user's rated-title taste profile. Negative overlap and weighted contribution then refine that order.
 
-Recommendations must be sorted by score, not alphabetically.
+Recommendations must be sorted by positive overlap count, negative overlap count and then weighted score, not alphabetically.
 
 Alphabetical order may be used only as a tie-breaker.
 
-### 8.3 100% Match Display
+### 8.3 Match Display
 
-Match percentage is relative to current highest score:
+Match percentage is absolute weighted taste coverage:
 
 ```js
-matchPct = Math.round((score / maxScore) * 100)
+matchPct = Math.round(positiveWeightedContribution / totalPositiveTasteWeight * 100)
 ```
 
-The first ranked recommendation will normally show 100%.
+The first ranked recommendation is not automatically labeled 100%.
 
-The target of 5 × 100% means at least 5 recommendations at or near the top score, using `PERFECT_REC_MIN_RATIO`.
+The background target means at least five recommendations in the strongest positive-overlap tier and near its best weighted fit, using `PERFECT_REC_MIN_RATIO`.
 
 ### 8.4 Recommendation Candidate Filters
 
@@ -905,7 +874,6 @@ Candidate must:
 - Be tagged
 - Meet minimum year cutoff
 - Match selected tab context when applicable
-- Match selected platform availability if platform filtering is active, once availability is known
 
 ## 9. Persistence Specification
 
@@ -922,12 +890,6 @@ Data saved:
 - movies
 - settings
 - rejectedWikiTitles
-
-TMDB token currently stored separately:
-
-```js
-cinelens_tmdb_token
-```
 
 ### 9.2 Google Drive Sync
 
@@ -1226,7 +1188,6 @@ wiki.js
 tagger.js
 recommendations.js
 drive.js
-tmdb.js
 storage.js
 ```
 
@@ -1429,7 +1390,7 @@ node --check script.js
 
 - Added explicit section display handling so visible grids use `display:grid`, visible headers/controls use `display:flex`, and other visible sections use `display:block`.
 - Updated tag removal to remove from `descriptorTags` and recompute tag weights.
-- Added fresh Wikipedia replacement helpers for retagging while preserving rating, watchlist, skipped state, notes and availability.
+- Added fresh Wikipedia replacement helpers for retagging while preserving rating, watchlist, skipped state and notes.
 - Made retag failure non-destructive with a clear “needs correct Wikipedia URL” state.
 - Made rejected retry call the Wikipedia fetch pipeline directly.
 - Wrapped manual URL fetch in `try/finally`.
@@ -1504,7 +1465,7 @@ The Tags tab is a first-class concept explorer rather than a chip cloud with a n
 - The selected concept shows total, Rated, In Pool and Hidden counts.
 - Title cards can be filtered by All titles, Rated, In Pool or Hidden.
 - Large concept groups render 40 cards at a time with an explicit show-more action.
-- Shared cards retain the actions appropriate to their state: rate/rerate, watchlist, retag, availability, hide, restore or forget.
+- Shared cards retain the actions appropriate to their state: rate/rerate, watchlist, retag, hide, restore or forget.
 
 ### 27.2 Concepts on cards
 
@@ -1526,16 +1487,9 @@ The tiny tag-removal cross is replaced by a single explicit toggle:
 
 ### 27.4 Discovery controls
 
-- The country selector uses an explicit dark color scheme so options remain readable.
 - The year range slider is replaced by a numeric year field.
 - A language selector supports Hindi + English, Hindi only and English only.
-- Year, language, country and platform changes update only the active card workspace.
-
-### 27.5 Availability clarity
-
-- The bulk action is named `Refresh Streaming Info` and explains that it refreshes up to 12 visible cards through TMDB.
-- A card's `where` action opens JustWatch when no TMDB token is saved.
-- With a TMDB token, `where` refreshes and displays providers inside CineLens.
+- Year and language changes update only the active card workspace.
 
 ### 27.6 Wikipedia thumbnails
 
@@ -1552,7 +1506,7 @@ The tiny tag-removal cross is replaced by a single explicit toggle:
 
 ### 27.8 Required verification and delivery
 
-This release requires a real headless-Chrome smoke test covering concept selection, shared cards, card rerating, permanent suppression through retag/rebuild, filters, active-tab-only rendering, availability labels and lazy thumbnails. It also requires JavaScript syntax and diff checks, deletion of all temporary files/profiles/logs, this specification update, a commit and a push.
+This release requires a real headless-Chrome smoke test covering concept selection, shared cards, card rerating, permanent suppression through retag/rebuild, filters, active-tab-only rendering and lazy thumbnails. It also requires JavaScript syntax and diff checks, deletion of all temporary files/profiles/logs, this specification update, a commit and a push.
 
 Current smoke result:
 
@@ -1565,8 +1519,6 @@ rerating from shared card: true
 suppression survives canonical rebuild: true
 Hindi-only filter: true
 numeric year field: true
-dark country selector: true
-availability explanation: true
 concept click toggle: true
 lazy thumbnail: true
 Wikipedia thumbnail parsed: true
@@ -1634,6 +1586,76 @@ Distinct limited to three: true
 numeric chip ranks removed: true
 selected workspace concept omitted from its cards: true
 computed background: linear-gradient(rgb(16,16,16), rgb(8,8,8), rgb(5,5,5))
+```
+
+## 29. Overlap-First Recommendation Ranking
+
+Recommendation ranking must use the full set of concepts shared with positively rated titles. The two concepts shown in the collapsed `Why` row are only a readable explanation preview.
+
+Ranking order is lexicographic:
+
+1. More positively weighted shared concepts.
+2. Fewer concepts carrying negative taste weight.
+3. Higher net weighted contribution after corpus-specificity adjustment.
+4. Higher positive weighted contribution, then stable title order.
+
+The weighted contribution still combines rating-derived taste weight with concept specificity, but weight must not allow a one-concept match to outrank a title matching many positive concepts.
+
+Cards show:
+
+- The real number of shared positive concepts.
+- Weighted taste coverage as a percentage of the user's total positive concept weight, not a percentage relative to the current top recommendation.
+- The number of disliked concepts when present.
+- Up to two strongest `Why` concepts plus a `+N shared` indicator proving the score uses all shared concepts.
+
+The previous `100% match` wording is removed because a top-relative score could label a weak two-concept match as 100%. Background expansion now refers to `strongest overlap matches`.
+
+### 29.1 Required verification
+
+Smoke testing must prove that a lower-weight title sharing three positive concepts ranks above a higher-weight title sharing two, negative overlap breaks equal-positive-overlap ties, weighted score orders otherwise equal candidates, taste-fit percentage is absolute coverage, and the card reports the complete shared count while previewing at most two concepts.
+
+Current smoke result:
+
+```text
+status: PASS
+three lower-weight shared concepts outrank two higher-weight concepts: true
+negative overlap loses equal-positive-overlap tie: true
+weighted score orders equal-overlap clean candidates: true
+weighted fit is absolute taste coverage: true
+full shared-concept count shown: true
+Why preview limited to two: true
+remaining shared concepts declared: true
+top result not forced to 100%: true
+```
+
+## 30. Availability Subsystem Removal
+
+Streaming availability is removed completely because it was unreliable and added controls, network code and persisted state without improving recommendations.
+
+Removed surface and behavior:
+
+- Country selector
+- TMDB token input and local-storage token
+- Service/provider filters
+- Bulk availability refresh
+- Per-card `where` / JustWatch action
+- Provider chips and platform filtering
+- TMDB request helpers and watch-provider lookup
+- Availability preservation during retag
+- Availability-related settings and specification requirements
+
+No compatibility shim or hidden availability code remains. Existing saved availability fields may remain inert inside older movie records, but the app neither reads nor writes them.
+
+### 30.1 Required verification
+
+Smoke and static checks must prove that no country, token, service, provider or `where` controls render; recommendation candidates are unaffected by saved provider data; no TMDB or JustWatch requests/functions remain; and overlap-first recommendation behavior still passes after removal.
+
+Current smoke result:
+
+```text
+availability controls absent: true
+availability functions absent: true
+overlap-first recommendation smoke still passes: true
 ```
 
 ## 22. Persistent Hidden Titles
