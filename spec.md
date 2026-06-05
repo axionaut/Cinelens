@@ -1363,3 +1363,127 @@ The extracted inline JavaScript also passes:
 ```text
 node --check
 ```
+
+## 20. Current Fix Changelog — Tagging Rethink, Reset and Browse Cards
+
+### 20.1 Problem fixed
+
+The app could show a large pool with zero tagged titles, leaving the recommendation engine with no usable brain. The descriptor-only tag path was too brittle: if contrastive phrase selection did not produce useful descriptors, a valid story-backed title could still end up effectively untagged.
+
+The visible `Batch` slider was also unclear. In the current UI it controls how many unrated browse cards appear before personalization, not a network fetch batch.
+
+Reset also needed to clear the entire app state, including the pool.
+
+### 20.2 Implementation changes
+
+- Added a hybrid story tag builder:
+  - evidence-backed tags from plot/story text
+  - contrastive plot phrases from the same story text
+  - no metadata-only scoring tags
+  - no low-confidence filler tags
+- Routed Wikipedia parse, tag rebuild, housekeeping and rating-time tagging through the same story tag builder.
+- Renamed the visible `Batch` control to `Browse Cards`.
+- Added `Reset All` in the control deck.
+- `Reset All` clears:
+  - ratings
+  - watchlist state
+  - pool
+  - rejected titles
+  - tag weights / Tag Brain
+  - saved local state
+- If Drive is connected, reset syncs the cleared state so the old pool does not return from Drive.
+
+### 20.3 Verification
+
+Runtime smoke test was performed in headless Chrome against the real `index.html` served from localhost.
+
+Story tagging smoke:
+
+```text
+builtTagCount: 21
+hasCrime: true
+hasTime: true
+```
+
+Control label smoke:
+
+```text
+labels: Top Recs, Browse Cards, Since
+resetButton: true
+```
+
+Reset smoke:
+
+```text
+resetMovieCount: 0
+resetRejectedCount: 0
+savedMovieCount: 0
+savedRejectedCount: 0
+statPool: 0
+statTags: 0
+```
+
+The extracted inline JavaScript also passes:
+
+```text
+node --check
+```
+
+## 19. Current Fix Changelog — Retag Failure Must Be Actionable
+
+### 19.1 Problem fixed
+
+Retag on a rated/legacy title could start Wikipedia fetching and then leave the user with a toast such as:
+
+```text
+Could not re-tag "Inception". Paste its Wikipedia URL.
+```
+
+That was not actionable in context because the card did not provide a place to paste the URL.
+
+### 19.2 Implementation changes
+
+- Retag lookup now tries additional common Wikipedia title variants:
+  - `Title (film)`
+  - `Title (TV series)`
+  - `Title (year film)`
+  - `Title (year TV series)`
+  - search-style `Title film` / `Title television series`
+- Leaving recommendation views now cancels pending auto-expand timers and restores the header action to `Expand Pool`.
+- Non-manual auto expansion refuses to start unless the active tab is a recommendation tab.
+- Retag pauses any active pool expansion before using Wikipedia.
+- Retag failure is now actionable on the card:
+  - shows a Wikipedia URL input
+  - shows a `repair` button
+  - preserves the existing rating/watchlist data while repairing from the pasted URL
+
+### 19.3 Verification
+
+Runtime smoke test was performed in headless Chrome against the real `index.html` served from localhost.
+
+Rated tab / fetch-state smoke:
+
+```text
+activeTab: Rated
+ratedGridDisplay: grid
+ratedCards: 3
+expandText: ＋ Expand Pool
+fetchVisible: false
+```
+
+Retag failure smoke:
+
+```text
+activeTab: Rated
+repairRows: 1
+repairInputPlaceholder: paste Wikipedia URL
+repairButtonText: repair
+fetchVisible: false
+expandText: ＋ Expand Pool
+```
+
+The extracted inline JavaScript also passes:
+
+```text
+node --check
+```

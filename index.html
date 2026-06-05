@@ -61,6 +61,8 @@
   .platform-btn{padding:4px 8px;border-radius:3px;font-size:10px;font-family:'DM Mono',monospace;border:1px solid var(--border);background:rgba(36,28,23,.72);color:var(--muted);cursor:pointer;transition:all .15s}
   .platform-btn.active{border-color:var(--accent2);color:var(--accent);background:rgba(242,193,78,.08)}
   .platform-btn:hover{border-color:var(--muted2);color:var(--text)}
+  .platform-btn.danger{border-color:rgba(239,83,80,.45);color:#ff7c78}
+  .platform-btn.danger:hover{border-color:var(--danger);background:rgba(239,83,80,.12);color:#fff}
   .platform-select,.tmdb-token,.manual-title-input{background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:'DM Mono',monospace;font-size:10px;padding:4px 7px;outline:none}
   .tmdb-token{width:170px}
   .manual-title-input{width:220px}
@@ -221,6 +223,9 @@
   .tag.matched{border-color:rgba(255,208,90,.56);color:#ffd05a;background:rgba(255,208,90,.1)}
   .card-actions{gap:6px;margin-top:10px}
   .card-act{font-size:10px;border-radius:5px;padding:5px 8px;background:rgba(255,255,255,.035)}
+  .wiki-repair-row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:7px 0 6px;font-family:'DM Mono',monospace;font-size:9px;color:var(--danger)}
+  .wiki-repair-input{flex:1 1 180px;min-width:0;background:rgba(255,255,255,.045);border:1px solid rgba(239,83,80,.38);border-radius:5px;color:var(--text);font-family:'DM Mono',monospace;font-size:10px;padding:5px 7px;outline:none}
+  .wiki-repair-input:focus{border-color:var(--accent)}
   .empty-state{padding:56px 20px;border:1px dashed rgba(255,255,255,.1);border-radius:8px;background:rgba(255,255,255,.025)}
   .tag-brain-grid{max-height:260px;overflow:auto;padding:12px;background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.08);border-radius:8px}
   .tb-tag{border-radius:999px}
@@ -437,7 +442,7 @@
     <input type="range" id="topN" min="5" max="30" value="10" oninput="updateTopN(this.value)">
     <span class="val" id="topNVal">10</span>
     <div class="sep-v"></div>
-    <label>Batch</label>
+    <label>Browse Cards</label>
     <input type="range" id="batchSize" min="6" max="24" value="12" oninput="updateBatchSize(this.value)">
     <span class="val" id="batchVal">12</span>
     <div class="sep-v"></div>
@@ -465,6 +470,7 @@
     <span class="platform-label">Add Wikipedia URL</span>
     <input class="manual-title-input" id="manualTitle" type="text" placeholder="paste Wikipedia movie/show URL" onkeydown="handleManualTitleKey(event)">
     <button class="platform-btn" onclick="addManualTitle()" id="manualAddBtn">fetch from URL</button>
+    <button class="platform-btn danger" onclick="resetAllData()">Reset All</button>
   </div>
   </div>
 
@@ -694,6 +700,7 @@ let recVisibleLimit = 10;
 let currentWikiAbortController = null;
 let currentSleepCancel = null;
 let autoFetchPaused = false;
+let autoExpandTimer = null;
 const OTT_PLATFORMS = ['Netflix','Prime Video','Hotstar','JioCinema','SonyLIV','ZEE5','Apple TV+','YouTube'];
 const PROVIDER_ALIASES = {
   'Prime Video':['Prime Video','Amazon Prime Video'],
@@ -818,6 +825,24 @@ function selectContrastiveDescriptors(raw, stats) {
   }).sort((a,b) => b.score - a.score || a.phrase.localeCompare(b.phrase)).slice(0, 12).map(x => normaliseTagName(x.phrase));
 }
 
+function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats()) {
+  const rawDescriptors = extractRawDescriptors(storyText || '');
+  const descriptors = selectContrastiveDescriptors(rawDescriptors, stats).slice(0, 10);
+  const evidenceTags = cleanTagArray(deriveTagsFromText(storyText || '', meta), meta, false)
+    .filter(t => !isMetaTag(t))
+    .filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t))
+    .slice(0, 14);
+  const tags = cleanTagArray([...evidenceTags, ...descriptors], meta, false).slice(0, 22);
+  return {
+    rawDescriptors,
+    descriptorTags: tags,
+    tags,
+    coreTags: tags,
+    plotTags: tags,
+    tagged: tags.length > 0
+  };
+}
+
 function meaningfulTagCount(movie) { return scoringTags(movie).length; }
 
 function cardStatusLabel(movie) {
@@ -850,14 +875,13 @@ function rebuildDescriptorBrain() {
   Object.values(state.movies || {}).forEach(m => {
     const before = JSON.stringify({tags:m.tags||[], coreTags:m.coreTags||[], plotTags:m.plotTags||[], descriptorTags:m.descriptorTags||[], tagged:m.tagged});
     if (m.source === 'wikipedia' && m.storyText) {
-      const raw = extractRawDescriptors(m.storyText);
-      const selected = selectContrastiveDescriptors(raw, stats);
-      m.rawDescriptors = raw;
-      m.descriptorTags = selected;
-      m.coreTags = selected;
-      m.plotTags = selected;
-      m.tags = selected;
-      m.tagged = selected.length > 0;
+      const built = buildStoryTagSet(m.storyText, m, stats);
+      m.rawDescriptors = built.rawDescriptors;
+      m.descriptorTags = built.descriptorTags;
+      m.coreTags = built.coreTags;
+      m.plotTags = built.plotTags;
+      m.tags = built.tags;
+      m.tagged = built.tagged;
       m.needsManualUrl = false;
       if (!m.wikiUrl && (m.wikiTitle || m.pageTitle)) m.wikiUrl = wikiUrlFromTitle(m.wikiTitle || m.pageTitle);
       if (!m.wikiPageId && String(m.id || '').startsWith('wiki_')) m.wikiPageId = String(m.id).replace(/^wiki_/, '');
@@ -901,7 +925,7 @@ window.addEventListener('DOMContentLoaded', () => {
   restoreDriveSession();
   // Auto-expand if pool is small
   if (Object.keys(state.movies).length < 50) {
-    setTimeout(() => expandPool(false), 800);
+    scheduleAutoExpand(800);
   }
   window.addEventListener('scroll', handleScroll);
 });
@@ -1068,15 +1092,26 @@ function stopOrExpandPool() {
   }
 }
 
-function stopFetching() {
+function stopFetching(opts={}) {
   fetchAbortRequested = true;
   autoFetchPaused = true;
+  if (autoExpandTimer) {
+    clearTimeout(autoExpandTimer);
+    autoExpandTimer = null;
+  }
   if (currentWikiAbortController) currentWikiAbortController.abort();
   if (currentSleepCancel) currentSleepCancel();
   hideFetchProgress();
   const btn = document.getElementById('expandBtn');
   if (btn) { btn.disabled = false; btn.textContent = '＋ Expand Pool'; }
-  showToast('Fetching stopped.', '');
+  if (!opts.silent) showToast('Fetching stopped.', '');
+}
+
+async function waitForPoolIdle(timeoutMs=2500) {
+  const start = Date.now();
+  while (poolExpansionInProgress && Date.now() - start < timeoutMs) {
+    await new Promise(resolve => setTimeout(resolve, 80));
+  }
 }
 
 function shuffled(list) {
@@ -1199,6 +1234,7 @@ async function fetchWikiSourceTitles(mode, pagesPerCategory=4) {
 async function expandPool(manual=true) {
   if (poolExpansionInProgress) return;
   if (!manual && autoFetchPaused) return;
+  if (!manual && !recommendationPageActive()) return;
   if (manual) autoFetchPaused = false;
   poolExpansionInProgress = true;
   fetchAbortRequested = false;
@@ -1448,12 +1484,12 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all') {
 
   if (!year || !title || !wikiPageId) return null;
 
-  const rawDescriptors = extractRawDescriptors(storyText);
-  const descriptorTags = selectContrastiveDescriptors(rawDescriptors, descriptorCorpusStats());
+  const tagMeta = { source: 'wikipedia', storyText, leadText, language, country, year, format: format||null, director };
+  const builtTags = buildStoryTagSet(storyText, tagMeta);
   return {
     id, title, year, director, language, country, format: format||null,
-    tags: descriptorTags, coreTags: descriptorTags, plotTags: descriptorTags, descriptorTags, rawDescriptors,
-    tagged: descriptorTags.length > 0, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, storyText, leadText, wikiVerified: true, retagStatus: 'verified', retagMessage: ''
+    tags: builtTags.tags, coreTags: builtTags.coreTags, plotTags: builtTags.plotTags, descriptorTags: builtTags.descriptorTags, rawDescriptors: builtTags.rawDescriptors,
+    tagged: builtTags.tagged, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, storyText, leadText, wikiVerified: true, retagStatus: 'verified', retagMessage: ''
   };
 }
 
@@ -1731,14 +1767,13 @@ const SEED_TAGS = {
 function tagMovie(movie) {
   if (!movie) return;
   if (movie.source === 'wikipedia' && movie.storyText) {
-    const raw = extractRawDescriptors(movie.storyText);
-    const selected = selectContrastiveDescriptors(raw, descriptorCorpusStats());
-    movie.rawDescriptors = raw;
-    movie.descriptorTags = selected;
-    movie.coreTags = selected;
-    movie.plotTags = selected;
-    movie.tags = selected;
-    movie.tagged = selected.length > 0;
+    const built = buildStoryTagSet(movie.storyText, movie);
+    movie.rawDescriptors = built.rawDescriptors;
+    movie.descriptorTags = built.descriptorTags;
+    movie.coreTags = built.coreTags;
+    movie.plotTags = built.plotTags;
+    movie.tags = built.tags;
+    movie.tagged = built.tagged;
   } else {
     movie.source = movie.source || 'legacy';
     movie.tags = [];
@@ -1768,6 +1803,7 @@ function setTab(tab, btn) {
   activeTab = tab;
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
+  if (!recommendationPageActive()) stopFetching({silent:true});
   recVisibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
   render();
 }
@@ -1867,8 +1903,17 @@ function maybeAutoExpandPool() {
   const gap = needsPerfect ? 2000 : 120000;
   if ((available < 30 || needsPerfect) && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > gap) {
     lastAutoExpandAt = Date.now();
-    setTimeout(() => expandPool(false), 600);
+    scheduleAutoExpand(600);
   }
+}
+
+function scheduleAutoExpand(delay=600) {
+  if (autoExpandTimer || autoFetchPaused) return;
+  autoExpandTimer = setTimeout(() => {
+    autoExpandTimer = null;
+    if (!recommendationPageActive() || autoFetchPaused || poolExpansionInProgress) return;
+    expandPool(false);
+  }, delay);
 }
 
 function renderRecs() {
@@ -1885,7 +1930,7 @@ function renderRecs() {
     const perfectCount = perfectRecommendationCount(scored);
     if (perfectCount < PERFECT_REC_TARGET && !poolExpansionInProgress && !autoFetchPaused) {
       lastAutoExpandAt = Date.now();
-      setTimeout(() => expandPool(false), 100);
+      scheduleAutoExpand(100);
     }
     if (top.length) {
       document.getElementById('recCount').textContent = perfectCount < PERFECT_REC_TARGET
@@ -1899,7 +1944,7 @@ function renderRecs() {
   const batch = discoveryPool().slice(0, batchSize);
   if (ratedTagged.length >= 3 && !poolExpansionInProgress && !autoFetchPaused) {
     lastAutoExpandAt = Date.now();
-    setTimeout(() => expandPool(false), 100);
+    scheduleAutoExpand(100);
   }
   document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building 100% matches · showing ${batch.length} unrated`;
   if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expanding the pool in the background.</p></div>`; return; }
@@ -2078,6 +2123,7 @@ function buildCard(movie, opts={}) {
       ${rank?`<div class="match-label">${matchPct}% match</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}
       ${renderStars(safeId, movie.rating || 0)}
       ${poolView?`<div class="pool-card-note">${cardStatusLabel(movie)}${movie.retagMessage ? ` · ${movie.retagMessage}` : ''}</div>`:''}
+      ${movie.retagStatus === 'failed' || movie.needsManualUrl ? renderWikiRepairRow(safeId, movie.retagMessage) : ''}
       <div class="where-line" id="where-${movie.id}">${renderAvailability(movie)}</div>
       <div class="card-tags" id="tags-${movie.id}">${poolView ? renderRemovableTagChips(scoringTags(movie), safeId) : renderTagChips(scoringTags(movie), matchedTags, false)}</div>
       <div class="card-actions">
@@ -2089,6 +2135,56 @@ function buildCard(movie, opts={}) {
       </div>
     </div>`;
   return card;
+}
+
+function renderWikiRepairRow(movieId, message='') {
+  return `<div class="wiki-repair-row">
+    <input id="wiki-url-${movieId}" class="wiki-repair-input" type="text" placeholder="paste Wikipedia URL" onclick="event.stopPropagation()" onkeydown="handleWikiRepairKey(event,'${movieId}')">
+    <button class="card-act retag" onclick="repairMovieFromUrl('${movieId}',event)">repair</button>
+    ${message ? `<span>${message}</span>` : ''}
+  </div>`;
+}
+
+function handleWikiRepairKey(event, id) {
+  if (event.key === 'Enter') repairMovieFromUrl(id, event);
+}
+
+async function repairMovieFromUrl(id, event) {
+  if (event) event.stopPropagation();
+  const movie = state.movies[id];
+  if (!movie) return;
+  const input = document.getElementById(`wiki-url-${id}`);
+  const rawUrl = (input?.value || '').trim();
+  const wikiTitle = wikipediaTitleFromUrl(rawUrl);
+  if (!wikiTitle) {
+    showToast('Paste a valid Wikipedia URL on the card.', 'error');
+    return;
+  }
+
+  showFetchProgress('Repairing from Wikipedia URL...', 15, wikiTitle);
+  try {
+    const mode = movie.format ? 'shows' : 'movies';
+    let fresh = await fetchWikiMovie(wikiTitle, mode);
+    if (!fresh) fresh = await fetchWikiMovie(wikiTitle, 'all');
+    hideFetchProgress();
+    if (!fresh) {
+      movie.retagStatus = 'failed';
+      movie.retagMessage = 'URL did not pass CineLens rules';
+      saveLocalState(); render();
+      showToast(`Could not repair "${movie.title}" from that URL.`, 'error');
+      return;
+    }
+    const updated = applyFreshWikiMovie(id, fresh, movie);
+    runHousekeeping(false);
+    saveLocalState(); syncDrive(); render();
+    showToast(`Repaired "${updated.title}"`, 'success');
+  } catch(err) {
+    hideFetchProgress();
+    movie.retagStatus = 'failed';
+    movie.retagMessage = err.message || 'repair failed';
+    saveLocalState(); render();
+    showToast(`Repair failed for "${movie.title}"`, 'error');
+  }
 }
 
 function renderTagChips(tags, matchedTags, expanded) {
@@ -2311,8 +2407,10 @@ async function findFreshWikiForMovie(movie) {
     movie.wikiTitle,
     movie.pageTitle,
     movie.title,
+    movie.format ? `${movie.title} (TV series)` : `${movie.title} (film)`,
     movie.year ? `${movie.title} (${movie.year} film)` : '',
-    movie.year ? `${movie.title} (${movie.year} TV series)` : ''
+    movie.year ? `${movie.title} (${movie.year} TV series)` : '',
+    movie.format ? `${movie.title} television series` : `${movie.title} film`
   ].filter(Boolean);
 
   for (const title of [...new Set(candidates)]) {
@@ -2337,6 +2435,15 @@ async function retagMovie(id, e) {
   const m = state.movies[id];
   if (!m) return;
 
+  if (poolExpansionInProgress || autoExpandTimer) {
+    stopFetching({silent:true});
+    await waitForPoolIdle();
+    if (poolExpansionInProgress) {
+      showToast('Stopping fetch. Try re-tag again in a moment.', 'error');
+      return;
+    }
+  }
+
   showFetchProgress('Re-tagging from Wikipedia plot...', 20, m.wikiTitle || m.pageTitle || m.title);
   try {
     const fresh = await findFreshWikiForMovie(m);
@@ -2345,7 +2452,7 @@ async function retagMovie(id, e) {
       m.retagStatus = 'failed';
       m.retagMessage = 'needs correct Wikipedia URL';
       saveLocalState(); render();
-      showToast(`Could not re-tag "${m.title}". Paste its Wikipedia URL.`, 'error');
+      showToast(`Could not re-tag "${m.title}" automatically. Add its Wikipedia URL on the card.`, 'error');
       return;
     }
     const updated = applyFreshWikiMovie(id, fresh, m);
@@ -2401,13 +2508,12 @@ function runHousekeeping(manual=true) {
   Object.values(state.movies).forEach(m => {
     const existing = remap(m.tags || []);
     if (m.source === 'wikipedia' && m.storyText) {
-      const raw = extractRawDescriptors(m.storyText);
-      const selected = selectContrastiveDescriptors(raw, descriptorStats);
-      m.rawDescriptors = raw;
-      m.descriptorTags = selected;
-      m.tags = selected;
-      m.coreTags = selected;
-      m.plotTags = selected;
+      const built = buildStoryTagSet(m.storyText, m, descriptorStats);
+      m.rawDescriptors = built.rawDescriptors;
+      m.descriptorTags = built.descriptorTags;
+      m.tags = built.tags;
+      m.coreTags = built.coreTags;
+      m.plotTags = built.plotTags;
     } else {
       m.tags = cleanTagArray(existing, m, false);
       m.coreTags = cleanTagArray(recommendationTags(m.tags), m, false);
@@ -2505,6 +2611,21 @@ function updateStats() {
 function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveLocalState(); renderRecs(); }
 function updateBatchSize(val) { document.getElementById('batchVal').textContent=val; state.settings.batchSize=parseInt(val); saveLocalState(); renderRecs(); }
 function updateMinYear(val) { document.getElementById('minYearVal').textContent=val; state.settings.minYear=parseInt(val); saveLocalState(); renderRecs(); }
+
+async function resetAllData() {
+  if (!confirm('Reset CineLens? This clears ratings, watchlist, pool, rejected titles and tag brain.')) return;
+  stopFetching({silent:true});
+  state.movies = {};
+  state.tagWeights = {};
+  state.rejectedWikiTitles = {};
+  state.poolFetched = false;
+  autoFetchPaused = true;
+  recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
+  saveLocalState();
+  render();
+  if (state.drive.connected || state.drive.accessToken) await syncDrive(false);
+  showToast('CineLens reset. Pool and ratings cleared.', 'success');
+}
 
 // ─────────────────────────────────────────────
 // PERSISTENCE
