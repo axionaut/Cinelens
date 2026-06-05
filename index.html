@@ -1012,6 +1012,15 @@ function obviousNonMovieTitle(title) {
     || /\b(film series|media franchise|franchise|universe|timeline|soundtrack|discography|filmography|list)\b/i.test(title);
 }
 
+function isFranchiseOverviewPage(pageTitle, extract, cats=[]) {
+  if (obviousNonMovieTitle(pageTitle)) return true;
+  const lead = String(extract || '').slice(0, 700);
+  const categoryText = (cats || []).join(' ');
+  if (/\b(film series|media franchise|shared universe)\b/i.test(pageTitle)) return true;
+  if (/\b(film series|media franchise|fictional universes)\b/i.test(categoryText)) return true;
+  return /^\s*.+\s+is an? (?:American |British |Indian |English-language |Hindi-language )?(?:media franchise|film series|shared universe)\b/i.test(lead);
+}
+
 function isMetaTag(tag) {
   return /^(english-language|hindi-language|usa|uk|india|south-korea|brazil|poland|germany|japan|film|series|miniseries|prestige-tv|\d{4}s)$/.test(tag);
 }
@@ -1438,9 +1447,9 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all') {
   const title = pageTitle.replace(/ \(.*\)$/, '').trim();
   const wikiPageId = String(page.pageid || '').trim();
   const id = 'wiki_' + wikiPageId;
-  if (obviousNonMovieTitle(pageTitle) || /\b(film series|media franchise|shared universe|franchise)\b/i.test(extract.slice(0, 700))) return null;
 
   const cats = (page.categories || []).map(c => c.title.toLowerCase());
+  if (isFranchiseOverviewPage(pageTitle, extract, cats)) return null;
   const catText = cats.join(' ');
   const leadText = extract.slice(0, 1400);
   const storyText = extractStoryText(extract);
