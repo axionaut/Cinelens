@@ -23,7 +23,7 @@ The app is currently implemented as one complete HTML file containing:
 Current working file basis used for this specification:
 
 ```text
-index_tag_hygiene_fixed.html
+index.html
 ```
 
 The file should remain self-contained unless a deliberate refactor is planned.
@@ -1043,7 +1043,7 @@ const CARD_REFRESH_BATCH_SIZE = 20;
 const REC_INFINITE_PAGE_SIZE = 20;
 const PERFECT_REC_TARGET = 5;
 const PERFECT_REC_MIN_RATIO = 0.995;
-const MIN_PLOT_TAGS = 20;
+const MIN_PLOT_TAGS = 0;
 ```
 
 ## 12. Known Sensitive Areas in the Code
@@ -1311,4 +1311,55 @@ After this edit, the extracted inline JavaScript from `index.html` passes syntax
 
 ```text
 node --check script.js
+```
+
+## 18. Current Consistency Fix Changelog — Descriptor State and Rated Tab Visibility
+
+### 18.1 Bugs fixed
+
+- Rated cards were being rendered into `#ratedGrid`, but the grid remained hidden because `.rated-only` had a stylesheet `display:none` rule and the tab visibility code reset inline display to an empty value.
+- Pool tag removal removed tags from `tags`, `coreTags` and `plotTags`, but not `descriptorTags`, so removed tags could still affect scoring.
+- Retag did not replace `descriptorTags` / `rawDescriptors`, which could leave stale recommendation descriptors after a fresh Wikipedia fetch.
+- Retag failure was destructive and could still show a success message.
+- Rejected retry routed plain Wikipedia titles through the manual URL field, which only accepts URLs.
+- Manual URL fetch failures could leave the fetch progress/button state stuck.
+- Unknown-language Wikipedia pages could be accepted as English by default.
+- Housekeeping could reintroduce old rule-vocabulary tags instead of rebuilding descriptor tags from story text.
+
+### 18.2 Implementation changes
+
+- Added explicit section display handling so visible grids use `display:grid`, visible headers/controls use `display:flex`, and other visible sections use `display:block`.
+- Updated tag removal to remove from `descriptorTags` and recompute tag weights.
+- Added fresh Wikipedia replacement helpers for retagging while preserving rating, watchlist, skipped state, notes and availability.
+- Made retag failure non-destructive with a clear “needs correct Wikipedia URL” state.
+- Made rejected retry call the Wikipedia fetch pipeline directly.
+- Wrapped manual URL fetch in `try/finally`.
+- Required positive English/Hindi evidence before accepting a Wikipedia page.
+- Updated housekeeping to rebuild descriptor fields from story text using a single descriptor corpus snapshot per run.
+
+### 18.3 Verification
+
+Runtime smoke test was performed in headless Chrome against the real `index.html` served from localhost.
+
+Test setup:
+
+- Seeded localStorage with one rated title and forty-nine pool titles.
+- Opened the app.
+- Clicked the Rated tab.
+
+Observed result:
+
+```text
+activeTab: Rated
+ratedGridDisplay: grid
+ratedCards: 1
+ratedCount: 1 titles
+controlDeckDisplay: none
+normalDisplay: none
+```
+
+The extracted inline JavaScript also passes:
+
+```text
+node --check
 ```
