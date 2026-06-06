@@ -161,6 +161,11 @@ const REJECTED_REFRESH_BATCH_SIZE = 25;
 const REJECTED_REFRESH_MAX_ATTEMPTS = 3;
 const WIKI_PARSER_VERSION = 3;
 const REC_INFINITE_PAGE_SIZE = 20;
+const STRONG_REC_TARGET = 10;
+const STRONG_REC_MIN_OVERLAP = 3;
+const FETCH_AUTO_ATTEMPT_BUDGET = 55;
+const FETCH_MANUAL_ATTEMPT_BUDGET = 90;
+const FETCH_MAX_ADDED_PER_RUN = 35;
 let recVisibleLimit = 10;
 let currentWikiAbortController = null;
 let currentSleepCancel = null;
@@ -170,7 +175,7 @@ let state = {
   movies: {},
   tagWeights: {},
   genreWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', tagDeleteMode:false },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   tagStats: { candidates:0, tags:0, rebuiltAt:'' },
@@ -181,9 +186,9 @@ let state = {
 };
 
 let pendingManualRatingId = '';
-const PERFECT_REC_TARGET = 5;
+const PERFECT_REC_TARGET = STRONG_REC_TARGET;
 const PERFECT_REC_MIN_RATIO = 0.995;
-const MIN_PLOT_TAGS = 0;
+const MIN_PLOT_TAGS = 5;
 const MIN_STORY_SECTION_CHARS = 140;
 const LOW_CONFIDENCE_PLOT_TAGS = new Set([
   'protagonist-driven','conflict-driven','character-driven','plot-driven','dramatic-stakes',
@@ -203,7 +208,12 @@ const USER_AVOID_CONCEPTS = new Set([
   'open-ending',
   'ambiguous-ending',
   'anticlimactic-ending',
-  'cliffhanger-ending'
+  'cliffhanger-ending',
+  'political-agenda',
+  'culture-war',
+  'identity-politics',
+  'preachy-social-message',
+  'propaganda-driven'
 ]);
 const USER_AVOID_GENRES = new Set(['documentary']);
 const MAX_RECOMMENDATION_CONCEPT_SHARE = 0.10;
@@ -584,25 +594,38 @@ function descriptorCorpusStats() {
   return { docCount, df };
 }
 
-function selectContrastiveDescriptors(raw, stats) {
+function selectContrastiveDescriptors(raw, stats, limit=12) {
   const list = (raw || []).map(x => typeof x === 'string' ? { phrase:x, score:1, count:1 } : x).filter(x => x && x.phrase);
   const docCount = stats?.docCount || 1;
   const df = stats?.df || {};
   return list.map(x => {
     const rarity = Math.log((docCount + 1) / ((df[x.phrase] || 1) + 0.5));
     return { phrase:x.phrase, score:(x.score || 1) * Math.max(0.25, rarity) };
-  }).sort((a,b) => b.score - a.score || a.phrase.localeCompare(b.phrase)).slice(0, 12).map(x => normaliseTagName(x.phrase));
+  }).sort((a,b) => b.score - a.score || a.phrase.localeCompare(b.phrase)).slice(0, limit).map(x => normaliseTagName(x.phrase));
+}
+
+function explicitAvoidTags(storyText='') {
+  const text = String(storyText || '').toLowerCase();
+  const tags = [];
+  if (/\b(unresolved|ambiguous|open|anti[-\s]?climactic|cliffhanger)\s+(ending|finale|conclusion)\b/.test(text)) tags.push('ambiguous-ending');
+  if (/\b(political agenda|agenda[-\s]?driven|propaganda|culture war|identity politics)\b/.test(text)) tags.push('political-agenda');
+  if (/\b(preachy|didactic|message[-\s]?driven|social message|challenging norms)\b/.test(text) && /\b(patriarchy|oppression|privilege|identity|activis[mt])\b/.test(text)) tags.push('preachy-social-message');
+  return tags;
 }
 
 function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats()) {
   const rawDescriptors = extractRawDescriptors(storyText || '');
-  const descriptors = selectContrastiveDescriptors(rawDescriptors, stats).slice(0, 10);
+  const descriptors = selectContrastiveDescriptors(rawDescriptors, stats, 18).slice(0, 16);
   const storyOnlyMeta = { ...meta, leadText: '', categoryText: '' };
   const evidenceTags = cleanTagArray(deriveTagsFromText(storyText || '', storyOnlyMeta), meta, false)
     .filter(t => !isMetaTag(t))
     .filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t))
     .slice(0, 14);
-  const tags = cleanTagArray([...evidenceTags, ...descriptors], meta, false).slice(0, 22);
+  let tags = cleanTagArray([...explicitAvoidTags(storyText), ...evidenceTags, ...descriptors], meta, false).slice(0, 24);
+  if (tags.length < MIN_PLOT_TAGS && rawDescriptors.length) {
+    const extras = selectContrastiveDescriptors(rawDescriptors, stats, 24).filter(tag => !tags.includes(tag));
+    tags = cleanTagArray([...tags, ...extras], meta, false).slice(0, 24);
+  }
   return {
     rawDescriptors,
     descriptorTags: tags,
@@ -831,6 +854,16 @@ function weightedLaneLists(laneItems) {
   return laneItems.flatMap(item => Array.from({ length:item.lane.weight }, () => item.titles));
 }
 
+function yearFromTitleText(title) {
+  const years = String(title || '').match(/\b(19\d{2}|20\d{2})\b/g);
+  if (!years || !years.length) return 0;
+  return Math.max(...years.map(Number));
+}
+
+function newestTitleFirst(titles) {
+  return [...titles].sort((a,b)=>yearFromTitleText(b)-yearFromTitleText(a)||String(a).localeCompare(String(b)));
+}
+
 function rejectKey(title, mode) { return `${mode}:${normaliseTitleKey(title)}`; }
 
 function isShowListPage(title) {
@@ -1019,6 +1052,39 @@ function shuffled(list) {
   return a;
 }
 
+function stableHash(value) {
+  let hash = 2166136261;
+  const text = String(value || '');
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function titleSortKey(movie) {
+  return String(movie?.title || '').toLowerCase();
+}
+
+function movieTime(movie) {
+  return Date.parse(movie?._updatedAt || movie?.hiddenAt || movie?.updatedAt || movie?.at || '') || 0;
+}
+
+function sortMovies(rows, fallback='title-asc') {
+  const mode = state.settings.sortMode || fallback;
+  const effective = mode === 'recommended' ? fallback : mode;
+  const sorted = [...rows];
+  if (effective === 'random') {
+    const seed = String(state.settings.shuffleSeed || 1);
+    return sorted.sort((a,b)=>stableHash(`${seed}:${a.id || a.key || a.title}`)-stableHash(`${seed}:${b.id || b.key || b.title}`));
+  }
+  if (effective === 'rating-desc') return sorted.sort((a,b)=>Number(b.rating||0)-Number(a.rating||0)||titleSortKey(a).localeCompare(titleSortKey(b)));
+  if (effective === 'year-desc') return sorted.sort((a,b)=>Number(b.year||0)-Number(a.year||0)||titleSortKey(a).localeCompare(titleSortKey(b)));
+  if (effective === 'year-asc') return sorted.sort((a,b)=>Number(a.year||9999)-Number(b.year||9999)||titleSortKey(a).localeCompare(titleSortKey(b)));
+  if (effective === 'updated-desc') return sorted.sort((a,b)=>movieTime(b)-movieTime(a)||titleSortKey(a).localeCompare(titleSortKey(b)));
+  return sorted.sort((a,b)=>titleSortKey(a).localeCompare(titleSortKey(b)));
+}
+
 function roundRobinUnique(lanes) {
   const out = [];
   const seen = new Set();
@@ -1067,7 +1133,7 @@ async function fetchShowSourceTitles(laneKey='englishShows') {
       if (!obviousNonMovieTitle(title) && !isShowListPage(title)) titles.push(title);
     });
   }
-  return [...new Set(titles)];
+  return newestTitleFirst([...new Set(titles)]);
 }
 
 async function fetchWikiSearchTitles(query) {
@@ -1097,7 +1163,7 @@ async function fetchNavigationLaneTitles(mode, limitPerPage=180) {
       if (!obviousNonMovieTitle(title) && !isShowListPage(title)) titles.push(title);
     });
   }
-  return [...new Set(titles)];
+  return newestTitleFirst([...new Set(titles)]);
 }
 
 async function candidateTitlesForMode(mode, pageDepth=4) {
@@ -1132,7 +1198,7 @@ async function fetchWikiSourceTitles(mode, pagesPerCategory=4) {
   if (lane?.mode === 'shows') {
     titles.push(...await fetchShowSourceTitles(lane.key));
   }
-  return [...new Set(titles)];
+  return newestTitleFirst([...new Set(titles)]);
 }
 
 async function expandPool(manual=true) {
@@ -1145,12 +1211,15 @@ async function expandPool(manual=true) {
   const btn = document.getElementById('expandBtn');
   if (btn) { btn.disabled = false; btn.textContent = 'Stop Fetching'; }
   const mode = expansionMode();
-  const chasingPerfect = needsMorePerfectRecommendations();
-  if (manual || chasingPerfect) showFetchProgress(chasingPerfect ? `Finding ${PERFECT_REC_TARGET} strongest overlap matches...` : `Expanding ${mode === 'all' ? 'movies and shows' : mode} from Wikipedia...`, 0, '');
+  const chasingStrong = needsMoreStrongRecommendations();
+  const chasingPerfect = chasingStrong;
+  let fetchStatus = recommendationFetchStatus();
+  if (manual || chasingStrong) showFetchProgress(chasingStrong ? `Improving recommendations...` : `Expanding ${mode === 'all' ? 'movies and shows' : mode} from Wikipedia...`, 0, '');
 
   let added = 0;
   let recovered = 0;
   let attempts = 0;
+  const attemptBudget = manual ? FETCH_MANUAL_ATTEMPT_BUDGET : FETCH_AUTO_ATTEMPT_BUDGET;
   let pageDepth = manual ? 8 : 5;
   const seenThisRun = new Set();
 
@@ -1171,12 +1240,13 @@ async function expandPool(manual=true) {
     });
 
     if (!toFetch.length) {
-      if (needsMorePerfectRecommendations() && pageDepth < 80) { pageDepth += 8; continue; }
+      if (needsMoreStrongRecommendations() && pageDepth < 80 && attempts < attemptBudget) { pageDepth += 8; continue; }
       break;
     }
 
     for (let i = 0; i < toFetch.length; i++) {
       if (fetchAbortRequested) break;
+      if (attempts >= attemptBudget || added >= FETCH_MAX_ADDED_PER_RUN) { fetchAbortRequested = true; break; }
       const candidate = toFetch[i];
       const title = typeof candidate === 'string' ? candidate : candidate.title;
       const lane = typeof candidate === 'string' ? null : candidate.lane;
@@ -1185,11 +1255,12 @@ async function expandPool(manual=true) {
       seenThisRun.add(normaliseTitleKey(title));
       attempts++;
       if (manual || chasingPerfect || needsMorePerfectRecommendations()) {
-        const perfectCount = perfectRecommendationCount(recommendationCandidates());
+        if (attempts === 1 || attempts % 8 === 0) fetchStatus = recommendationFetchStatus();
+        const perfectCount = fetchStatus.strongCount;
         showFetchProgress(
-          needsMorePerfectRecommendations() ? `Finding ${PERFECT_REC_TARGET} strongest overlap matches · ${perfectCount}/${PERFECT_REC_TARGET} ready` : `Finding new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} · added ${added}`,
+          needsMorePerfectRecommendations() ? `Improving recommendations · ${perfectCount}/${PERFECT_REC_TARGET} strong` : `Finding new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} · added ${added}`,
           Math.min(96, (attempts % 100)),
-          title
+          `${attempts}/${attemptBudget} checked · ${title}`
         );
       }
       try {
@@ -1198,6 +1269,7 @@ async function expandPool(manual=true) {
           // Keep explicitly hidden titles out of both the pool and rejected list.
         } else if (movie && !state.movies[movie.id]) {
           if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
+            touchRecord(movie);
             state.movies[movie.id] = movie;
             added++;
             const rejectedRefreshDue = notePoolAddition();
@@ -1205,13 +1277,14 @@ async function expandPool(manual=true) {
               rebuildTagBrain();
               computeTagWeights();
               saveLocalState();
-              render();
+              updateStats();
             }
             if (rejectedRefreshDue && !fetchAbortRequested) {
               const refreshResult = await refreshRejectedLane();
               recovered += refreshResult.recovered;
             }
-            if (!needsMorePerfectRecommendations() && !manual) { fetchAbortRequested = true; break; }
+            if (added % 5 === 0) fetchStatus = recommendationFetchStatus();
+            if (!needsMoreStrongRecommendations() && !manual) { fetchAbortRequested = true; break; }
           } else {
             recordRejectedTitle(title, keyMode, 'language/year/type mismatch');
           }
@@ -1226,11 +1299,11 @@ async function expandPool(manual=true) {
       if (attempts % 20 === 0) await abortableSleep(WIKI_BATCH_PAUSE_MS);
     }
 
-    if (!needsMorePerfectRecommendations() && !manual) break;
+    if (!needsMoreStrongRecommendations() && !manual) break;
     if (pageDepth < 80) pageDepth += 8; else break;
   }
 
-  if (manual || chasingPerfect || added) hideFetchProgress();
+  if (manual || chasingStrong || added) hideFetchProgress();
   if (btn) { btn.disabled = false; btn.textContent = '＋ Expand Pool'; }
   poolExpansionInProgress = false;
   const stopped = fetchAbortRequested || autoFetchPaused;
@@ -1287,6 +1360,8 @@ async function addManualTitle() {
 
   let movie = null;
   const diagnostics = {};
+  const restoreAbortFlag = !poolExpansionInProgress && fetchAbortRequested;
+  if (restoreAbortFlag) fetchAbortRequested = false;
   try {
     movie = await fetchWikiMovie(wikiTitle, mode, diagnostics);
   } catch(e) {
@@ -1297,6 +1372,7 @@ async function addManualTitle() {
     showToast(`Could not process "${wikiTitle}": ${reason}`, 'error');
     return;
   } finally {
+    if (restoreAbortFlag) fetchAbortRequested = true;
     hideFetchProgress();
     if (btn) { btn.disabled = false; btn.textContent = 'fetch from URL'; }
   }
@@ -1802,6 +1878,7 @@ function setTab(tab, btn) {
   activeTab = tab;
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
+  document.querySelector('.tab-bar')?.classList.remove('open');
   if (!recommendationPageActive()) stopFetching({silent:true});
   recVisibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
   render();
@@ -1841,6 +1918,16 @@ function updateControlDeck() {
   if (genreFilter && genreFilter.value !== (state.settings.genreFilter || 'all')) genreFilter.value=state.settings.genreFilter || 'all';
   const languageFilter=document.getElementById('languageFilter');
   if (languageFilter && languageFilter.value !== (state.settings.languageFilter || 'all')) languageFilter.value=state.settings.languageFilter || 'all';
+  const sortMode=document.getElementById('sortMode');
+  if (sortMode && sortMode.value !== (state.settings.sortMode || 'recommended')) sortMode.value=state.settings.sortMode || 'recommended';
+  const shuffleBtn=document.getElementById('shuffleAgainBtn');
+  if (shuffleBtn) shuffleBtn.hidden = (state.settings.sortMode || 'recommended') !== 'random';
+  const titleSearch=document.getElementById('titleSearch');
+  if (titleSearch && titleSearch.value !== (state.settings.titleSearch || '')) titleSearch.value=state.settings.titleSearch || '';
+  const deck=document.querySelector('.control-deck');
+  if (deck) deck.classList.toggle('collapsed', !!state.settings.controlDeckCollapsed);
+  const toggle=document.getElementById('controlToggle');
+  if (toggle) toggle.textContent = state.settings.controlDeckCollapsed ? 'Show filters & tools' : 'Hide filters & tools';
 }
 
 function updateLanguageFilter(language) {
@@ -1855,6 +1942,38 @@ function updateGenreFilter(genre) {
   renderActiveCards();
 }
 
+function updateSortMode(mode) {
+  state.settings.sortMode = mode || 'recommended';
+  if (state.settings.sortMode === 'random' && !state.settings.shuffleSeed) state.settings.shuffleSeed = Date.now();
+  saveLocalState();
+  renderActiveCards();
+  updateControlDeck();
+}
+
+function shuffleAgain() {
+  state.settings.sortMode = 'random';
+  state.settings.shuffleSeed = Date.now();
+  saveLocalState();
+  renderActiveCards();
+  updateControlDeck();
+}
+
+function updateTitleSearch(value) {
+  state.settings.titleSearch = String(value || '').trim();
+  saveLocalState();
+  renderActiveCards();
+}
+
+function toggleControlDeck() {
+  state.settings.controlDeckCollapsed = !state.settings.controlDeckCollapsed;
+  saveLocalState();
+  updateControlDeck();
+}
+
+function toggleMobileNav() {
+  document.querySelector('.tab-bar')?.classList.toggle('open');
+}
+
 function renderActiveCards() {
   if (activeTab === 'pool') renderPoolGrid();
   else if (activeTab === 'hidden') renderHiddenGrid();
@@ -1865,7 +1984,7 @@ function renderActiveCards() {
 }
 
 function matchesGlobalFilters(movie) {
-  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && meetsYearCutoff(movie);
+  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
 }
 
 function discoveryPool() {
@@ -1880,6 +1999,12 @@ function matchesLanguageFilter(movie) {
 function matchesGenreFilter(movie) {
   const filter = state.settings.genreFilter || 'all';
   return filter === 'all' || movieGenres(movie).includes(filter);
+}
+
+function matchesTitleSearch(movie) {
+  const q = String(state.settings.titleSearch || '').trim().toLowerCase();
+  if (!q) return true;
+  return [movie?.title, movie?.wikiTitle, movie?.pageTitle].some(value => String(value || '').toLowerCase().includes(q));
 }
 
 function meetsYearCutoff(m) {
@@ -1910,17 +2035,28 @@ function perfectRecommendationCount(scored) {
   return scored.filter(x => x.posOverlap === maxOverlap && (!maxFit || x.tasteFit / maxFit >= PERFECT_REC_MIN_RATIO)).length;
 }
 
-function needsMorePerfectRecommendations(target=PERFECT_REC_TARGET) {
+function recommendationFetchStatus(scored=recommendationCandidates()) {
+  const bestOverlap = scored[0]?.posOverlap || 0;
+  const minOverlap = Math.max(1, Math.min(bestOverlap || 1, STRONG_REC_MIN_OVERLAP));
+  const strongCount = scored.filter(x => Number(x.posOverlap || 0) >= minOverlap && Number(x.positiveScore || 0) > 0).length;
+  return {strongCount, target:STRONG_REC_TARGET, bestOverlap, minOverlap, total:scored.length};
+}
+
+function needsMoreStrongRecommendations(target=STRONG_REC_TARGET) {
   if (!personalizedEnough()) return false;
-  return perfectRecommendationCount(recommendationCandidates()) < target;
+  return recommendationFetchStatus().strongCount < target;
+}
+
+function needsMorePerfectRecommendations() {
+  return needsMoreStrongRecommendations();
 }
 
 function maybeAutoExpandPool() {
   if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'tags' || autoFetchPaused) return;
   const available = discoveryPool().length;
-  const needsPerfect = needsMorePerfectRecommendations();
-  const gap = needsPerfect ? 2000 : 120000;
-  if ((available < 30 || needsPerfect) && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > gap) {
+  const needsStrong = needsMoreStrongRecommendations();
+  const gap = needsStrong ? 15000 : 120000;
+  if ((available < 30 || needsStrong) && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > gap) {
     lastAutoExpandAt = Date.now();
     scheduleAutoExpand(600);
   }
@@ -1944,15 +2080,18 @@ function renderRecs() {
   if (ratedTagged.length >= 3) {
     const scored = recommendationCandidates();
     const visibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10));
-    const top = scored.slice(0, visibleLimit);
-    const perfectCount = perfectRecommendationCount(scored);
-    if (perfectCount < PERFECT_REC_TARGET && !poolExpansionInProgress && !autoFetchPaused) {
+      const ordered = (state.settings.sortMode || 'recommended') === 'recommended'
+        ? scored
+        : sortMovies(scored.map(item => item.movie), 'title-asc').map(movie => scored.find(item => item.movie.id === movie.id)).filter(Boolean);
+      const top = ordered.slice(0, visibleLimit);
+    const fetchStatus = recommendationFetchStatus(scored);
+    if (fetchStatus.strongCount < STRONG_REC_TARGET && !poolExpansionInProgress && !autoFetchPaused) {
       lastAutoExpandAt = Date.now();
       scheduleAutoExpand(100);
     }
     if (top.length) {
-      document.getElementById('recCount').textContent = perfectCount < PERFECT_REC_TARGET
-        ? `finding ${PERFECT_REC_TARGET} strongest overlap matches · showing ${top.length} of ${scored.length}`
+      document.getElementById('recCount').textContent = fetchStatus.strongCount < STRONG_REC_TARGET
+        ? `improving recommendations · ${fetchStatus.strongCount}/${STRONG_REC_TARGET} strong · showing ${top.length} of ${scored.length}`
         : `showing ${top.length} of ${scored.length} matches`;
       top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit })));
       return;
@@ -1960,12 +2099,12 @@ function renderRecs() {
   }
 
   const browseLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
-  const batch = discoveryPool().slice(0, browseLimit);
+  const batch = sortMovies(discoveryPool(), 'title-asc').slice(0, browseLimit);
   if (ratedTagged.length >= 3 && !poolExpansionInProgress && !autoFetchPaused) {
     lastAutoExpandAt = Date.now();
     scheduleAutoExpand(100);
   }
-  document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building stronger overlap matches · showing ${batch.length} unrated`;
+  document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building recommendation pool · showing ${batch.length} unrated`;
   if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expanding the pool in the background.</p></div>`; return; }
   batch.forEach(m => grid.appendChild(buildCard(m, {})));
 }
@@ -1973,7 +2112,7 @@ function renderRecs() {
 function renderRatedGrid() {
   const grid = document.getElementById('ratedGrid');
   if (!grid) return;
-  const rated = Object.values(state.movies || {}).filter(m => Number(m.rating || 0) > 0).filter(matchesGlobalFilters).sort((a,b) => Number(b.rating||0)-Number(a.rating||0)||String(a.title||'').localeCompare(String(b.title||'')));
+  const rated = sortMovies(Object.values(state.movies || {}).filter(m => Number(m.rating || 0) > 0).filter(matchesGlobalFilters), 'rating-desc');
   const untaggedCount = rated.filter(m => !m.tagged && m.source === 'wikipedia').length;
   const btn = document.getElementById('tagUntaggedBtn');
   if (btn) {
@@ -1989,7 +2128,7 @@ function renderRatedGrid() {
 
 function renderWatchlist() {
   const grid = document.getElementById('watchlistGrid');
-  const watchlist = Object.values(state.movies).filter(m => m.watchlist && matchesTab(m) && matchesGlobalFilters(m)).sort((a,b)=>a.title.localeCompare(b.title));
+  const watchlist = sortMovies(Object.values(state.movies).filter(m => m.watchlist && matchesTab(m) && matchesGlobalFilters(m)), 'title-asc');
   document.getElementById('watchlistCount').textContent = watchlist.length ? `${watchlist.length} saved` : 'nothing saved yet';
   grid.innerHTML = '';
   if (!watchlist.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">+</div><h3>Nothing Saved Yet</h3></div>`; return; }
@@ -2036,7 +2175,7 @@ function setSectionVisibility(selector, visible) {
 function renderPoolGrid() {
   const grid = document.getElementById('poolGrid');
   if (!grid) return;
-  const rows = Object.values(state.movies).filter(matchesTab).filter(matchesGlobalFilters).sort((a,b)=>(b.rating||0)-(a.rating||0)||a.title.localeCompare(b.title));
+  const rows = sortMovies(Object.values(state.movies).filter(matchesTab).filter(matchesGlobalFilters), 'rating-desc');
   document.getElementById('poolCount').textContent = rows.length ? `${rows.length} titles` : 'nothing loaded';
   grid.innerHTML = '';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>Pool Empty</h3></div>`; return; }
@@ -2046,7 +2185,7 @@ function renderPoolGrid() {
 function renderHiddenGrid() {
   const grid = document.getElementById('hiddenGrid');
   if (!grid) return;
-  const rows = Object.values(state.hiddenTitles || {}).filter(matchesGlobalFilters).sort((a,b)=>(b.hiddenAt||'').localeCompare(a.hiddenAt||'') || a.title.localeCompare(b.title));
+  const rows = sortMovies(Object.values(state.hiddenTitles || {}).filter(matchesGlobalFilters), 'updated-desc');
   document.getElementById('hiddenCount').textContent = rows.length ? `${rows.length} hidden` : 'nothing hidden';
   grid.innerHTML = '';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">x</div><h3>Nothing Hidden</h3></div>`; return; }
@@ -2056,7 +2195,7 @@ function renderHiddenGrid() {
 function renderRejectedGrid() {
   const grid = document.getElementById('rejectedGrid');
   if (!grid) return;
-  const rows = rejectedEntries();
+  const rows = sortMovies(rejectedEntries().filter(matchesTitleSearch), 'updated-desc');
   document.getElementById('rejectedCount').textContent = rows.length ? `${rows.length} rejected` : 'nothing rejected';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>Nothing Rejected Yet</h3></div>`; return; }
   grid.innerHTML = rows.map(r => {
@@ -2159,6 +2298,11 @@ function buildCard(movie, opts={}) {
   card.id = 'card-' + movie.id;
   const matchPct = rank ? Math.round((tasteFit || 0) * 100) : 0;
   const safeId = movie.id.replace(/'/g,"\\'");
+  const formatLabel = isShow(movie) ? 'Show' : 'Movie';
+  const wikiUrl = movie.wikiUrl || (movie.wikiTitle || movie.pageTitle ? wikiUrlFromTitle(movie.wikiTitle || movie.pageTitle) : '');
+  const titleHtml = wikiUrl
+    ? `<a class="card-title-link" href="${wikiUrl}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${movie.title}</a>`
+    : movie.title;
   card.innerHTML = `
     <div class="card-poster">
       <div class="card-poster-inner" style="background:${posterGrad(movie.title)}">
@@ -2172,7 +2316,8 @@ function buildCard(movie, opts={}) {
     <div class="card-body">
       <div class="card-head">
         ${movie.thumbnailUrl ? `<img class="card-thumb" src="${movie.thumbnailUrl}" alt="" loading="lazy" decoding="async">` : ''}
-        <div class="card-head-copy"><div class="card-title">${movie.title}</div>
+        <div class="card-head-copy"><div class="card-title">${titleHtml}</div>
+        <div class="format-row"><span class="title-format">${formatLabel}</span></div>
         <div class="card-meta">${movie.language}·${movie.country}·${movie.year||'?'}</div>
         ${rank?`<div class="match-label">${posOverlap || 0} shared tag${posOverlap===1?'':'s'}${genreOverlap?` · ${genreOverlap} genre match${genreOverlap===1?'':'es'}`:''} · ${matchPct}% weighted fit${negativeOverlap?` · ${negativeOverlap} disliked`:''}</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
       </div>
@@ -2986,6 +3131,10 @@ function loadLocalState() {
       document.getElementById('languageFilter').value=state.settings.languageFilter||'all';
       const genreFilter=document.getElementById('genreFilter');
       if (genreFilter) genreFilter.value=state.settings.genreFilter||'all';
+      const sortMode=document.getElementById('sortMode');
+      if (sortMode) sortMode.value=state.settings.sortMode||'recommended';
+      const titleSearch=document.getElementById('titleSearch');
+      if (titleSearch) titleSearch.value=state.settings.titleSearch||'';
       
       // Ensure wikiPageId is reconstructed for all Wikipedia movies
       Object.values(state.movies || {}).forEach(m => {

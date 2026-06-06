@@ -86,8 +86,13 @@ The control deck owns global controls:
 - Year cutoff
 - Language filter
 - Genre filter
+- Sort mode, including stable Random / Shuffle
+- Title search
 - Tag click mode
 - Manual Wikipedia URL add
+
+On mobile, the control deck must be collapsible so the sticky settings area
+does not consume most of the viewport.
 
 Tag click mode is global, not Tags-page-only. In explore mode, tag clicks open
 the tag workspace. In remove mode, tag chips remove the tag from that title.
@@ -106,6 +111,14 @@ Tags  other cleaned/normalized tags
 
 Do not show internal source/count labels such as `wikipedia · 12 tags` on
 user-facing cards.
+
+Cards must show whether the title is a Movie or Show. When a verified
+Wikipedia URL is available, clicking the title name opens that page in a new
+tab.
+
+Title search is a global filter. It applies to recommendation, Pool, Rated,
+Watchlist, Hidden and Rejected title grids together with year/language/genre
+filters.
 
 ## 3. Core User Requirements
 
@@ -149,7 +162,7 @@ The app must reject or skip:
 Once the user has rated enough titles, automatic fetching should continue in the background until the app has at least:
 
 ```text
-5 recommendations at the strongest available overlap tier
+enough strong recommendation candidates for the current taste profile
 ```
 
 The strongest tier means the title shares the current maximum number of positive concepts, then reaches nearly the best weighted fit inside that overlap tier. The implementation uses:
@@ -190,6 +203,12 @@ for inspection, editing, retagging or manual override.
 
 Documentary titles are also actively excluded from For You recommendations and
 discovery fallback cards.
+
+Agenda/preachy-message avoidance is evidence-based. The tagger may add avoid
+tags such as `political-agenda` or `preachy-social-message` only when the
+story/lead text clearly frames the title as agenda, propaganda, culture-war or
+message driven. Strong women, female protagonists, minority characters or
+social settings are not avoid signals by themselves.
 
 ### 3.2.2 Names In Tags And Concepts
 
@@ -600,6 +619,39 @@ Examples:
 
 ## 6. Wikipedia Collection Specification
 
+### 6.0 Fetching Strategy
+
+Fetching must optimize for useful recommendation depth, not an artificial
+"near-perfect" title count.
+
+The app should track practical fetch progress:
+
+- attempted/check count
+- titles added
+- strong recommendation candidates available
+- current best positive tag-overlap depth
+
+Automatic fetching should stop when the app has enough strong recommendation
+candidates, when the run budget is exhausted, or when the user presses Stop.
+It must not chase an endless set of titles that exactly match the current top
+recommendation tier.
+
+During active fetching, the app should avoid expensive UI work:
+
+- Do not fully rerender card grids after every fetched title.
+- Recompute recommendation status only periodically.
+- Rebuild the tag brain in batches and at the end of a run.
+- Save local state in batches.
+- Sync Drive after the run rather than repeatedly inside the inner fetch loop.
+
+Manual Wikipedia URL add is a separate user action from background pool
+fetching. If the user has stopped background fetching, manual URL add must
+still be allowed to fetch and process the pasted Wikipedia page.
+
+Candidate lanes should prefer descending year/newer titles first when the
+source title text exposes a year. This keeps fresh films/shows more likely to
+be fetched or refreshed before old backlog items.
+
 ### 6.1 API Discipline
 
 The app must avoid bombarding Wikipedia.
@@ -791,10 +843,13 @@ That caused contamination because `ensureMinimumPlotTags()` added broad fallback
 The new rule is:
 
 ```js
-const MIN_PLOT_TAGS = 0;
+const MIN_PLOT_TAGS = 5;
 ```
 
-`ensureMinimumPlotTags()` must never add generic fallback tags. It now returns cleaned, evidence-backed non-meta tags only.
+`ensureMinimumPlotTags()` must never add generic fallback tags. The modern
+story tagger may keep additional local keyphrase descriptors from the same
+story text to avoid useless one/two-tag cards, but these descriptors must still
+be evidence-backed and must not be broad filler.
 
 This is intentional. A movie with 6 accurate tags is better than a movie with 6 accurate tags and 14 fake ones wearing a cheap moustache.
 
@@ -1035,7 +1090,9 @@ matchPct = Math.round(positiveWeightedContribution / totalPositiveTasteWeight * 
 
 The first ranked recommendation is not automatically labeled 100%.
 
-The background target means at least five recommendations in the strongest positive-overlap tier and near its best weighted fit, using `PERFECT_REC_MIN_RATIO`.
+The background target means enough strong recommendation candidates for the
+current taste profile. It must not require five titles to exactly match the
+current strongest overlap tier.
 
 ### 8.4 Recommendation Candidate Filters
 
@@ -1279,7 +1336,7 @@ Expected:
 - Fetch progress visible.
 - Stats update during fetch.
 - Cards refresh every 20 additions, not every addition.
-- Fetching continues until 5 near-perfect recommendations where possible.
+- Fetching continues until enough strong recommendations exist, or the run budget is exhausted.
 - Pages without story section are rejected.
 
 ### 13.5 Recommendations
@@ -1368,6 +1425,19 @@ spec.md
 When any of these files are part of the change, stage, commit and push the related bundle files together. Do not stage editor files, generated syntax extracts, smoke harnesses, browser profiles, logs or other temporary artifacts.
 
 Do not describe a change as complete after static checks alone when a browser-visible or persistence behavior was changed.
+
+Smoke tests are mandatory for behavior changes in this app because a single
+browser runtime error can disable the whole static UI. Use the smallest smoke
+test that covers the risk:
+
+- Basic app smoke for ordinary app-code changes: load the real split app and
+  confirm the CineLens shell renders without a fatal script error.
+- Targeted smoke for changed behavior such as fetching, Drive sync, hidden
+  titles, sorting, tag removal or persistence.
+- Live Wikipedia smoke only when parser/fetch behavior itself changes and a
+  controlled fixture cannot prove the behavior.
+
+For copy-only or documentation-only edits, syntax/diff checks may be enough.
 
 ## 15. Recommended Future Refactor
 

@@ -33,6 +33,7 @@
 <header>
   <div style="display:flex;align-items:center;gap:14px">
     <div class="logo">CineLens <span>DISCOVERY</span></div>
+    <button class="nav-toggle" id="navToggle" onclick="toggleMobileNav()">Menu</button>
     <div class="tab-bar">
       <button class="tab-btn active" onclick="setTab('all',this)">All</button>
       <button class="tab-btn" onclick="setTab('movie',this)">Movies</button>
@@ -59,6 +60,8 @@
 <div class="container">
 
   <div class="control-deck">
+  <button class="control-toggle" id="controlToggle" onclick="toggleControlDeck()">Filters & tools</button>
+  <div class="control-content" id="controlContent">
   <div class="stats-bar">
     <div class="stat"><div class="stat-val" id="statRated">0</div><div class="stat-label">Rated</div></div>
     <div class="stat"><div class="stat-val" id="statTagged">0</div><div class="stat-label">Tagged</div></div>
@@ -99,6 +102,19 @@
       <option value="war">War</option>
       <option value="western">Western</option>
     </select>
+    <label>Sort</label>
+    <select class="platform-select" id="sortMode" onchange="updateSortMode(this.value)">
+      <option value="recommended">Recommended</option>
+      <option value="rating-desc">Rating high</option>
+      <option value="year-desc">Year newest</option>
+      <option value="year-asc">Year oldest</option>
+      <option value="updated-desc">Recently changed</option>
+      <option value="title-asc">Title A-Z</option>
+      <option value="random">Random / Shuffle</option>
+    </select>
+    <button class="tb-filter-btn" id="shuffleAgainBtn" onclick="shuffleAgain()" hidden>Shuffle again</button>
+    <label>Search</label>
+    <input class="title-search-input" id="titleSearch" type="search" placeholder="search title" oninput="updateTitleSearch(this.value)">
     <button class="tb-filter-btn tag-delete-mode" id="tagDeleteModeBtn" onclick="toggleTagDeleteMode()">Tag clicks: explore</button>
     <div class="sep-v"></div>
     <span id="hkStatus" style="font-size:11px;color:var(--muted);font-family:'DM Mono',monospace">tags: 0</span>
@@ -109,6 +125,7 @@
     <input class="manual-title-input" id="manualTitle" type="text" placeholder="paste Wikipedia movie/show URL" onkeydown="handleManualTitleKey(event)">
     <button class="platform-btn" onclick="addManualTitle()" id="manualAddBtn">fetch from URL</button>
     <button class="platform-btn danger" onclick="resetAllData()">Reset All</button>
+  </div>
   </div>
   </div>
 
