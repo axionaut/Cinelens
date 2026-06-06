@@ -2318,6 +2318,7 @@ function buildCard(movie, opts={}) {
         ${movie.thumbnailUrl ? `<img class="card-thumb" src="${movie.thumbnailUrl}" alt="" loading="lazy" decoding="async">` : ''}
         <div class="card-head-copy"><div class="card-title">${titleHtml}</div>
         <div class="format-row"><span class="title-format">${formatLabel}</span></div>
+        ${rank?`<div class="match-percent">${matchPct}% match</div>`:''}
         <div class="card-meta">${movie.language}·${movie.country}·${movie.year||'?'}</div>
         ${rank?`<div class="match-label">${posOverlap || 0} shared tag${posOverlap===1?'':'s'}${genreOverlap?` · ${genreOverlap} genre match${genreOverlap===1?'':'es'}`:''} · ${matchPct}% weighted fit${negativeOverlap?` · ${negativeOverlap} disliked`:''}</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
       </div>
@@ -2436,29 +2437,35 @@ function rawTagChipHtml(tag, movieId) {
 function cardConceptGroups(movie, matchedTags=null, contextConcept='') {
   const concepts=scoringTags(movie).filter(conceptIsPresentable);
   const matched=matchedTags || new Set();
-  const allWhy=concepts.filter(tag=>matched.has?.(tag) && Number(state.tagWeights[tag]||0)>0)
-    .sort((a,b)=>(state.tagWeights[b]*conceptSpecificity(b))-(state.tagWeights[a]*conceptSpecificity(a)))
-  const why=allWhy.slice(0,2);
-  const whySet=new Set(why);
-  const distinctive=concepts.filter(tag=>!whySet.has(tag) && conceptSpecificity(tag)>=0.2)
+  const scored=concepts.map(tag => {
+    const weight=Number(state.tagWeights[tag]||0);
+    const contribution=weight*conceptSpecificity(tag);
+    return {tag,weight,contribution,matched:matched.has?.(tag)};
+  });
+  const matchedPositive=scored.filter(item=>item.matched && item.contribution>0)
+    .sort((a,b)=>b.contribution-a.contribution||a.tag.localeCompare(b.tag));
+  const matchedNegative=scored.filter(item=>item.matched && item.weight<0)
+    .sort((a,b)=>Math.abs(b.contribution)-Math.abs(a.contribution)||a.tag.localeCompare(b.tag));
+  const highlighted=new Set([...matchedPositive,...matchedNegative].map(item=>item.tag));
+  const distinctive=concepts.filter(tag=>!highlighted.has(tag) && conceptSpecificity(tag)>=0.2)
     .sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||Math.abs(state.tagWeights[b]||0)-Math.abs(state.tagWeights[a]||0)||a.localeCompare(b))
-    .slice(0,8);
-  const shown=new Set([...why,...distinctive]);
+    .slice(0,10);
+  const shown=new Set([...highlighted,...distinctive]);
   const more=concepts.filter(tag=>!shown.has(tag)).sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||a.localeCompare(b));
-  return {why,distinctive,more,matchedTotal:allWhy.length};
+  return {matchedPositive,matchedNegative,distinctive,more,matchedTotal:matchedPositive.length};
 }
 
 function renderConceptChips(movie, movieId, expanded, matchedTags=null, contextConcept='') {
   const groups=cardConceptGroups(movie,matchedTags,contextConcept);
-  if (!groups.why.length && !groups.distinctive.length && !groups.more.length) return '';
-  const line=(label,items,kind='')=>items.length?`<div class="concept-line"><span class="concept-line-label">${label}</span><div class="concept-line-items">${items.map(tag=>{
-    const impact=kind==='why'?`+${(Number(state.tagWeights[tag]||0)*conceptSpecificity(tag)).toFixed(1)}`:'';
-    return conceptChipHtml(tag,movieId,kind,impact);
-  }).join('')}</div></div>`:'';
-  const sharedRemainder=Math.max(0,groups.matchedTotal-groups.why.length);
-  const sharedNote=sharedRemainder?`<span class="concept-chip" title="The recommendation score uses all ${groups.matchedTotal} shared positive tags">+${sharedRemainder} shared</span>`:'';
-  const tagLine=[...groups.distinctive,...groups.more];
-  return `<div class="concept-explanation">${line('Why',groups.why,'why').replace('</div></div>',`${sharedNote}</div></div>`)}${line('Tags',tagLine)}</div>`;
+  if (!groups.matchedPositive.length && !groups.matchedNegative.length && !groups.distinctive.length && !groups.more.length) return '';
+  const scoringChips=[
+    ...groups.matchedPositive.map(item=>conceptChipHtml(item.tag,movieId,'score-positive',`+${item.contribution.toFixed(1)}`)),
+    ...groups.matchedNegative.map(item=>conceptChipHtml(item.tag,movieId,'score-negative',`${item.contribution.toFixed(1)}`))
+  ].join('');
+  const otherTags=[...groups.distinctive,...groups.more].map(tag=>conceptChipHtml(tag,movieId,'')).join('');
+  const scoringRow=scoringChips?`<div class="score-chip-row">${scoringChips}</div>`:'';
+  const tagRow=otherTags?`<div class="tag-chip-row">${otherTags}</div>`:'';
+  return `<div class="concept-explanation">${scoringRow}${tagRow}</div>`;
 }
 
 function handleConceptClick(id, tag, event) {

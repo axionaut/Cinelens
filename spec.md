@@ -105,12 +105,19 @@ tag rows use compact full-width chip rows so label gutters do not waste space.
 The card labels are:
 
 ```text
-Why   positively weighted matched tags for recommendations
 Tags  other cleaned/normalized tags
 ```
 
 Do not show internal source/count labels such as `wikipedia · 12 tags` on
 user-facing cards.
+
+Recommendation cards should not use a separate legacy `Why` row. They should
+show the match percentage prominently and color-code scoring tags directly:
+positive matched tags show their positive contribution, disliked/negative
+matches use warning color, and ordinary descriptive tags remain neutral.
+
+Card titles must wrap instead of cropping, especially on mobile. Mobile title
+grids should use one card per row for readability.
 
 Cards must show whether the title is a Movie or Show. When a verified
 Wikipedia URL is available, clicking the title name opens that page in a new
