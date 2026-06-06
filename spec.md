@@ -94,6 +94,11 @@ The control deck owns global controls:
 On mobile, the control deck must be collapsible so the sticky settings area
 does not consume most of the viewport.
 
+The control deck must stay compact. Do not show internal tag/candidate debug
+text in the user-facing deck. On desktop, filters, sort, search and manual URL
+controls should use a dense layout instead of spreading across unnecessary
+empty vertical space.
+
 Tag click mode is global, not Tags-page-only. In explore mode, tag clicks open
 the tag workspace. In remove mode, tag chips remove the tag from that title.
 
@@ -112,9 +117,12 @@ Do not show internal source/count labels such as `wikipedia · 12 tags` on
 user-facing cards.
 
 Recommendation cards should not use a separate legacy `Why` row. They should
-show the match percentage prominently and color-code scoring tags directly:
-positive matched tags show their positive contribution, disliked/negative
-matches use warning color, and ordinary descriptive tags remain neutral.
+show the match percentage prominently and color-code scoring tags directly.
+The displayed match percentage must be normalized from the same ordering basis
+used to rank recommendations, so visible order and visible number agree:
+positive overlap first, then negative overlap, then weighted score. Positive
+matched tags show their positive contribution, disliked/negative matches use
+warning color, and ordinary descriptive tags remain neutral.
 
 Card titles must wrap instead of cropping, especially on mobile. Mobile title
 grids should use one card per row for readability.
@@ -1089,13 +1097,16 @@ Alphabetical order may be used only as a tie-breaker.
 
 ### 8.3 Match Display
 
-Match percentage is absolute weighted taste coverage:
+Match percentage is rank-normalized from the same ordering tuple used by the
+recommendation sorter:
 
 ```js
-matchPct = Math.round(positiveWeightedContribution / totalPositiveTasteWeight * 100)
+matchPct = normalize(positiveOverlap, negativeOverlap, weightedScore, genreOverlap)
 ```
 
-The first ranked recommendation is not automatically labeled 100%.
+The first ranked recommendation may be labeled 100%, because it is the current
+best item in the visible recommendation set. Lower-ranked cards must not show a
+higher match percentage than earlier cards in the same sorted list.
 
 The background target means enough strong recommendation candidates for the
 current taste profile. It must not require five titles to exactly match the

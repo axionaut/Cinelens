@@ -398,7 +398,22 @@
     .settings-bar .sep-v{display:none}
     .settings-bar label{align-self:center}
     .settings-bar select,.settings-bar input,.settings-bar button,.title-search-input{width:100%;min-width:0}
-    #hkStatus{grid-column:1/-1}
-    .platform-bar.manual-add-row{display:grid;grid-template-columns:1fr;gap:8px}
-    .platform-label{font-size:12px}
+  .platform-bar.manual-add-row{display:grid;grid-template-columns:1fr;gap:8px}
+  .platform-label{font-size:12px}
+  }
+
+  @media(min-width:769px){
+    .control-deck{padding:12px 18px;gap:10px}
+    .control-content{display:grid;grid-template-columns:auto 1fr;gap:10px 18px;align-items:center}
+    .stats-bar{grid-row:1 / span 2;display:grid;grid-template-columns:repeat(5,auto);gap:22px;align-items:center;border-bottom:0;margin:0;padding:0 18px 0 0;border-right:1px solid rgba(255,204,51,.13)}
+    .stat-val{font-size:26px}
+    .stat-label{font-size:9px}
+    .settings-bar{grid-column:2;display:flex;align-items:center;flex-wrap:nowrap;gap:8px;margin:0!important;min-width:0}
+    .settings-bar label{font-size:10px;white-space:nowrap}
+    .settings-bar .platform-select{min-width:110px;max-width:150px}
+    .settings-bar .year-input{width:74px}
+    .title-search-input{width:150px}
+    .platform-bar.manual-add-row{grid-column:2;display:flex;align-items:center;flex-wrap:nowrap;gap:8px;margin:0!important;padding-top:0;border-top:0;min-width:0}
+    .manual-title-input{width:min(360px,26vw)}
+    .manual-add-row .platform-btn{white-space:nowrap}
   }

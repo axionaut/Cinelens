@@ -2093,7 +2093,7 @@ function renderRecs() {
       document.getElementById('recCount').textContent = fetchStatus.strongCount < STRONG_REC_TARGET
         ? `improving recommendations · ${fetchStatus.strongCount}/${STRONG_REC_TARGET} strong · showing ${top.length} of ${scored.length}`
         : `showing ${top.length} of ${scored.length} matches`;
-      top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit })));
+      top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore })));
       return;
     }
   }
@@ -2292,11 +2292,11 @@ function restoreManualStars() {
   box.querySelectorAll('.star').forEach(st => st.classList.remove('active'));
 }
 function buildCard(movie, opts={}) {
-  const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextConcept } = opts;
+  const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextConcept } = opts;
   const card = document.createElement('div');
   card.className = 'movie-card' + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
-  const matchPct = rank ? Math.round((tasteFit || 0) * 100) : 0;
+  const matchPct = rank ? Math.round((Number(matchScore ?? tasteFit) || 0) * 100) : 0;
   const safeId = movie.id.replace(/'/g,"\\'");
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';
   const wikiUrl = movie.wikiUrl || (movie.wikiTitle || movie.pageTitle ? wikiUrlFromTitle(movie.wikiTitle || movie.pageTitle) : '');
@@ -2547,7 +2547,7 @@ function scoreMovies() {
   computeTagWeights();
   const totalPositiveWeight=Object.entries(state.tagWeights).reduce((sum,[tag,weight])=>weight>0?sum+weight*conceptSpecificity(tag):sum,0);
   const totalPositiveGenreWeight=Object.values(state.genreWeights).reduce((sum,weight)=>weight>0?sum+weight*GENRE_SCORE_FACTOR:sum,0);
-  return Object.values(state.movies)
+  const ranked = Object.values(state.movies)
     .filter(m => m.rating===0&&scoringTags(m).length>0)
     .map(m => {
       let score=0, posOverlap=0, genreOverlap=0, negativeOverlap=0, positiveScore=0, negativePenalty=0;
@@ -2572,6 +2572,16 @@ function scoreMovies() {
     })
     .filter(x => x.posOverlap>0&&x.positiveScore>0&&x.score>0)
     .sort((a,b) => b.posOverlap-a.posOverlap||a.negativeOverlap-b.negativeOverlap||b.score-a.score||b.genreOverlap-a.genreOverlap||b.positiveScore-a.positiveScore||a.movie.title.localeCompare(b.movie.title));
+  const best = ranked[0] || null;
+  ranked.forEach(item => {
+    if (!best) { item.matchScore = 0; return; }
+    const overlapPart = best.posOverlap ? item.posOverlap / best.posOverlap : 0;
+    const scorePart = best.score ? Math.max(0, Math.min(1, item.score / best.score)) : 0;
+    const genrePart = best.genreOverlap ? item.genreOverlap / best.genreOverlap : 0;
+    const penalty = Math.min(0.25, item.negativeOverlap * 0.06);
+    item.matchScore = Math.max(0, Math.min(1, overlapPart * 0.7 + scorePart * 0.25 + genrePart * 0.05 - penalty));
+  });
+  return ranked;
 }
 
 // ─────────────────────────────────────────────
@@ -2818,7 +2828,10 @@ function runHousekeeping(manual=true, deferCanonical=false) {
 function countUniqueTags() { const s=new Set(); Object.values(state.movies).forEach(m=>scoringTags(m).forEach(t=>s.add(t))); return s.size; }
 function countRawTags() { const s=new Set(); Object.values(state.movies).forEach(m=>rawScoringTags(m).forEach(t=>s.add(t))); return s.size; }
 function tagStatusText() { return `tags: ${countUniqueTags()} · candidates: ${countRawTags()}`; }
-function updateHKStatus(msg) { document.getElementById('hkStatus').textContent=msg; }
+function updateHKStatus(msg) {
+  const el = document.getElementById('hkStatus');
+  if (el) el.textContent = msg;
+}
 
 // ─────────────────────────────────────────────
 // TAG BRAIN
