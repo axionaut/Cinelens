@@ -4,19 +4,29 @@
 // The API returns page titles which we then individually fetch.
 // ─────────────────────────────────────────────
 const WIKI_SOURCES = {
-  movies: ['Category:English-language_films','Category:Hindi-language_films']
+  englishMovies: ['Category:English-language_films'],
+  hindiMovies: ['Category:Hindi-language_films']
 };
 const WIKI_LIST_SOURCES = {
   showsIndex: 'Lists of television programs',
-  showsSeedLists: ['List of television programs: A','List of television programs: B','List of television programs: C','List of Indian television series','List of British television programmes']
+  englishShows: ['List of television programs: A','List of television programs: B','List of television programs: C','List of British television programmes','List of Netflix original programming','List of Amazon Prime Video original programming'],
+  hindiShows: ['List of Indian television series','List of Hindi-language television shows']
 };
 
 const WIKI_NAVIGATION_LISTS = {
   englishMovies: ['Lists of English-language films','List of American films of the 2020s','List of British films of 2020','List of films considered the best'],
   hindiMovies: ['Lists of Hindi films','List of Hindi films of 2024','List of Hindi films of 2023','List of Hindi films of 2022','List of Bollywood films of 2021'],
   topicMovies: ['List of films considered the best','List of cult films','List of films based on actual events','List of films based on awards','List of films with a 100% rating on Rotten Tomatoes'],
-  shows: ['List of Netflix original programming','List of Amazon Prime Video original programming','List of Hindi-language television shows','List of Indian television series']
+  englishShows: ['List of Netflix original programming','List of Amazon Prime Video original programming','List of British television programmes'],
+  hindiShows: ['List of Hindi-language television shows','List of Indian television series']
 };
+
+const COLLECTION_LANES = [
+  { key:'englishMovies', label:'English movies', mode:'movies', language:'English', weight:4 },
+  { key:'hindiMovies', label:'Hindi movies', mode:'movies', language:'Hindi', weight:3 },
+  { key:'englishShows', label:'English shows', mode:'shows', language:'English', weight:2 },
+  { key:'hindiShows', label:'Hindi shows', mode:'shows', language:'Hindi', weight:1 }
+];
 
 
 // Curated expansion packs — well-known films by title, fetched from Wikipedia
@@ -163,9 +173,10 @@ let state = {
   settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', tagDeleteMode:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
-  canonicalTagStats: { raw:0, canonical:0, rebuiltAt:'' },
+  tagStats: { candidates:0, tags:0, rebuiltAt:'' },
   rejectedWikiTitles: {},
   rejectedRefresh: { additionsSinceRefresh:0, lastRunAt:0, totalRuns:0 },
+  meta: { updatedAt:'' },
   poolFetched: false
 };
 
@@ -236,7 +247,6 @@ function normaliseTagName(tag) {
   return String(tag || '').toLowerCase().trim().replace(/\s+/g, '-');
 }
 
-const CANONICAL_TAG_VERSION = 3;
 const CANONICAL_FUNCTION_WORDS = new Set('a an the and or but nor so yet of in on at to from into onto by for with without as is are was were be been being has have had do does did will would can could may might must shall should this that these those it its he she they them his her their who whom whose which what when where while after before during then than also just still already again ever never very more most less least much many some any each every both either neither keeps keep kept starts start started begins begin began continues continue continued tries try tried'.split(' '));
 
 function stemCanonicalToken(token) {
@@ -271,8 +281,8 @@ function rawScoringTags(movie) {
   return [...new Set((base || []).filter(t => rawTagAllowed(movie, t)).filter(t => !isMetaTag(t)).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)))];
 }
 
-function suppressedConceptSet(movie) {
-  return new Set((movie?.suppressedConcepts || []).map(normaliseTagName).filter(Boolean));
+function suppressedTagSet(movie) {
+  return new Set([...(movie?.suppressedTags || []), ...(movie?.suppressedConcepts || [])].map(normaliseTagName).filter(Boolean));
 }
 
 function suppressedRawTagSet(movie) {
@@ -280,7 +290,7 @@ function suppressedRawTagSet(movie) {
 }
 
 function conceptAllowed(movie, concept) {
-  return !suppressedConceptSet(movie).has(normaliseTagName(concept));
+  return !suppressedTagSet(movie).has(normaliseTagName(concept));
 }
 
 function rawTagAllowed(movie, tag) {
@@ -330,8 +340,9 @@ function probableEntityTokens(movie) {
   return new Set([...counts.entries()].filter(([, count]) => count >= 2).map(([token]) => token));
 }
 
-function rebuildCanonicalTagBrain() {
+function rebuildTagBrain() {
   const records = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})];
+  const now = new Date().toISOString();
   const frequency = new Map();
   records.forEach(movie => rawScoringTags(movie).forEach(tag => frequency.set(tag, (frequency.get(tag) || 0) + 1)));
   const tags = [...frequency.keys()];
@@ -390,18 +401,28 @@ function rebuildCanonicalTagBrain() {
   });
   let changed = 0;
   records.forEach(movie => {
+    const before = JSON.stringify(rawScoringTags(movie));
     const learned = [];
     rawScoringTags(movie).forEach(tag => {
       const feature = features.get(tag) || canonicalTagFeatures(tag);
       if ((supportFor.get(tag) || 0) > 1) learned.push(labelFor.get(tag) || feature.phrase);
     });
     const fallback = rawScoringTags(movie).map(tag => labelFor.get(tag) || canonicalTagFeatures(tag).phrase).filter(Boolean);
-    const canonicalTags = [...new Set(learned.length ? learned : fallback)].filter(tag => conceptAllowed(movie, tag));
-    if (JSON.stringify(movie.canonicalTags || []) !== JSON.stringify(canonicalTags) || movie.canonicalTagVersion !== CANONICAL_TAG_VERSION) changed++;
-    movie.canonicalTags = canonicalTags;
-    movie.canonicalTagVersion = CANONICAL_TAG_VERSION;
+    const normalizedTags = cleanTagArray([...new Set(learned.length ? learned : fallback)].filter(tag => conceptAllowed(movie, tag)), movie, false);
+    movie.tags = normalizedTags;
+    movie.coreTags = normalizedTags;
+    movie.plotTags = normalizedTags;
+    movie.descriptorTags = normalizedTags;
+    movie.tagged = normalizedTags.length > 0;
+    delete movie.canonicalTags;
+    delete movie.canonicalTagVersion;
+    if (before !== JSON.stringify(normalizedTags)) {
+      changed++;
+      touchRecord(movie, now);
+    }
   });
-  state.canonicalTagStats = { raw:tags.length, canonical:new Set(records.flatMap(movie => movie.canonicalTags || [])).size, rebuiltAt:new Date().toISOString() };
+  state.tagStats = { candidates:tags.length, tags:new Set(records.flatMap(movie => movie.tags || [])).size, rebuiltAt:new Date().toISOString() };
+  delete state.canonicalTagStats;
   conceptStatsCache = null;
   return changed;
 }
@@ -525,20 +546,31 @@ function extractRawDescriptors(text) {
   const nameTokens = detectLikelyNameTokens(text);
   const tokens = tokeniseStory(text);
   const counts = new Map();
+  const firstSeen = new Map();
   for (let n = 2; n <= 5; n++) {
     for (let i = 0; i <= tokens.length - n; i++) {
       const words = removeNameTokensFromWords(tokens.slice(i, i+n), nameTokens);
       if (!phraseLooksUseful(words)) continue;
       const phrase = words.join(' ');
       counts.set(phrase, (counts.get(phrase) || 0) + 1);
+      if (!firstSeen.has(phrase)) firstSeen.set(phrase, i);
     }
   }
-  const actionWords = /\b(kills|murder|discovers|investigates|escapes|travels|betrays|rescues|kidnaps|frames|steals|falls|returns|reveals|protects|survives|learns|decides|plans|joins|fights|seeks|finds|sent|trapped|forced|accused|wrongfully|time|machine|kingdom|throne|war|battle|mission|case|conspiracy|prison|court|killer|alien|space)\b/;
+  const actionWords = /\b(kills|murder|discovers|investigates|escapes|travels|betrays|rescues|kidnaps|frames|steals|falls|returns|reveals|protects|survives|learns|decides|plans|joins|fights|seeks|finds|sent|trapped|forced|accused|wrongfully|time|machine|kingdom|throne|war|battle|mission|case|conspiracy|prison|court|killer|alien|space|relationship|family|marriage|village|workplace|school|college)\b/;
+  const storyAttributeWords = /\b(setting|relationship|mystery|investigation|revenge|escape|survival|conspiracy|courtroom|prison|workplace|family|marriage|friendship|identity|grief|war|space|time|village|school|college|detective|spy|mission|crime)\b/;
+  const totalTokens = Math.max(1, tokens.length);
   return [...counts.entries()].map(([phrase, count]) => {
     const words = phrase.split(' ');
-    let score = count * (words.length === 2 ? 1.2 : words.length === 3 ? 1.5 : 1.25);
+    const useful = words.filter(w => !DESCRIPTOR_STOP.has(w) && w.length > 2);
+    const lengthScore = words.length === 2 ? 1.15 : words.length === 3 ? 1.55 : words.length === 4 ? 1.3 : 1.05;
+    const positionScore = 1 + Math.max(0, 1 - (firstSeen.get(phrase) || 0) / totalTokens) * 0.35;
+    const usefulRatio = useful.length / words.length;
+    const repetitionScore = 1 + Math.log1p(count) * 0.65;
+    let score = repetitionScore * lengthScore * positionScore * usefulRatio;
     if (actionWords.test(phrase)) score *= 1.65;
-    return { phrase, count, score };
+    if (storyAttributeWords.test(phrase)) score *= 1.35;
+    if (words.some(w => GENERIC_CONCEPT_TOKENS.has(stemCanonicalToken(w)))) score *= 0.72;
+    return { phrase, count, score, first:firstSeen.get(phrase) || 0 };
   }).sort((a,b) => b.score - a.score || a.phrase.localeCompare(b.phrase)).slice(0, 40);
 }
 
@@ -638,7 +670,7 @@ function rebuildDescriptorBrain() {
 
 function cleanContaminatedTags(silent=true) {
   migrateLegacyPoolItems();
-  const changed = rebuildDescriptorBrain() + rebuildCanonicalTagBrain();
+  const changed = rebuildDescriptorBrain() + rebuildTagBrain();
   computeTagWeights();
   if (changed) saveLocalState();
   if (changed && !silent) showToast(`Cleaned descriptor data on ${changed} titles`, 'success');
@@ -772,9 +804,7 @@ function expansionMode() {
 }
 
 function sourceCategoriesForMode(mode) {
-  if (mode === 'movies') return WIKI_SOURCES.movies;
-  if (mode === 'shows') return [];
-  return [...WIKI_SOURCES.movies];
+  return collectionLanesForMode(mode).flatMap(lane => WIKI_SOURCES[lane.key] || []);
 }
 
 function curatedTitlesForMode(mode) { return []; }
@@ -783,6 +813,22 @@ function matchesExpansionMode(movie, mode) {
   if (mode === 'movies') return !movie.format;
   if (mode === 'shows') return !!movie.format;
   return true;
+}
+
+function collectionLanesForMode(mode) {
+  const exact = COLLECTION_LANES.find(lane => lane.key === mode);
+  if (exact) return [exact];
+  if (mode === 'movies') return COLLECTION_LANES.filter(lane => lane.mode === 'movies');
+  if (mode === 'shows') return COLLECTION_LANES.filter(lane => lane.mode === 'shows');
+  return COLLECTION_LANES;
+}
+
+function laneMatchesMovie(movie, lane) {
+  return matchesExpansionMode(movie, lane.mode) && movie.language === lane.language;
+}
+
+function weightedLaneLists(laneItems) {
+  return laneItems.flatMap(item => Array.from({ length:item.lane.weight }, () => item.titles));
 }
 
 function rejectKey(title, mode) { return `${mode}:${normaliseTitleKey(title)}`; }
@@ -916,7 +962,7 @@ async function refreshRejectedLane(force=false) {
     refresh.lastRunAt = Date.now();
     refresh.totalRuns = Number(refresh.totalRuns || 0) + 1;
   }
-  if (recovered) rebuildCanonicalTagBrain();
+  if (recovered) rebuildTagBrain();
   saveLocalState();
   return { attempted, recovered, completed:!interrupted };
 }
@@ -981,11 +1027,12 @@ function roundRobinUnique(lanes) {
   while (added) {
     added = false;
     for (const q of queues) {
-      const title = q.shift();
-      if (!title) continue;
+      const item = q.shift();
+      if (!item) continue;
+      const title = typeof item === 'string' ? item : item.title;
       const key = normaliseTitleKey(title);
       if (!key || seen.has(key) || obviousNonMovieTitle(title)) continue;
-      seen.add(key); out.push(title); added = true;
+      seen.add(key); out.push(item); added = true;
     }
   }
   return out;
@@ -1007,10 +1054,10 @@ async function fetchWikiPageLinks(title, limit=500) {
   return links;
 }
 
-async function fetchShowSourceTitles() {
+async function fetchShowSourceTitles(laneKey='englishShows') {
   const indexLinks = await fetchWikiPageLinks(WIKI_LIST_SOURCES.showsIndex, 500);
   const listPages = [...new Set([
-    ...WIKI_LIST_SOURCES.showsSeedLists,
+    ...(WIKI_LIST_SOURCES[laneKey] || []),
     ...indexLinks.filter(isShowListPage)
   ])].slice(0, 28);
   const titles = [];
@@ -1038,8 +1085,10 @@ async function fetchWikiSearchTitles(query) {
 
 async function fetchNavigationLaneTitles(mode, limitPerPage=180) {
   const pages = [];
-  if (mode === 'movies' || mode === 'all') pages.push(...WIKI_NAVIGATION_LISTS.englishMovies, ...WIKI_NAVIGATION_LISTS.hindiMovies, ...WIKI_NAVIGATION_LISTS.topicMovies);
-  if (mode === 'shows' || mode === 'all') pages.push(...WIKI_NAVIGATION_LISTS.shows);
+  collectionLanesForMode(mode).forEach(lane => {
+    pages.push(...(WIKI_NAVIGATION_LISTS[lane.key] || []));
+    if (lane.mode === 'movies') pages.push(...WIKI_NAVIGATION_LISTS.topicMovies);
+  });
   const titles = [];
   for (const page of [...new Set(pages)].slice(0, 14)) {
     if (fetchAbortRequested) break;
@@ -1052,9 +1101,13 @@ async function fetchNavigationLaneTitles(mode, limitPerPage=180) {
 }
 
 async function candidateTitlesForMode(mode, pageDepth=4) {
-  const categoryTitles = await fetchWikiSourceTitles(mode, pageDepth);
-  const navigationTitles = await fetchNavigationLaneTitles(mode, 220);
-  return roundRobinUnique([navigationTitles, categoryTitles]);
+  const laneItems = [];
+  for (const lane of collectionLanesForMode(mode)) {
+    const categoryTitles = await fetchWikiSourceTitles(lane.key, pageDepth);
+    const navigationTitles = await fetchNavigationLaneTitles(lane.key, 220);
+    laneItems.push({ lane, titles: roundRobinUnique([navigationTitles, categoryTitles]).map(title => ({ title, lane })) });
+  }
+  return roundRobinUnique(weightedLaneLists(laneItems));
 }
 
 
@@ -1075,8 +1128,9 @@ async function fetchWikiSourceTitles(mode, pagesPerCategory=4) {
       }
     } catch(e) {}
   }
-  if (mode === 'shows' || mode === 'all') {
-    titles.push(...await fetchShowSourceTitles());
+  const lane = COLLECTION_LANES.find(item => item.key === mode);
+  if (lane?.mode === 'shows') {
+    titles.push(...await fetchShowSourceTitles(lane.key));
   }
   return [...new Set(titles)];
 }
@@ -1108,9 +1162,12 @@ async function expandPool(manual=true) {
   while (!fetchAbortRequested) {
     const allTitles = await candidateTitlesForMode(mode, pageDepth);
     const existing = new Set(Object.values(state.movies).map(m => normaliseTitleKey(m.title)));
-    const toFetch = allTitles.filter(t => {
-      const clean = normaliseTitleKey(t);
-      return clean && !existing.has(clean) && !hiddenTitleMatches(t) && !seenThisRun.has(clean) && !state.rejectedWikiTitles[rejectKey(t, mode)] && !obviousNonMovieTitle(t);
+    const toFetch = allTitles.filter(item => {
+      const title = typeof item === 'string' ? item : item.title;
+      const lane = typeof item === 'string' ? null : item.lane;
+      const clean = normaliseTitleKey(title);
+      const keyMode = lane?.key || mode;
+      return clean && !existing.has(clean) && !hiddenTitleMatches(title) && !seenThisRun.has(clean) && !state.rejectedWikiTitles[rejectKey(title, keyMode)] && !obviousNonMovieTitle(title);
     });
 
     if (!toFetch.length) {
@@ -1120,7 +1177,11 @@ async function expandPool(manual=true) {
 
     for (let i = 0; i < toFetch.length; i++) {
       if (fetchAbortRequested) break;
-      const title = toFetch[i];
+      const candidate = toFetch[i];
+      const title = typeof candidate === 'string' ? candidate : candidate.title;
+      const lane = typeof candidate === 'string' ? null : candidate.lane;
+      const fetchMode = lane?.mode || mode;
+      const keyMode = lane?.key || mode;
       seenThisRun.add(normaliseTitleKey(title));
       attempts++;
       if (manual || chasingPerfect || needsMorePerfectRecommendations()) {
@@ -1132,16 +1193,16 @@ async function expandPool(manual=true) {
         );
       }
       try {
-        const movie = await fetchWikiMovie(title, mode);
+        const movie = await fetchWikiMovie(title, fetchMode);
         if (movie && isMovieHidden(movie)) {
           // Keep explicitly hidden titles out of both the pool and rejected list.
         } else if (movie && !state.movies[movie.id]) {
-          if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, mode)) {
+          if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
             state.movies[movie.id] = movie;
             added++;
             const rejectedRefreshDue = notePoolAddition();
             if (added % CARD_REFRESH_BATCH_SIZE === 0) {
-              rebuildCanonicalTagBrain();
+              rebuildTagBrain();
               computeTagWeights();
               saveLocalState();
               render();
@@ -1152,14 +1213,14 @@ async function expandPool(manual=true) {
             }
             if (!needsMorePerfectRecommendations() && !manual) { fetchAbortRequested = true; break; }
           } else {
-            recordRejectedTitle(title, mode, 'language/year/type mismatch');
+            recordRejectedTitle(title, keyMode, 'language/year/type mismatch');
           }
         } else {
-          recordRejectedTitle(title, mode, 'not a usable Hindi/English movie or show');
+          recordRejectedTitle(title, keyMode, 'not a usable Hindi/English movie or show');
         }
       } catch(e) {
         if (fetchAbortRequested || e.name === 'AbortError') break;
-        recordRejectedTitle(title, mode, e.message || 'fetch failed');
+        recordRejectedTitle(title, keyMode, e.message || 'fetch failed');
       }
       if (fetchAbortRequested) break;
       if (attempts % 20 === 0) await abortableSleep(WIKI_BATCH_PAUSE_MS);
@@ -1175,7 +1236,7 @@ async function expandPool(manual=true) {
   const stopped = fetchAbortRequested || autoFetchPaused;
   fetchAbortRequested = false;
   if (!stopped) autoFetchPaused = false;
-  rebuildCanonicalTagBrain();
+  rebuildTagBrain();
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
   const recoveredText = recovered ? ` Recovered ${recovered} rejected ${recovered === 1 ? 'title' : 'titles'}.` : '';
@@ -1604,7 +1665,6 @@ function tagEvidenceOk(tag, movie) {
 
 function scoringTags(movie) {
   if (!movie) return [];
-  if (movie.canonicalTagVersion === CANONICAL_TAG_VERSION && Array.isArray(movie.canonicalTags)) return [...new Set(movie.canonicalTags)].filter(tag => conceptAllowed(movie, tag));
   return [...new Set(rawScoringTags(movie).map(tag => canonicalTagFeatures(tag).phrase).filter(Boolean))].filter(tag => conceptAllowed(movie, tag));
 }
 
@@ -1775,7 +1835,7 @@ function updateControlDeck() {
   const modeBtn=document.getElementById('tagDeleteModeBtn');
   if (modeBtn) {
     modeBtn.classList.toggle('active', !!state.settings.tagDeleteMode);
-    modeBtn.textContent=state.settings.tagDeleteMode ? 'Concept/tag clicks: remove' : 'Concept/tag clicks: explore';
+    modeBtn.textContent=state.settings.tagDeleteMode ? 'Tag clicks: remove' : 'Tag clicks: explore';
   }
   const genreFilter=document.getElementById('genreFilter');
   if (genreFilter && genreFilter.value !== (state.settings.genreFilter || 'all')) genreFilter.value=state.settings.genreFilter || 'all';
@@ -2114,7 +2174,7 @@ function buildCard(movie, opts={}) {
         ${movie.thumbnailUrl ? `<img class="card-thumb" src="${movie.thumbnailUrl}" alt="" loading="lazy" decoding="async">` : ''}
         <div class="card-head-copy"><div class="card-title">${movie.title}</div>
         <div class="card-meta">${movie.language}·${movie.country}·${movie.year||'?'}</div>
-        ${rank?`<div class="match-label">${posOverlap || 0} shared concept${posOverlap===1?'':'s'}${genreOverlap?` · ${genreOverlap} genre match${genreOverlap===1?'':'es'}`:''} · ${matchPct}% weighted fit${negativeOverlap?` · ${negativeOverlap} disliked`:''}</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
+        ${rank?`<div class="match-label">${posOverlap || 0} shared tag${posOverlap===1?'':'s'}${genreOverlap?` · ${genreOverlap} genre match${genreOverlap===1?'':'es'}`:''} · ${matchPct}% weighted fit${negativeOverlap?` · ${negativeOverlap} disliked`:''}</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
       </div>
       ${renderStars(safeId, movie.rating || 0)}
       ${renderGenres(movie, matchedGenres)}
@@ -2218,13 +2278,13 @@ function renderTagChips(tags, matchedTags, expanded) {
 function conceptChipHtml(tag, movieId, kind='', impact='') {
     const safeTag = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     const weight = Number(state.tagWeights[tag] || 0);
-    const title = weight ? `Taste weight ${weight > 0 ? '+' : ''}${weight}. Click to ${state.settings.tagDeleteMode ? 'remove permanently from this title' : 'explore this concept'}.` : `Click to ${state.settings.tagDeleteMode ? 'remove permanently from this title' : 'explore this concept'}.`;
+    const title = weight ? `Taste weight ${weight > 0 ? '+' : ''}${weight}. Click to ${state.settings.tagDeleteMode ? 'remove permanently from this title' : 'explore this tag'}.` : `Click to ${state.settings.tagDeleteMode ? 'remove permanently from this title' : 'explore this tag'}.`;
     return `<span class="concept-chip ${kind}" title="${title}" onclick="handleConceptClick('${movieId}','${safeTag}',event)">${tag}${impact ? `<span class="impact">${impact}</span>` : ''}</span>`;
 }
 
 function rawTagChipHtml(tag, movieId) {
     const safeTag = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    const title = state.settings.tagDeleteMode ? 'Click to remove this raw tag permanently from this title.' : 'Raw tag used before concept grouping. Turn on remove mode to delete it from this title.';
+    const title = state.settings.tagDeleteMode ? 'Click to remove this raw tag permanently from this title.' : 'Raw candidate used before tag cleanup. Turn on remove mode to delete it from this title.';
     return `<span class="concept-chip raw-tag" title="${title}" onclick="handleRawTagClick('${movieId}','${safeTag}',event)">${tag}</span>`;
 }
 
@@ -2245,17 +2305,15 @@ function cardConceptGroups(movie, matchedTags=null, contextConcept='') {
 
 function renderConceptChips(movie, movieId, expanded, matchedTags=null, contextConcept='') {
   const groups=cardConceptGroups(movie,matchedTags,contextConcept);
-  const rawTags=rawScoringTags(movie).filter(tag=>!scoringTags(movie).includes(tag)).sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||a.localeCompare(b));
-  if (!groups.why.length && !groups.distinctive.length && !groups.more.length && !rawTags.length) return '';
+  if (!groups.why.length && !groups.distinctive.length && !groups.more.length) return '';
   const line=(label,items,kind='')=>items.length?`<div class="concept-line"><span class="concept-line-label">${label}</span><div class="concept-line-items">${items.map(tag=>{
     const impact=kind==='why'?`+${(Number(state.tagWeights[tag]||0)*conceptSpecificity(tag)).toFixed(1)}`:'';
     return conceptChipHtml(tag,movieId,kind,impact);
   }).join('')}</div></div>`:'';
   const sharedRemainder=Math.max(0,groups.matchedTotal-groups.why.length);
-  const sharedNote=sharedRemainder?`<span class="concept-chip" title="The recommendation score uses all ${groups.matchedTotal} shared positive concepts">+${sharedRemainder} shared</span>`:'';
-  const conceptLine=[...groups.distinctive,...groups.more];
-  const rawLine=rawTags.length?`<div class="concept-line"><span class="concept-line-label">Tags</span><div class="concept-line-items">${rawTags.map(tag=>rawTagChipHtml(tag,movieId)).join('')}</div></div>`:'';
-  return `<div class="concept-explanation">${line('Why',groups.why,'why').replace('</div></div>',`${sharedNote}</div></div>`)}${line('Concepts',conceptLine)}${rawLine}</div>`;
+  const sharedNote=sharedRemainder?`<span class="concept-chip" title="The recommendation score uses all ${groups.matchedTotal} shared positive tags">+${sharedRemainder} shared</span>`:'';
+  const tagLine=[...groups.distinctive,...groups.more];
+  return `<div class="concept-explanation">${line('Why',groups.why,'why').replace('</div></div>',`${sharedNote}</div></div>`)}${line('Tags',tagLine)}</div>`;
 }
 
 function handleConceptClick(id, tag, event) {
@@ -2273,14 +2331,17 @@ function removeTagFromMovie(id, tag, event) {
   if (event) event.stopPropagation();
   const movie = state.movies[id] || state.hiddenTitles?.[id];
   if (!movie) return;
-  movie.suppressedConcepts = [...new Set([...(movie.suppressedConcepts || []), normaliseTagName(tag)])];
-  movie.canonicalTags = (movie.canonicalTags || []).filter(t => normaliseTagName(t) !== normaliseTagName(tag));
+  movie.suppressedTags = [...new Set([...(movie.suppressedTags || []), normaliseTagName(tag)])];
+  ['tags','coreTags','plotTags','descriptorTags'].forEach(key => {
+    movie[key] = (movie[key] || []).filter(t => normaliseTagName(t) !== normaliseTagName(tag));
+  });
   movie.tagged = scoringTags(movie).length > 0;
+  touchRecord(movie);
   computeTagWeights();
   saveLocalState();
   syncDrive();
   render();
-  showToast(`Removed concept from "${movie.title}": ${tag}`, 'success');
+  showToast(`Removed tag from "${movie.title}": ${tag}`, 'success');
 }
 
 function removeRawTagFromMovie(id, tag, event) {
@@ -2293,6 +2354,7 @@ function removeRawTagFromMovie(id, tag, event) {
     movie[key] = (movie[key] || []).filter(t => normaliseTagName(t) !== normalised);
   });
   movie.tagged = scoringTags(movie).length > 0 || rawScoringTags(movie).length > 0;
+  touchRecord(movie);
   computeTagWeights();
   saveLocalState();
   syncDrive();
@@ -2370,8 +2432,9 @@ function rateMovie(id, rating) {
   movie.watchlist = false;
   if (!movie.tagged) {
     tagMovie(movie);
-    rebuildCanonicalTagBrain();
+    rebuildTagBrain();
   }
+  touchRecord(movie);
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
   showToast(`"${movie.title}" → ${rating}/5`, 'success');
@@ -2384,7 +2447,8 @@ function deleteMovie(id, e) {
   if (e) e.stopPropagation();
   const m = state.movies[id];
   if (!m||!confirm(`Hide "${m.title}"? It will not be fetched again.`)) return;
-  state.hiddenTitles[id] = { ...m, hiddenAt: new Date().toISOString() };
+  const stamp = nowStamp();
+  state.hiddenTitles[id] = touchRecord({ ...m, hiddenAt: stamp }, stamp);
   delete state.movies[id];
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
@@ -2395,6 +2459,7 @@ function restoreHiddenMovie(id, e) {
   const movie = state.hiddenTitles?.[id];
   if (!movie) return;
   const { hiddenAt, ...restored } = movie;
+  touchRecord(restored);
   state.movies[id] = restored;
   delete state.hiddenTitles[id];
   computeTagWeights();
@@ -2406,7 +2471,7 @@ function forgetHiddenMovie(id, e) {
   const movie = state.hiddenTitles?.[id];
   if (!movie || !confirm(`Forget "${movie.title}" permanently? It may be fetched again later.`)) return;
   delete state.hiddenTitles[id];
-  rebuildCanonicalTagBrain();
+  rebuildTagBrain();
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
   showToast(`Forgot "${movie.title}"`, '');
@@ -2417,6 +2482,7 @@ function toggleWatchlist(id, e) {
   if (!m) return;
   m.watchlist = !m.watchlist;
   m.skipped = false;
+  touchRecord(m);
   saveLocalState(); syncDrive(); render();
   showToast(m.watchlist?`Added "${m.title}" to watchlist`:`Removed "${m.title}" from watchlist`, m.watchlist?'success':'');
 }
@@ -2428,7 +2494,7 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
     watchlist: !!previous.watchlist,
     skipped: !!previous.skipped,
     userNotes: previous.userNotes || '',
-    suppressedConcepts: previous.suppressedConcepts || [],
+    suppressedTags: previous.suppressedTags || previous.suppressedConcepts || [],
     thumbnailUrl: fresh.thumbnailUrl || previous.thumbnailUrl || '',
     // Explicitly preserve wiki metadata if fresh doesn't have it
     wikiPageId: fresh.wikiPageId || previous.wikiPageId,
@@ -2444,6 +2510,7 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
     retagStatus: 'verified',
     retagMessage: ''
   };
+  touchRecord(next);
   if (oldId && oldId !== next.id) delete state.movies[oldId];
   state.movies[next.id] = next;
   return next;
@@ -2558,7 +2625,7 @@ function toggleTags(id, e) {
   const el = document.getElementById('tags-'+id);
   if (el) el.innerHTML = renderConceptChips(m, id, m._expanded);
   const card = document.getElementById('card-'+id);
-  if (card) { const b=card.querySelector('.card-act'); if(b&&(b.textContent.includes('concepts')||b.textContent.includes('less'))) b.textContent=m._expanded?'▲ less':'▼ concepts'; }
+  if (card) { const b=card.querySelector('.card-act'); if(b&&(b.textContent.includes('tags')||b.textContent.includes('less'))) b.textContent=m._expanded?'▲ less':'▼ tags'; }
 }
 
 // ─────────────────────────────────────────────
@@ -2585,7 +2652,7 @@ function runHousekeeping(manual=true, deferCanonical=false) {
     m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length || (m.descriptorTags && m.descriptorTags.length));
   });
   if (!deferCanonical) {
-    rebuildCanonicalTagBrain();
+    rebuildTagBrain();
     computeTagWeights();
   }
   if (manual) {
@@ -2593,12 +2660,12 @@ function runHousekeeping(manual=true, deferCanonical=false) {
     syncDrive();
     showToast('Tags cleaned', 'success');
   }
-  updateHKStatus(canonicalStatusText());
+  updateHKStatus(tagStatusText());
 }
 
 function countUniqueTags() { const s=new Set(); Object.values(state.movies).forEach(m=>scoringTags(m).forEach(t=>s.add(t))); return s.size; }
 function countRawTags() { const s=new Set(); Object.values(state.movies).forEach(m=>rawScoringTags(m).forEach(t=>s.add(t))); return s.size; }
-function canonicalStatusText() { return `concepts: ${countUniqueTags()} · raw: ${countRawTags()}`; }
+function tagStatusText() { return `tags: ${countUniqueTags()} · candidates: ${countRawTags()}`; }
 function updateHKStatus(msg) { document.getElementById('hkStatus').textContent=msg; }
 
 // ─────────────────────────────────────────────
@@ -2625,13 +2692,13 @@ function renderTagBrain() {
     });
   });
   let entries=Object.entries(map);
-  if (!entries.length) { grid.innerHTML='<span style="font-size:12px;color:var(--muted)">No useful concepts yet.</span>'; countEl.textContent='rate movies to populate'; return; }
+  if (!entries.length) { grid.innerHTML='<span style="font-size:12px;color:var(--muted)">No useful tags yet.</span>'; countEl.textContent='rate movies to populate'; return; }
   if (tagFilter==='positive') entries=entries.filter(([,v])=>v.weight>0);
   else if (tagFilter==='negative') entries=entries.filter(([,v])=>v.weight<0);
   else if (tagFilter==='neutral') entries=entries.filter(([,v])=>v.weight===0);
   if (search) entries=entries.filter(([tag])=>tag.includes(search));
   entries.sort((a,b)=>Math.abs(b[1].weight)-Math.abs(a[1].weight)||a[0].localeCompare(b[0]));
-  countEl.textContent=`${entries.length} concepts${tagFilter!=='all'||search?' · filtered':''}`;
+  countEl.textContent=`${entries.length} tags${tagFilter!=='all'||search?' · filtered':''}`;
   grid.innerHTML=entries.map(([tag,data])=>{
     const cls=data.weight>0?'positive':data.weight<0?'negative':'neutral';
     const ws=data.weight>0?'+'+data.weight:data.weight===0?'~':data.weight;
@@ -2718,7 +2785,7 @@ function updateStats() {
   document.getElementById('statTags').textContent=countUniqueTags();
   document.getElementById('statPool').textContent=movies.length;
   document.getElementById('statAvg').textContent=avg;
-  updateHKStatus(canonicalStatusText());
+  updateHKStatus(tagStatusText());
 }
 function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveLocalState(); renderRecs(); }
 function updateMinYear(val) {
@@ -2737,7 +2804,8 @@ async function resetAllData() {
       state.tagWeights = {};
       state.genreWeights = {};
   state.hiddenTitles = {};
-  state.canonicalTagStats = { raw:0, canonical:0, rebuiltAt:'' };
+  state.tagStats = { candidates:0, tags:0, rebuiltAt:'' };
+  delete state.canonicalTagStats;
   state.rejectedWikiTitles = {};
   state.rejectedRefresh = { additionsSinceRefresh:0, lastRunAt:0, totalRuns:0 };
   state.poolFetched = false;
@@ -2752,15 +2820,135 @@ async function resetAllData() {
 // ─────────────────────────────────────────────
 // PERSISTENCE
 // ─────────────────────────────────────────────
-function saveLocalState() {
+function nowStamp() {
+  return new Date().toISOString();
+}
+
+function touchRecord(record, stamp=nowStamp()) {
+  if (!record || typeof record !== 'object') return record;
+  record._updatedAt = stamp;
+  return record;
+}
+
+function recordTimestamp(record) {
+  if (!record || typeof record !== 'object') return 0;
+  return Date.parse(record._updatedAt || record.updatedAt || record.hiddenAt || record.rejectedAt || record.at || '') || 0;
+}
+
+function dataTimestamp(data) {
+  return Date.parse(data?.meta?.updatedAt || data?.updatedAt || '') || 0;
+}
+
+function ensureSyncMetadata({touchDataset=false}={}) {
+  const stamp = nowStamp();
+  Object.values(state.movies || {}).forEach(movie => {
+    if (movie?.suppressedConcepts?.length && !movie.suppressedTags) movie.suppressedTags = movie.suppressedConcepts;
+    if (!movie._updatedAt) touchRecord(movie, stamp);
+  });
+  Object.values(state.hiddenTitles || {}).forEach(movie => {
+    if (movie?.suppressedConcepts?.length && !movie.suppressedTags) movie.suppressedTags = movie.suppressedConcepts;
+    if (!movie._updatedAt) touchRecord(movie, movie.hiddenAt || stamp);
+  });
+  Object.values(state.rejectedWikiTitles || {}).forEach(record => {
+    if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
+  });
+  if (!state.meta) state.meta = {};
+  if (touchDataset || !state.meta.updatedAt) state.meta.updatedAt = stamp;
+}
+
+function exportCinelensData() {
+  ensureSyncMetadata();
+  return {
+    meta: state.meta,
+    movies: state.movies,
+    settings: state.settings,
+    hiddenTitles: state.hiddenTitles,
+    tagStats: state.tagStats,
+    rejectedWikiTitles: state.rejectedWikiTitles,
+    rejectedRefresh: state.rejectedRefresh
+  };
+}
+
+function normaliseIncomingData(d={}) {
+  const tagStats = d.tagStats || (d.canonicalTagStats ? {candidates:d.canonicalTagStats.raw||0,tags:d.canonicalTagStats.canonical||0,rebuiltAt:d.canonicalTagStats.rebuiltAt||''} : state.tagStats);
+  return {
+    meta: d.meta || (d.updatedAt ? {updatedAt:d.updatedAt} : {}),
+    movies: d.movies || {},
+    settings: d.settings || {},
+    hiddenTitles: d.hiddenTitles || {},
+    tagStats,
+    rejectedWikiTitles: d.rejectedWikiTitles || {},
+    rejectedRefresh: d.rejectedRefresh || {}
+  };
+}
+
+function mergeRecordMap(local={}, remote={}, {preferHidden=false}={}) {
+  const merged = {...local};
+  let localChanged = false;
+  let remoteChanged = false;
+  new Set([...Object.keys(local || {}), ...Object.keys(remote || {})]).forEach(key => {
+    const a = local?.[key];
+    const b = remote?.[key];
+    if (!a && b) { merged[key] = b; localChanged = true; return; }
+    if (a && !b) { remoteChanged = true; return; }
+    if (!a && !b) return;
+    const at = recordTimestamp(a);
+    const bt = recordTimestamp(b);
+    if (bt > at) { merged[key] = b; localChanged = true; }
+    else if (at > bt) { remoteChanged = true; }
+    else if (preferHidden && b?.hiddenAt && !a?.hiddenAt) { merged[key] = b; localChanged = true; }
+  });
+  return {merged, localChanged, remoteChanged};
+}
+
+function mergeRemoteData(remoteRaw={}) {
+  const remote = normaliseIncomingData(remoteRaw);
+  const remoteStamp = dataTimestamp(remote);
+  const localStamp = dataTimestamp(state);
+  let localChanged = false;
+  let remoteChanged = false;
+
+  const hiddenMovieKeys = new Set(Object.keys(state.hiddenTitles || {}));
+  const remoteHiddenKeys = new Set(Object.keys(remote.hiddenTitles || {}));
+  const localMovies = {...state.movies};
+  const remoteMovies = {...remote.movies};
+  hiddenMovieKeys.forEach(id => { delete remoteMovies[id]; });
+  remoteHiddenKeys.forEach(id => { delete localMovies[id]; });
+
+  const movieMerge = mergeRecordMap(localMovies, remoteMovies);
+  const hiddenMerge = mergeRecordMap(state.hiddenTitles || {}, remote.hiddenTitles || {}, {preferHidden:true});
+  const rejectedMerge = mergeRecordMap(state.rejectedWikiTitles || {}, remote.rejectedWikiTitles || {});
+  state.movies = movieMerge.merged;
+  state.hiddenTitles = hiddenMerge.merged;
+  state.rejectedWikiTitles = rejectedMerge.merged;
+  localChanged = movieMerge.localChanged || hiddenMerge.localChanged || rejectedMerge.localChanged;
+  remoteChanged = movieMerge.remoteChanged || hiddenMerge.remoteChanged || rejectedMerge.remoteChanged;
+
+  if (remoteStamp > localStamp) {
+    state.settings = {...state.settings, ...remote.settings};
+    state.tagStats = remote.tagStats || state.tagStats;
+    state.rejectedRefresh = {...state.rejectedRefresh, ...remote.rejectedRefresh};
+    state.meta = {...state.meta, ...remote.meta};
+    localChanged = true;
+  } else if (localStamp > remoteStamp) {
+    remoteChanged = true;
+  } else {
+    state.settings = {...state.settings, ...remote.settings};
+    state.rejectedRefresh = {...state.rejectedRefresh, ...remote.rejectedRefresh};
+  }
+
+  delete state.canonicalTagStats;
+  ensureRejectedRefreshState(!remoteRaw.rejectedRefresh);
+  ensureSyncMetadata();
+  return {localChanged, remoteChanged};
+}
+
+function saveLocalState(opts={}) {
+  ensureSyncMetadata({touchDataset:!opts.preserveUpdatedAt});
   try {
+    const data = exportCinelensData();
     localStorage.setItem('cinelens_v2',JSON.stringify({
-      movies:state.movies,
-      settings:state.settings,
-      hiddenTitles:state.hiddenTitles,
-      canonicalTagStats:state.canonicalTagStats,
-      rejectedWikiTitles:state.rejectedWikiTitles,
-      rejectedRefresh:state.rejectedRefresh,
+      ...data,
       drive:{
         enabled:state.drive.enabled,
         folderId:state.drive.folderId,
@@ -2779,7 +2967,10 @@ function loadLocalState() {
       if (s.movies) state.movies=s.movies;
       if (s.settings) state.settings={...state.settings,...s.settings};
       if (s.hiddenTitles) state.hiddenTitles=s.hiddenTitles;
-      if (s.canonicalTagStats) state.canonicalTagStats=s.canonicalTagStats;
+      if (s.tagStats) state.tagStats=s.tagStats;
+      else if (s.canonicalTagStats) state.tagStats={candidates:s.canonicalTagStats.raw||0,tags:s.canonicalTagStats.canonical||0,rebuiltAt:s.canonicalTagStats.rebuiltAt||''};
+      delete state.canonicalTagStats;
+      if (s.meta) state.meta={...state.meta,...s.meta};
       if (s.rejectedWikiTitles) state.rejectedWikiTitles=s.rejectedWikiTitles;
       if (s.rejectedRefresh) state.rejectedRefresh={...state.rejectedRefresh,...s.rejectedRefresh};
       ensureRejectedRefreshState(!s.rejectedRefresh);
@@ -2925,7 +3116,7 @@ async function connectDrive() {
     else await createDriveFile();
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
-    saveLocalState();
+    saveLocalState({preserveUpdatedAt:true});
     setDriveStatus('connected');
     render();
     showToast('Drive connected','success');
@@ -2948,7 +3139,7 @@ async function restoreDriveSession(showFailure=false) {
     if (state.drive.fileId) await loadFromDrive();
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
-    saveLocalState();
+    saveLocalState({preserveUpdatedAt:true});
     setDriveStatus('connected');
   } catch(e) {
     state.drive.connected=false;
@@ -3043,28 +3234,43 @@ async function loadFromDrive() {
     const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media`);
     if (!resp.ok) throw new Error('Drive load failed');
     const d=await resp.json();
-    let cleaned = 0;
-    if(d.movies){state.movies=d.movies;if(d.settings)state.settings={...state.settings,...d.settings};if(d.hiddenTitles)state.hiddenTitles=d.hiddenTitles;if(d.canonicalTagStats)state.canonicalTagStats=d.canonicalTagStats;if(d.rejectedWikiTitles)state.rejectedWikiTitles=d.rejectedWikiTitles;if(d.rejectedRefresh)state.rejectedRefresh={...state.rejectedRefresh,...d.rejectedRefresh};ensureRejectedRefreshState(!d.rejectedRefresh);migrateLegacyPoolItems();cleaned=cleanContaminatedTags(true);saveLocalState();render();showToast('Loaded from Drive','success');}
+    const merge = mergeRemoteData(d);
+    migrateLegacyPoolItems();
+    const cleaned = cleanContaminatedTags(true);
+    computeTagWeights();
+    saveLocalState({preserveUpdatedAt:true});
+    render();
+    showToast(merge.localChanged ? 'Merged with Drive' : 'Drive already in sync', 'success');
     state.drive.connected=true;
     setDriveStatus('connected');
-    if (cleaned) await syncDrive(false);
+    if (merge.remoteChanged || cleaned) await uploadDriveData();
   } catch(e){
     state.drive.connected=false;
     setDriveStatus('');
     throw e;
   }
 }
+
+async function uploadDriveData() {
+  const resp=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${state.drive.fileId}?uploadType=media`,{
+    method:'PATCH',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(exportCinelensData())
+  });
+  if (!resp.ok) throw new Error('Drive sync failed');
+}
+
 async function createDriveFile() {
   if(!state.drive.accessToken)return;
   try {
     const meta={name:DRIVE_FILE,mimeType:'application/json'};
     const form=new FormData();
     form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));
-    form.append('file',new Blob([JSON.stringify({movies:state.movies,settings:state.settings,hiddenTitles:state.hiddenTitles,canonicalTagStats:state.canonicalTagStats,rejectedWikiTitles:state.rejectedWikiTitles,rejectedRefresh:state.rejectedRefresh})],{type:'application/json'}));
+    form.append('file',new Blob([JSON.stringify(exportCinelensData())],{type:'application/json'}));
     const resp=await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',{method:'POST',body:form});
     if (!resp.ok) throw new Error('Drive create failed');
     const d=await resp.json();
-    state.drive.fileId=d.id; saveLocalState();
+    state.drive.fileId=d.id; saveLocalState({preserveUpdatedAt:true});
   } catch(e){showToast('Drive file create failed','error');}
 }
 async function syncDrive(manual=false) {
@@ -3075,11 +3281,13 @@ async function syncDrive(manual=false) {
   if(!state.drive.fileId){await createDriveFile(); if(!state.drive.fileId)return;}
   setDriveStatus('syncing');
   try {
-    const resp=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${state.drive.fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({movies:state.movies,settings:state.settings,hiddenTitles:state.hiddenTitles,canonicalTagStats:state.canonicalTagStats,rejectedWikiTitles:state.rejectedWikiTitles,rejectedRefresh:state.rejectedRefresh})});
-    if (!resp.ok) throw new Error('Drive sync failed');
+    const remoteResp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media`);
+    if (remoteResp.ok) mergeRemoteData(await remoteResp.json());
+    computeTagWeights();
+    await uploadDriveData();
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
-    saveLocalState();
+    saveLocalState({preserveUpdatedAt:true});
     setDriveStatus('connected'); showToast('Synced to Drive','success');
   } catch(e){state.drive.connected=false; setDriveStatus(''); showToast(driveErrorMessage(e)||'Drive sync failed','error');}
 }

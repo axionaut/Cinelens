@@ -24,7 +24,33 @@ the end of the body. The files must remain deployable together as a static site.
 Repository text files use LF line endings through `.gitattributes` so edits do
 not produce misleading whole-file diffs on Windows.
 
-### 2.1 Genre Signal
+### 2.1 Unified Tag Model
+
+CineLens has one user-facing taste signal: tags.
+
+The app may internally normalize, merge and version tags so that lexically or
+grammatically similar phrases are treated together, but this is implementation
+detail. The UI, recommendation explanations and user workflows must not ask the
+user to reason about both "tags" and "concepts".
+
+The tag module pipeline is:
+
+1. Fetch Wikipedia story/lead/category text.
+2. Detect likely character/person names from the original capitalized text.
+3. Extract local keyword/keyphrase candidates with the in-browser tag scorer.
+4. Remove or weaken names, generic fragments, over-common phrases and
+   low-confidence fallback phrases.
+5. Normalize lexical/grammatical variants into canonical tags.
+6. Compare new tags with the existing tag brain and merge similar ones.
+7. Apply title-specific suppressed tags so removed tags do not return.
+8. Store one user-facing tag list for display, scoring and Tag Brain.
+
+Older field names such as `canonicalTags`, `canonicalTagVersion` and
+`suppressedConcepts` may remain as migration/storage plumbing until a deliberate
+data migration renames them. They must be treated as normalized tags, not as a
+separate product layer.
+
+### 2.2 Genre Signal
 
 Genres are stored separately from story concepts. They are derived only from
 Wikipedia lead/category metadata, not guessed from isolated plot words.
@@ -33,9 +59,9 @@ Wikipedia lead/category metadata, not guessed from isolated plot words.
   during housekeeping; they do not require an immediate refetch.
 - Fresh and re-tagged titles also use Wikipedia categories.
 - Rated-title genre preferences contribute to recommendation weight at 35% of
-  a concept weight.
-- Positive concept overlap remains the primary ranking rule. Genre preference
-  influences weighted ordering within the same concept-overlap tier.
+  a tag weight.
+- Positive tag overlap remains the primary ranking rule. Genre preference
+  influences weighted ordering within the same tag-overlap tier.
 - Cards show their genres explicitly and highlight genres shared with the
   user's positive taste profile.
 - Genre filtering belongs in the sticky control deck and applies to card grids
@@ -50,7 +76,7 @@ file is deleted. Genre changes additionally require JavaScript syntax checks
 and targeted source assertions for extraction, weighting, card display and
 overlap-first ordering.
 
-### 2.2 Sticky Control Deck
+### 2.3 Sticky Control Deck
 
 The settings/filter section is called the control deck. It remains visible as a
 sticky section below the main header and is shared across major app pages.
@@ -60,27 +86,25 @@ The control deck owns global controls:
 - Year cutoff
 - Language filter
 - Genre filter
-- Concept/tag click mode
+- Tag click mode
 - Manual Wikipedia URL add
 
-Concept/tag click mode is global, not Tags-page-only. In explore mode, concept
-clicks open the concept workspace. In remove mode, concept chips remove the
-concept from that title and raw tag chips remove the raw tag from that title.
+Tag click mode is global, not Tags-page-only. In explore mode, tag clicks open
+the tag workspace. In remove mode, tag chips remove the tag from that title.
 
-Raw tag removals are stored separately from concept removals so retagging or
-housekeeping does not reapply the same removed raw tag to the same title.
+Tag removals are persisted per title so retagging or housekeeping does not
+reapply the same removed tag to the same title.
 
-Cards should always show their visible concepts/tags without a More/Less toggle.
-Card concept rows use compact full-width chip rows so label gutters do not waste
-space. The card labels are:
+Cards should always show their visible tags without a More/Less toggle. Card
+tag rows use compact full-width chip rows so label gutters do not waste space.
+The card labels are:
 
 ```text
-Why       positively weighted matched concepts for recommendations
-Concepts  other canonical concepts
-Tags      raw tags before canonical concept grouping
+Why   positively weighted matched tags for recommendations
+Tags  other cleaned/normalized tags
 ```
 
-Do not show internal source/count labels such as `wikipedia · 12 concepts` on
+Do not show internal source/count labels such as `wikipedia · 12 tags` on
 user-facing cards.
 
 ## 3. Core User Requirements
@@ -623,12 +647,18 @@ Current constants include:
 The candidate system should:
 
 1. Gather titles from all enabled lanes.
-2. Shuffle each lane.
-3. Round-robin across lanes.
-4. Remove duplicates.
-5. Exclude existing titles.
-6. Exclude rejected titles.
-7. Process candidates through the same validation pipeline as manual URL add.
+2. Keep the default collection proportions weighted toward: 40% English movies,
+   30% Hindi movies, 20% English shows and 10% Hindi shows.
+3. Shuffle each lane.
+4. Weighted round-robin across lanes using the configured proportions.
+5. Remove duplicates.
+6. Exclude existing titles.
+7. Exclude rejected titles.
+8. Process candidates through the same validation pipeline as manual URL add.
+
+This collection mix controls only which Wikipedia titles are fetched next. It is
+not a recommendation ranking signal. Recommendation order must still come from
+the user's ratings, tags, genres, hidden titles and avoid rules.
 
 ### 6.3 Fetching a Wikipedia Title
 
@@ -1049,11 +1079,23 @@ https://www.googleapis.com/auth/drive.file
 Drive sync should:
 
 - Find existing `cinelens_data.json`
-- Load it when connected
+- Load and merge it when connected
 - Create it if missing
-- Patch it on sync
+- Pull the current Drive file before upload and patch the merged result
 - Store and restore Drive file ID
 - Sync local state after meaningful changes
+- Treat local and Drive as peers. Neither side should blindly overwrite the
+  other when both contain useful data.
+- Persist `meta.updatedAt` for the dataset and `_updatedAt`/`updatedAt` on
+  title, hidden-title and rejected-title records.
+- Resolve record conflicts by the newest timestamp. Active-vs-hidden conflicts
+  prefer hidden records so a title removed by pressing `x` does not come back
+  from an older active copy.
+- Preserve legacy Drive files that do not yet contain timestamps by stamping
+  missing metadata during merge.
+- Keep old fields such as `canonicalTagStats` and `suppressedConcepts`
+  readable for migration, but write current data through `tagStats` and
+  `suppressedTags`.
 
 ### 9.3 Drive Token Persistence
 
