@@ -160,7 +160,7 @@ let state = {
   movies: {},
   tagWeights: {},
   genreWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', tagDeleteMode:false },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', tagDeleteMode:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   canonicalTagStats: { raw:0, canonical:0, rebuiltAt:'' },
@@ -187,6 +187,13 @@ const LOW_CONFIDENCE_PLOT_TAGS = new Set([
 
 const CONTAMINATED_FALLBACK_TAGS = new Set([...LOW_CONFIDENCE_PLOT_TAGS]);
 const GENERIC_CONCEPT_TOKENS = new Set('crime thriller child relationship father mother family return discover learn decide sent college school workplace time there around away full other first'.split(' '));
+const USER_AVOID_CONCEPTS = new Set([
+  'unresolved-ending',
+  'open-ending',
+  'ambiguous-ending',
+  'anticlimactic-ending',
+  'cliffhanger-ending'
+]);
 let conceptStatsCache = null;
 
 const GENRE_RULES = [
@@ -259,15 +266,23 @@ function canonicalTagFeatures(tag) {
 
 function rawScoringTags(movie) {
   const base = movie?.descriptorTags && movie.descriptorTags.length ? movie.descriptorTags : (movie?.coreTags && movie.coreTags.length ? movie.coreTags : (movie?.plotTags && movie.plotTags.length ? movie.plotTags : recommendationTags(movie?.tags || [])));
-  return [...new Set((base || []).filter(t => !isMetaTag(t)).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)))];
+  return [...new Set((base || []).filter(t => rawTagAllowed(movie, t)).filter(t => !isMetaTag(t)).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)))];
 }
 
 function suppressedConceptSet(movie) {
   return new Set((movie?.suppressedConcepts || []).map(normaliseTagName).filter(Boolean));
 }
 
+function suppressedRawTagSet(movie) {
+  return new Set((movie?.suppressedRawTags || []).map(normaliseTagName).filter(Boolean));
+}
+
 function conceptAllowed(movie, concept) {
   return !suppressedConceptSet(movie).has(normaliseTagName(concept));
+}
+
+function rawTagAllowed(movie, tag) {
+  return !suppressedRawTagSet(movie).has(normaliseTagName(tag));
 }
 
 function canonicalTokenSimilarity(a, b) {
@@ -517,14 +532,6 @@ function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats()) {
 }
 
 function meaningfulTagCount(movie) { return rawScoringTags(movie).length; }
-
-function cardStatusLabel(movie) {
-  if (movie.source === 'wikipedia') {
-    if (scoringTags(movie).length > 0) return `wikipedia · ${scoringTags(movie).length} concepts`;
-    return movie.storyText ? 'wikipedia · no distinctive descriptors yet' : 'wikipedia · plot missing';
-  }
-  return 'legacy · needs wiki';
-}
 
 function migrateLegacyPoolItems() {
   Object.values(state.movies || {}).forEach(m => {
@@ -1446,6 +1453,11 @@ function deriveTagsFromText(text, meta) {
 
   // Narrative and character tags. These require clear phrases, not generic single words.
   if (has(/\b(plot twist|twist ending|shocking revelation|final revelation|unexpected revelation)\b/)) add('twist-ending');
+  if (has(/\b(unresolved ending|unresolved plot|unresolved storyline|unresolved mystery|left unresolved|remain unresolved|remains unresolved|without resolution|no resolution|wonders? if .{0,80}\\b(is|are|remains?|remain) (still )?out there|threat .{0,40}\\b(is|remains?) (still )?out there)\b/)) add('unresolved-ending');
+  if (has(/\b(open ending|open-ended ending|open ended ending|open-ended finale|open ended finale|ending is left open|future is left open)\b/)) add('open-ending');
+  if (has(/\b(ambiguous ending|ambiguous finale|ending is ambiguous|left ambiguous|deliberately ambiguous|ambiguous fate|fate is unknown|uncertain fate)\b/)) add('ambiguous-ending');
+  if (has(/\b(anticlimactic ending|anti-climactic ending|anticlimax|anti-climax|ends anticlimactically|ends anti-climactically)\b/)) add('anticlimactic-ending');
+  if (has(/\b(cliffhanger ending|ends on a cliffhanger|ends with a cliffhanger|cliffhanger finale|season cliffhanger)\b/)) add('cliffhanger-ending');
   if (has(/\b(non-linear|nonlinear|flashback sequence|parallel timelines|interwoven storylines|fragmented narrative)\b/)) add('non-linear-narrative');
   if (has(/\b(unreliable narrator|false memory|subjective reality|ambiguous reality)\b/)) add('unreliable-narration');
   if (has(/\b(ensemble cast|multiple protagonists|interwoven lives|anthology)\b/)) add('ensemble-cast');
@@ -1698,6 +1710,7 @@ function matchesTab(m) {
 function render() {
   updateStats();
   updateVisibleSections();
+  updateControlDeck();
   if (activeTab === 'rated') renderRatedGrid();
   else if (activeTab === 'watchlist') renderWatchlist();
   else if (activeTab === 'tags') renderTagBrain();
@@ -1708,22 +1721,45 @@ function render() {
   maybeAutoExpandPool();
 }
 
+function updateControlDeck() {
+  const modeBtn=document.getElementById('tagDeleteModeBtn');
+  if (modeBtn) {
+    modeBtn.classList.toggle('active', !!state.settings.tagDeleteMode);
+    modeBtn.textContent=state.settings.tagDeleteMode ? 'Concept/tag clicks: remove' : 'Concept/tag clicks: explore';
+  }
+  const genreFilter=document.getElementById('genreFilter');
+  if (genreFilter && genreFilter.value !== (state.settings.genreFilter || 'all')) genreFilter.value=state.settings.genreFilter || 'all';
+  const languageFilter=document.getElementById('languageFilter');
+  if (languageFilter && languageFilter.value !== (state.settings.languageFilter || 'all')) languageFilter.value=state.settings.languageFilter || 'all';
+}
+
 function updateLanguageFilter(language) {
   state.settings.languageFilter = language || 'all';
   saveLocalState();
   renderActiveCards();
 }
 
+function updateGenreFilter(genre) {
+  state.settings.genreFilter = genre || 'all';
+  saveLocalState();
+  renderActiveCards();
+}
+
 function renderActiveCards() {
   if (activeTab === 'pool') renderPoolGrid();
+  else if (activeTab === 'hidden') renderHiddenGrid();
   else if (activeTab === 'tags') renderTagBrain();
   else if (activeTab === 'rated') renderRatedGrid();
   else if (activeTab === 'watchlist') renderWatchlist();
   else renderRecs();
 }
 
+function matchesGlobalFilters(movie) {
+  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && meetsYearCutoff(movie);
+}
+
 function discoveryPool() {
-  return Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && !m.watchlist && matchesTab(m) && matchesLanguageFilter(m) && meetsYearCutoff(m));
+  return Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && !m.watchlist && matchesTab(m) && matchesGlobalFilters(m) && recommendableTitle(m));
 }
 
 function matchesLanguageFilter(movie) {
@@ -1731,8 +1767,22 @@ function matchesLanguageFilter(movie) {
   return filter === 'all' || movie.language === filter;
 }
 
+function matchesGenreFilter(movie) {
+  const filter = state.settings.genreFilter || 'all';
+  return filter === 'all' || movieGenres(movie).includes(filter);
+}
+
 function meetsYearCutoff(m) {
   return !m.year || m.year >= state.settings.minYear;
+}
+
+function hasUserAvoidedConcept(movie) {
+  const concepts = new Set([...scoringTags(movie), ...rawScoringTags(movie)].map(normaliseTagName));
+  return [...USER_AVOID_CONCEPTS].some(tag => concepts.has(tag));
+}
+
+function recommendableTitle(movie) {
+  return !hasUserAvoidedConcept(movie);
 }
 
 function personalizedEnough() {
@@ -1740,7 +1790,7 @@ function personalizedEnough() {
 }
 
 function recommendationCandidates() {
-  return scoreMovies().filter(x => matchesTab(x.movie) && matchesLanguageFilter(x.movie) && !x.movie.watchlist && meetsYearCutoff(x.movie));
+  return scoreMovies().filter(x => matchesTab(x.movie) && matchesGlobalFilters(x.movie) && !x.movie.watchlist && recommendableTitle(x.movie));
 }
 
 function perfectRecommendationCount(scored) {
@@ -1813,7 +1863,7 @@ function renderRecs() {
 function renderRatedGrid() {
   const grid = document.getElementById('ratedGrid');
   if (!grid) return;
-  const rated = Object.values(state.movies || {}).filter(m => Number(m.rating || 0) > 0).sort((a,b) => Number(b.rating||0)-Number(a.rating||0)||String(a.title||'').localeCompare(String(b.title||'')));
+  const rated = Object.values(state.movies || {}).filter(m => Number(m.rating || 0) > 0).filter(matchesGlobalFilters).sort((a,b) => Number(b.rating||0)-Number(a.rating||0)||String(a.title||'').localeCompare(String(b.title||'')));
   const untaggedCount = rated.filter(m => !m.tagged && m.source === 'wikipedia').length;
   const btn = document.getElementById('tagUntaggedBtn');
   if (btn) {
@@ -1829,7 +1879,7 @@ function renderRatedGrid() {
 
 function renderWatchlist() {
   const grid = document.getElementById('watchlistGrid');
-  const watchlist = Object.values(state.movies).filter(m => m.watchlist && matchesTab(m)).sort((a,b)=>a.title.localeCompare(b.title));
+  const watchlist = Object.values(state.movies).filter(m => m.watchlist && matchesTab(m) && matchesGlobalFilters(m)).sort((a,b)=>a.title.localeCompare(b.title));
   document.getElementById('watchlistCount').textContent = watchlist.length ? `${watchlist.length} saved` : 'nothing saved yet';
   grid.innerHTML = '';
   if (!watchlist.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">+</div><h3>Nothing Saved Yet</h3></div>`; return; }
@@ -1848,7 +1898,7 @@ function updateVisibleSections() {
   setSectionVisibility('.watchlist-only', watchlistMode);
   setSectionVisibility('.tag-only', tagMode);
   document.querySelectorAll('.audit-only').forEach(el => el.style.display = 'none');
-  document.querySelectorAll('.control-deck').forEach(el => el.style.display = recMode || activeTab === 'pool' ? '' : 'none');
+  document.querySelectorAll('.control-deck').forEach(el => el.style.display = '');
 
   if (activeTab === 'pool') {
     ['poolSep','poolHeader','poolGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
@@ -1876,7 +1926,7 @@ function setSectionVisibility(selector, visible) {
 function renderPoolGrid() {
   const grid = document.getElementById('poolGrid');
   if (!grid) return;
-  const rows = Object.values(state.movies).filter(matchesTab).filter(matchesLanguageFilter).filter(meetsYearCutoff).sort((a,b)=>(b.rating||0)-(a.rating||0)||a.title.localeCompare(b.title));
+  const rows = Object.values(state.movies).filter(matchesTab).filter(matchesGlobalFilters).sort((a,b)=>(b.rating||0)-(a.rating||0)||a.title.localeCompare(b.title));
   document.getElementById('poolCount').textContent = rows.length ? `${rows.length} titles` : 'nothing loaded';
   grid.innerHTML = '';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>Pool Empty</h3></div>`; return; }
@@ -1886,7 +1936,7 @@ function renderPoolGrid() {
 function renderHiddenGrid() {
   const grid = document.getElementById('hiddenGrid');
   if (!grid) return;
-  const rows = Object.values(state.hiddenTitles || {}).sort((a,b)=>(b.hiddenAt||'').localeCompare(a.hiddenAt||'') || a.title.localeCompare(b.title));
+  const rows = Object.values(state.hiddenTitles || {}).filter(matchesGlobalFilters).sort((a,b)=>(b.hiddenAt||'').localeCompare(a.hiddenAt||'') || a.title.localeCompare(b.title));
   document.getElementById('hiddenCount').textContent = rows.length ? `${rows.length} hidden` : 'nothing hidden';
   grid.innerHTML = '';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">x</div><h3>Nothing Hidden</h3></div>`; return; }
@@ -2018,11 +2068,10 @@ function buildCard(movie, opts={}) {
       </div>
       ${renderStars(safeId, movie.rating || 0)}
       ${renderGenres(movie, matchedGenres)}
-      ${poolView?`<div class="pool-card-note">${cardStatusLabel(movie)}${movie.retagMessage ? ` · ${movie.retagMessage}` : ''}</div>`:''}
+      ${poolView && movie.retagMessage ? `<div class="pool-card-note">${movie.retagMessage}</div>`:''}
       ${movie.retagStatus === 'failed' || movie.needsManualUrl ? renderWikiRepairRow(safeId, movie.retagMessage) : ''}
-      <div class="card-tags" id="tags-${movie.id}">${renderConceptChips(movie, safeId, movie._expanded, matchedTags, contextConcept)}</div>
+      <div class="card-tags" id="tags-${movie.id}">${renderConceptChips(movie, safeId, true, matchedTags, contextConcept)}</div>
       <div class="card-actions">
-        ${movie.tagged?`<button class="card-act" onclick="toggleTags('${safeId}',event)">${movie._expanded?'▲ less':'▼ concepts'}</button>`:''}
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
         ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
         <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
@@ -2123,8 +2172,14 @@ function conceptChipHtml(tag, movieId, kind='', impact='') {
     return `<span class="concept-chip ${kind}" title="${title}" onclick="handleConceptClick('${movieId}','${safeTag}',event)">${tag}${impact ? `<span class="impact">${impact}</span>` : ''}</span>`;
 }
 
+function rawTagChipHtml(tag, movieId) {
+    const safeTag = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    const title = state.settings.tagDeleteMode ? 'Click to remove this raw tag permanently from this title.' : 'Raw tag used before concept grouping. Turn on remove mode to delete it from this title.';
+    return `<span class="concept-chip raw-tag" title="${title}" onclick="handleRawTagClick('${movieId}','${safeTag}',event)">${tag}</span>`;
+}
+
 function cardConceptGroups(movie, matchedTags=null, contextConcept='') {
-  const concepts=scoringTags(movie).filter(conceptIsPresentable).filter(tag=>tag!==contextConcept);
+  const concepts=scoringTags(movie).filter(conceptIsPresentable);
   const matched=matchedTags || new Set();
   const allWhy=concepts.filter(tag=>matched.has?.(tag) && Number(state.tagWeights[tag]||0)>0)
     .sort((a,b)=>(state.tagWeights[b]*conceptSpecificity(b))-(state.tagWeights[a]*conceptSpecificity(a)))
@@ -2132,7 +2187,7 @@ function cardConceptGroups(movie, matchedTags=null, contextConcept='') {
   const whySet=new Set(why);
   const distinctive=concepts.filter(tag=>!whySet.has(tag) && conceptSpecificity(tag)>=0.2)
     .sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||Math.abs(state.tagWeights[b]||0)-Math.abs(state.tagWeights[a]||0)||a.localeCompare(b))
-    .slice(0,3);
+    .slice(0,8);
   const shown=new Set([...why,...distinctive]);
   const more=concepts.filter(tag=>!shown.has(tag)).sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||a.localeCompare(b));
   return {why,distinctive,more,matchedTotal:allWhy.length};
@@ -2140,22 +2195,28 @@ function cardConceptGroups(movie, matchedTags=null, contextConcept='') {
 
 function renderConceptChips(movie, movieId, expanded, matchedTags=null, contextConcept='') {
   const groups=cardConceptGroups(movie,matchedTags,contextConcept);
-  if (!groups.why.length && !groups.distinctive.length && !groups.more.length) return '';
+  const rawTags=rawScoringTags(movie).filter(tag=>!scoringTags(movie).includes(tag)).sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||a.localeCompare(b));
+  if (!groups.why.length && !groups.distinctive.length && !groups.more.length && !rawTags.length) return '';
   const line=(label,items,kind='')=>items.length?`<div class="concept-line"><span class="concept-line-label">${label}</span><div class="concept-line-items">${items.map(tag=>{
     const impact=kind==='why'?`+${(Number(state.tagWeights[tag]||0)*conceptSpecificity(tag)).toFixed(1)}`:'';
     return conceptChipHtml(tag,movieId,kind,impact);
   }).join('')}</div></div>`:'';
-  const visibleMore=expanded?groups.more.slice(0,12):[];
-  const hiddenCount=groups.more.length-visibleMore.length;
   const sharedRemainder=Math.max(0,groups.matchedTotal-groups.why.length);
   const sharedNote=sharedRemainder?`<span class="concept-chip" title="The recommendation score uses all ${groups.matchedTotal} shared positive concepts">+${sharedRemainder} shared</span>`:'';
-  return `<div class="concept-explanation">${line('Why',groups.why,'why').replace('</div></div>',`${sharedNote}</div></div>`)}${line('Distinct',groups.distinctive)}${line('More',visibleMore)}${!expanded&&groups.more.length?`<div class="concept-line"><span class="concept-line-label"></span><span class="concept-chip">+${groups.more.length} more</span></div>`:''}${expanded&&hiddenCount>0?`<div class="concept-line"><span class="concept-line-label"></span><span class="concept-chip">+${hiddenCount} more</span></div>`:''}</div>`;
+  const conceptLine=[...groups.distinctive,...groups.more];
+  const rawLine=rawTags.length?`<div class="concept-line"><span class="concept-line-label">Tags</span><div class="concept-line-items">${rawTags.map(tag=>rawTagChipHtml(tag,movieId)).join('')}</div></div>`:'';
+  return `<div class="concept-explanation">${line('Why',groups.why,'why').replace('</div></div>',`${sharedNote}</div></div>`)}${line('Concepts',conceptLine)}${rawLine}</div>`;
 }
 
 function handleConceptClick(id, tag, event) {
   if (event) event.stopPropagation();
   if (state.settings.tagDeleteMode) removeTagFromMovie(id, tag, event);
   else openConceptFromCard(tag);
+}
+
+function handleRawTagClick(id, tag, event) {
+  if (event) event.stopPropagation();
+  if (state.settings.tagDeleteMode) removeRawTagFromMovie(id, tag, event);
 }
 
 function removeTagFromMovie(id, tag, event) {
@@ -2170,6 +2231,23 @@ function removeTagFromMovie(id, tag, event) {
   syncDrive();
   render();
   showToast(`Removed concept from "${movie.title}": ${tag}`, 'success');
+}
+
+function removeRawTagFromMovie(id, tag, event) {
+  if (event) event.stopPropagation();
+  const movie = state.movies[id] || state.hiddenTitles?.[id];
+  if (!movie) return;
+  const normalised = normaliseTagName(tag);
+  movie.suppressedRawTags = [...new Set([...(movie.suppressedRawTags || []), normalised])];
+  ['tags','coreTags','plotTags','descriptorTags'].forEach(key => {
+    movie[key] = (movie[key] || []).filter(t => normaliseTagName(t) !== normalised);
+  });
+  movie.tagged = scoringTags(movie).length > 0 || rawScoringTags(movie).length > 0;
+  computeTagWeights();
+  saveLocalState();
+  syncDrive();
+  render();
+  showToast(`Removed raw tag from "${movie.title}": ${tag}`, 'success');
 }
 
 function posterGrad(title) {
@@ -2487,11 +2565,7 @@ function renderTagBrain() {
   const grid=document.getElementById('tagBrainGrid');
   const countEl=document.getElementById('tagBrainCount');
   const search=(document.getElementById('conceptSearch')?.value || '').trim().toLowerCase();
-  const modeBtn=document.getElementById('tagDeleteModeBtn');
-  if (modeBtn) {
-    modeBtn.classList.toggle('active', !!state.settings.tagDeleteMode);
-    modeBtn.textContent=state.settings.tagDeleteMode ? 'Concept clicks: remove' : 'Concept clicks: explore';
-  }
+  updateControlDeck();
   const map={};
   [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(m => {
     if (!m.tagged) return;
@@ -2537,7 +2611,8 @@ function openConceptFromCard(tag) {
 function toggleTagDeleteMode() {
   state.settings.tagDeleteMode=!state.settings.tagDeleteMode;
   saveLocalState();
-  renderTagBrain();
+  renderActiveCards();
+  updateControlDeck();
 }
 
 function setConceptView(view, btn) {
@@ -2573,11 +2648,11 @@ function renderConceptDetail() {
   const ws=weight>0?`+${weight} (you like this)`:weight<0?`${weight} (you dislike this)`:'~ unweighted';
   const counts={rated:all.filter(x=>x.status==='rated').length,pool:all.filter(x=>x.status==='pool').length,hidden:all.filter(x=>x.status==='hidden').length};
   document.getElementById('conceptDetailStat').textContent=`weight ${ws} · ${all.length} titles · ${counts.rated} rated · ${counts.pool} pool · ${counts.hidden} hidden`;
-  let rows=conceptView==='all'?all:all.filter(item=>item.status===conceptView);
+  let rows=(conceptView==='all'?all:all.filter(item=>item.status===conceptView)).filter(item=>matchesGlobalFilters(item.movie));
   rows.sort((a,b)=>(a.status==='rated'?0:a.status==='pool'?1:2)-(b.status==='rated'?0:b.status==='pool'?1:2)||Number(b.movie.rating||0)-Number(a.movie.rating||0)||a.movie.title.localeCompare(b.movie.title));
   grid.innerHTML='';
   if (!rows.length) { grid.innerHTML='<div class="empty-state"><h3>No Titles In This Group</h3></div>'; return; }
-  rows.slice(0,conceptVisibleLimit).forEach(({movie,status})=>grid.appendChild(buildCard(movie,{hiddenView:status==='hidden',showEdit:status==='rated',poolView:status==='pool',contextLabel:status==='rated'?'Rated':status==='hidden'?'Hidden':'In Pool',contextConcept:selectedConcept})));
+  rows.slice(0,conceptVisibleLimit).forEach(({movie,status})=>grid.appendChild(buildCard(movie,{hiddenView:status==='hidden',showEdit:status==='rated',poolView:status==='pool',matchedTags:new Set([selectedConcept]),contextLabel:status==='rated'?'Rated':status==='hidden'?'Hidden':'In Pool',contextConcept:selectedConcept})));
   if (rows.length>conceptVisibleLimit) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreConceptTitles()">Show 40 more · ${rows.length-conceptVisibleLimit} remaining</button></div>`);
 }
 // ─────────────────────────────────────────────
@@ -2668,6 +2743,8 @@ function loadLocalState() {
       state.drive.accessToken=getStoredDriveToken()||'';
       document.getElementById('minYear').value=state.settings.minYear;
       document.getElementById('languageFilter').value=state.settings.languageFilter||'all';
+      const genreFilter=document.getElementById('genreFilter');
+      if (genreFilter) genreFilter.value=state.settings.genreFilter||'all';
       
       // Ensure wikiPageId is reconstructed for all Wikipedia movies
       Object.values(state.movies || {}).forEach(m => {

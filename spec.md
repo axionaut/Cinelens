@@ -38,6 +38,8 @@ Wikipedia lead/category metadata, not guessed from isolated plot words.
   influences weighted ordering within the same concept-overlap tier.
 - Cards show their genres explicitly and highlight genres shared with the
   user's positive taste profile.
+- Genre filtering belongs in the sticky control deck and applies to card grids
+  together with language and year filters.
 
 The release smoke test must confirm that the split stylesheet and application
 script load in headless Chrome, the app executes its initial render, removed
@@ -46,7 +48,53 @@ file is deleted. Genre changes additionally require JavaScript syntax checks
 and targeted source assertions for extraction, weighting, card display and
 overlap-first ordering.
 
+### 2.2 Sticky Control Deck
+
+The settings/filter section is called the control deck. It remains visible as a
+sticky section below the main header and is shared across major app pages.
+
+The control deck owns global controls:
+
+- Year cutoff
+- Language filter
+- Genre filter
+- Concept/tag click mode
+- Manual Wikipedia URL add
+
+Concept/tag click mode is global, not Tags-page-only. In explore mode, concept
+clicks open the concept workspace. In remove mode, concept chips remove the
+concept from that title and raw tag chips remove the raw tag from that title.
+
+Raw tag removals are stored separately from concept removals so retagging or
+housekeeping does not reapply the same removed raw tag to the same title.
+
+Cards should always show their visible concepts/tags without a More/Less toggle.
+Card concept rows use compact full-width chip rows so label gutters do not waste
+space. The card labels are:
+
+```text
+Why       positively weighted matched concepts for recommendations
+Concepts  other canonical concepts
+Tags      raw tags before canonical concept grouping
+```
+
+Do not show internal source/count labels such as `wikipedia · 12 concepts` on
+user-facing cards.
+
 ## 3. Core User Requirements
+
+### 3.0 User Vocabulary
+
+When the user says "movie" during CineLens work, treat it as shorthand for any
+CineLens title unless the user explicitly narrows the scope. This includes:
+
+- Films
+- TV shows
+- Series
+- Miniseries
+
+Use "title" in implementation/spec wording when precision matters, but do not
+interpret the user's casual use of "movie" as excluding TV shows.
 
 ### 3.1 Content Scope
 
@@ -86,6 +134,33 @@ const PERFECT_REC_MIN_RATIO = 0.995;
 ```
 
 The ratio is used only inside the maximum-overlap tier because floating-point weighted fit can make exact equality brittle.
+
+### 3.2.1 Active Avoidance Signals
+
+The app must actively detect and avoid recommending titles with ending styles
+the user dislikes:
+
+- Unresolved endings
+- Open endings
+- Ambiguous endings
+- Anticlimactic / anti-climactic endings
+- Cliffhanger endings
+
+When Wikipedia story/lead text contains clear evidence for these attributes,
+the tagger stores explicit concepts such as:
+
+```text
+unresolved-ending
+open-ending
+ambiguous-ending
+anticlimactic-ending
+cliffhanger-ending
+```
+
+Titles with these concepts must not appear in For You recommendations or
+discovery fallback cards, even if they match other liked concepts or genres.
+They may still exist in Pool, Tags, Rated, Watchlist, Hidden and Rejected views
+for inspection, editing, retagging or manual override.
 
 ### 3.3 Manual Add
 
@@ -1181,8 +1256,8 @@ Expected:
 Every completed code change must follow this sequence before it is reported as done:
 
 1. Update `spec.md` with the new behavior, migration rule or bugfix notes.
-2. Extract and syntax-check the inline JavaScript from the real `index.html`.
-3. Run a targeted runtime smoke test in headless Chrome against the real app, preferably served from localhost when storage or browser behavior is involved.
+2. Syntax-check the real `app.js` file.
+3. Run a targeted runtime smoke test in headless Chrome against the real split app, preferably served from localhost when storage or browser behavior is involved.
 4. Exercise the changed user flow and verify its persisted state, not only function presence.
 5. Remove every temporary test artifact, including smoke-test HTML files, extracted scripts, browser profiles, logs, server output and generated scratch files.
 6. Confirm no temporary artifact remains in the workspace, staged changes, system temp directory or any external browser-profile path used by the test.
@@ -1191,11 +1266,23 @@ Every completed code change must follow this sequence before it is reported as d
 9. Push the commit to the active branch's configured remote.
 10. Report the smoke-test result, cleanup result, commit hash and pushed branch.
 
+The normal CineLens app bundle is:
+
+```text
+index.html
+app.js
+styles.css
+spec.md
+.gitattributes
+```
+
+When any of these files are part of the change, stage, commit and push the related bundle files together. Do not stage editor files, generated syntax extracts, smoke harnesses, browser profiles, logs or other temporary artifacts.
+
 Do not describe a change as complete after static checks alone when a browser-visible or persistence behavior was changed.
 
 ## 15. Recommended Future Refactor
 
-The app is now large for a single inline script. A safe future refactor would separate the code into logical modules while keeping deployment simple.
+The app is split into `index.html`, `styles.css` and `app.js`. A safe future refactor would further separate the JavaScript into logical modules while keeping deployment simple.
 
 Suggested files:
 
@@ -1260,7 +1347,7 @@ The previous uploaded build did not match the intended behaviour:
 ### 17.2 Corrected behaviour
 
 - The Rated tab now renders every item with `Number(m.rating || 0) > 0`, independent of the active content filter.
-- The control deck is hidden on Rated, Watchlist and Tags tabs, so the content grid appears directly under the tab header.
+- Superseded by the sticky-control-deck release: the control deck is now visible across major tabs so filters and concept/tag click mode are global.
 - Legacy seed items are preserved only as legacy records. They keep ratings, but their fake tags are removed.
 - Legacy cards display `legacy · needs wiki` instead of `seed`, `tagging...` or fake tag counts.
 - Retag now tries verified `wikiPageId` first when available.
@@ -1576,12 +1663,13 @@ Concept contribution is multiplied by corpus specificity derived from document f
 
 ### 28.5 Card presentation
 
-Cards no longer display a ranked dump of five near-identical chips.
+Cards no longer display a ranked dump of five near-identical chips. This was later tightened further by the sticky-control-deck release.
 
 - `Why`: at most two positively weighted concepts that contributed to this recommendation, ordered by actual weighted contribution.
-- `Distinct`: at most three comparatively rare concepts that describe what separates this title from the rest of the pool.
-- `More`: available only when expanded.
-- The selected concept is omitted from cards inside its own concept workspace because repeating it on every card adds no information.
+- `Concepts`: all other visible canonical concepts, with comparatively rare concepts ordered earlier.
+- `Tags`: raw tags before canonical concept grouping.
+- Cards do not use a More/Less toggle; visible concepts and raw tags are always shown.
+- The selected concept is shown on cards inside its own concept workspace so the user can see why the title matched the selected concept.
 - Numeric chip ranks are removed.
 
 ### 28.6 Visual theme
@@ -1601,9 +1689,9 @@ one detective signal does not create crime-thriller: true
 corroborated detective + murder evidence creates crime-thriller: true
 broad crime-thriller specificity lower than family-secret: true
 Why limited and contribution ordered: true
-Distinct limited to three: true
+Concept rows are compact and do not reserve an empty label gutter: true
 numeric chip ranks removed: true
-selected workspace concept omitted from its cards: true
+selected workspace concept shown on its cards: true
 computed background: linear-gradient(rgb(16,16,16), rgb(8,8,8), rgb(5,5,5))
 ```
 
@@ -1763,7 +1851,7 @@ The rebuilt records must be saved locally and synced back to Drive when Drive da
 
 Canonical concepts must rebuild after manual add, retag, raw-tag removal, hide, restore and forget. During pool expansion, rebuilding may be deferred to card-refresh batch boundaries and final completion to avoid recalculating the full corpus after every fetched title.
 
-Cards continue showing raw descriptors. Recommendations, match scoring, Tag Brain and the top `Concepts` count use canonical tags. The control deck must also show both canonical and raw totals for comparison.
+Cards continue showing raw descriptors separately from canonical concepts. Recommendations, match scoring, Tag Brain and the top `Concepts` count use canonical tags. The control deck shows canonical and raw totals for comparison.
 
 ### 23.4 Acceptance Test
 
