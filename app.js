@@ -194,6 +194,8 @@ const USER_AVOID_CONCEPTS = new Set([
   'anticlimactic-ending',
   'cliffhanger-ending'
 ]);
+const USER_AVOID_GENRES = new Set(['documentary']);
+const MAX_RECOMMENDATION_CONCEPT_SHARE = 0.10;
 let conceptStatsCache = null;
 
 const GENRE_RULES = [
@@ -234,7 +236,7 @@ function normaliseTagName(tag) {
   return String(tag || '').toLowerCase().trim().replace(/\s+/g, '-');
 }
 
-const CANONICAL_TAG_VERSION = 2;
+const CANONICAL_TAG_VERSION = 3;
 const CANONICAL_FUNCTION_WORDS = new Set('a an the and or but nor so yet of in on at to from into onto by for with without as is are was were be been being has have had do does did will would can could may might must shall should this that these those it its he she they them his her their who whom whose which what when where while after before during then than also just still already again ever never very more most less least much many some any each every both either neither keeps keep kept starts start started begins begin began continues continue continued tries try tried'.split(' '));
 
 function stemCanonicalToken(token) {
@@ -419,11 +421,25 @@ function conceptSpecificity(tag) {
   return Math.max(0.08,Math.log((stats.docCount+1)/(docs+1))/Math.log(stats.docCount+1));
 }
 
+function conceptDocumentShare(tag) {
+  const stats=conceptCorpusStats();
+  return (stats.df[tag] || 0) / Math.max(1, stats.docCount);
+}
+
+function conceptTooCommon(tag) {
+  return conceptDocumentShare(tag) > MAX_RECOMMENDATION_CONCEPT_SHARE;
+}
+
 function conceptIsPresentable(tag) {
   const feature=canonicalTagFeatures(tag);
   if (!feature.tokens.length) return false;
   if (feature.tokens.length===1 && GENERIC_CONCEPT_TOKENS.has(feature.tokens[0])) return false;
+  if (conceptTooCommon(tag)) return false;
   return true;
+}
+
+function recommendationConcepts(movie) {
+  return scoringTags(movie).filter(conceptIsPresentable);
 }
 
 function cleanTagArray(tags, movie=null, keepLowConfidence=false) {
@@ -455,10 +471,43 @@ function sameCanonicalTitle(a, b) {
   return canonicalTitle(a) && canonicalTitle(a) === canonicalTitle(b);
 }
 
-const DESCRIPTOR_STOP = new Set('a an the and or but of in on at to from into by for with without as is are was were be been being has have had he she they them his her their its it this that these those who whom whose when where while after before over under out up down about against through during between among begins begin find finds found makes make made takes take took goes go went gets get got becomes become became tells told says said later soon then however eventually meanwhile years year day night man woman boy girl young old film movie story life lives world people'.split(' '));
+const DESCRIPTOR_STOP = new Set('a an the and or but of in on at to from into by for with without as is are was were be been being has have had he she they them his her their its it this that these those who whom whose when where while after before over under out up down about against through during between among begins begin find finds found makes make made takes take took goes go went gets get got becomes become became tells told says said later soon then however eventually meanwhile years year day night man woman boy girl young old film movie story life lives world people name named'.split(' '));
+const NAME_DETECTION_STOP = new Set('The A An In On At To From Into By For With Without As After Before During Meanwhile Later Soon However Eventually When While He She They It His Her Their Its This That These Those British American Indian English Hindi London Egypt UK USA MI5 MI6 CIA FBI BBC Channel Wikipedia'.split(' '));
 
 function tokeniseStory(text) {
   return String(text || '').toLowerCase().replace(/[’']/g, '').replace(/[^a-z0-9\s-]/g, ' ').split(/\s+/).filter(Boolean);
+}
+
+function detectLikelyNameTokens(text) {
+  const counts = new Map();
+  const multiword = new Set();
+  const add = token => {
+    const clean = String(token || '').replace(/[^A-Za-z'-]/g, '');
+    if (!clean || clean.length < 3 || NAME_DETECTION_STOP.has(clean)) return;
+    if (!/^[A-Z][a-z][A-Za-z'-]*$/.test(clean)) return;
+    counts.set(clean.toLowerCase(), (counts.get(clean.toLowerCase()) || 0) + 1);
+  };
+  const source = String(text || '');
+  source.replace(/\b([A-Z][a-z][A-Za-z'-]+(?:\s+[A-Z][a-z][A-Za-z'-]+)+)\b/g, match => {
+    match.split(/\s+/).forEach(token => {
+      add(token);
+      const clean = String(token || '').replace(/[^A-Za-z'-]/g, '');
+      if (clean && !NAME_DETECTION_STOP.has(clean)) multiword.add(clean.toLowerCase());
+    });
+    return match;
+  });
+  source.replace(/\b([A-Z][a-z][A-Za-z'-]+)\b/g, (_, word, offset) => {
+    const prev = source.slice(Math.max(0, offset - 3), offset);
+    if (/[.!?]\s*$/.test(prev)) return word;
+    add(word);
+    return word;
+  });
+  return new Set([...counts.entries()].filter(([token, count]) => count >= 2 || multiword.has(token)).map(([token]) => token));
+}
+
+function removeNameTokensFromWords(words, nameTokens) {
+  if (!nameTokens || !nameTokens.size) return words;
+  return words.filter(word => !nameTokens.has(stemCanonicalToken(word)) && !nameTokens.has(normaliseTagName(word)));
 }
 
 function phraseLooksUseful(words) {
@@ -473,11 +522,12 @@ function phraseLooksUseful(words) {
 }
 
 function extractRawDescriptors(text) {
+  const nameTokens = detectLikelyNameTokens(text);
   const tokens = tokeniseStory(text);
   const counts = new Map();
   for (let n = 2; n <= 5; n++) {
     for (let i = 0; i <= tokens.length - n; i++) {
-      const words = tokens.slice(i, i+n);
+      const words = removeNameTokensFromWords(tokens.slice(i, i+n), nameTokens);
       if (!phraseLooksUseful(words)) continue;
       const phrase = words.join(' ');
       counts.set(phrase, (counts.get(phrase) || 0) + 1);
@@ -1782,7 +1832,7 @@ function hasUserAvoidedConcept(movie) {
 }
 
 function recommendableTitle(movie) {
-  return !hasUserAvoidedConcept(movie);
+  return !hasUserAvoidedConcept(movie) && !movieGenres(movie).some(genre => USER_AVOID_GENRES.has(genre));
 }
 
 function personalizedEnough() {
@@ -2268,7 +2318,7 @@ function tasteEvidenceMovies() {
 function computeTagWeights() {
   const w={}, genres={};
   tasteEvidenceMovies().forEach(m => {
-    const tags = scoringTags(m);
+    const tags = recommendationConcepts(m);
     if (m.rating>0) {
       const wt = m.rating-3;
       tags.forEach(t => { w[t]=(w[t]||0)+wt; });
@@ -2289,7 +2339,7 @@ function scoreMovies() {
       let score=0, posOverlap=0, genreOverlap=0, negativeOverlap=0, positiveScore=0, negativePenalty=0;
       const matched=new Set();
       const matchedGenres=new Set();
-      const tags = scoringTags(m);
+      const tags = recommendationConcepts(m);
       tags.forEach(t => {
         const w=state.tagWeights[t] || 0;
         const specificity=conceptSpecificity(t);

@@ -40,6 +40,8 @@ Wikipedia lead/category metadata, not guessed from isolated plot words.
   user's positive taste profile.
 - Genre filtering belongs in the sticky control deck and applies to card grids
   together with language and year filters.
+- Documentary titles are not recommended by default. They may remain visible in
+  Pool, Tags, Rated, Watchlist, Hidden and Rejected views for inspection.
 
 The release smoke test must confirm that the split stylesheet and application
 script load in headless Chrome, the app executes its initial render, removed
@@ -161,6 +163,51 @@ Titles with these concepts must not appear in For You recommendations or
 discovery fallback cards, even if they match other liked concepts or genres.
 They may still exist in Pool, Tags, Rated, Watchlist, Hidden and Rejected views
 for inspection, editing, retagging or manual override.
+
+Documentary titles are also actively excluded from For You recommendations and
+discovery fallback cards.
+
+### 3.2.2 Names In Tags And Concepts
+
+Specific character/person names must not become recommendation concepts. They
+are usually unique to one title and create clutter instead of useful taste
+signals.
+
+The tagger must detect likely names from the original capitalized story text
+before lowercasing/tokenization, then remove those name tokens from raw
+descriptors before they are scored or canonicalized.
+
+Examples:
+
+```text
+baby-charlotte-learns -> baby-learns
+shaun-evans-falls     -> falls, or dropped if too weak
+mark-finds-funny      -> finds-funny, or dropped if too weak
+```
+
+The app should prefer reusable roles, relationships, actions, settings and
+story attributes over one-off names. Existing saved titles must rebuild through
+the name-cleaned concept pipeline when the canonical tag version changes.
+
+### 3.2.3 Overbroad Concept Suppression
+
+Concepts that appear across too much of the pool are not useful recommendation
+signals, even when they are technically true. They must not dominate `Why`,
+cards or Tag Brain.
+
+The app treats a concept as non-diagnostic when it appears in more than 10% of
+the title pool. Non-diagnostic concepts stay in stored title data, but are
+excluded from recommendation weighting and user-facing concept explanations.
+
+This is intended to suppress wallpaper concepts such as:
+
+```text
+compressed-timeline
+father-child-relationship
+school-college-setting
+```
+
+when they become too common in the user's actual pool.
 
 ### 3.3 Manual Add
 
