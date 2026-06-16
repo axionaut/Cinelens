@@ -750,19 +750,14 @@ window.addEventListener('DOMContentLoaded', async () => {
   migrateLegacyPoolItems();
   cleanContaminatedTags(true);
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
-  const shouldRestoreDriveBeforeRender = state.drive.enabled && (state.drive.fileId || state.drive.accessToken);
-  if (shouldRestoreDriveBeforeRender) setDriveStatus('syncing');
-  else render();
-  try {
-    await restoreDriveSession();
-  } finally {
+  render();
+  restoreDriveSession().finally(() => {
     startupDriveRestoreDone = true;
     render();
-  }
-  // Auto-expand if pool is small
-  if (Object.keys(state.movies).length < 50 && (!state.drive.enabled || state.drive.connected)) {
-    scheduleAutoExpand(800);
-  }
+    if (Object.keys(state.movies).length < 50 && (!state.drive.enabled || state.drive.connected)) {
+      scheduleAutoExpand(800);
+    }
+  });
   window.addEventListener('scroll', handleScroll);
 });
 
