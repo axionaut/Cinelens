@@ -141,14 +141,48 @@ const EXPANSION_SHOWS = [
   "Special Ops (Indian TV series)","Rocket Boys","Gullak","Tabbar","Kohrra","Farzi","Dahaad","The Family Man (Indian TV series)"
 ];
 
+const TITLE_BLOCKLIST = new Set([
+  'paul thomas anderson','alfonso cuaron','russell crowe','villeneuve','michael mann'
+]);
+
+const HIGH_CONFIDENCE_ENGLISH = [
+  'The Avengers (2012 film)','Avengers: Infinity War','Avengers: Endgame','Iron Man (2008 film)','Captain America: The Winter Soldier',
+  'Guardians of the Galaxy (film)','Spider-Man: Homecoming','Logan (film)','Deadpool (film)','The Batman (film)',
+  'Dune (2021 film)','Dune: Part Two','Oppenheimer (film)','Top Gun: Maverick','Mission: Impossible - Fallout',
+  'Mad Max: Fury Road','John Wick (film)','John Wick: Chapter 4','Knives Out','Glass Onion: A Knives Out Mystery',
+  'The Martian (film)','Edge of Tomorrow','A Quiet Place (film)','Get Out (film)','Gone Girl (film)',
+  'Prisoners (film)','Sicario (2015 film)','Nightcrawler (film)','The Social Network','The Wolf of Wall Street (2013 film)',
+  'Interstellar (film)','Inception','The Dark Knight','The Prestige (film)','Memento (film)',
+  'Arrival (film)','Blade Runner 2049','Ex Machina (film)','Annihilation (film)','Her (film)',
+  'Whiplash (2014 film)','La La Land','The Grand Budapest Hotel','No Country for Old Men','There Will Be Blood',
+  'The Departed','Shutter Island','Zodiac (film)','Se7en','Fight Club'
+];
+
+const HIGH_CONFIDENCE_HINDI = [
+  'Andhadhun','Drishyam (2015 film)','Kahaani','Talaash: The Answer Lies Within','Special 26',
+  'Gangs of Wasseypur','Gangs of Wasseypur - Part 2','Article 15 (film)','Raazi','Uri: The Surgical Strike',
+  'Dangal (film)','3 Idiots','Taare Zameen Par','Lagaan','Rang De Basanti',
+  'Zindagi Na Milegi Dobara','Dil Chahta Hai','Queen (2013 film)','Barfi!','Jab We Met',
+  'Tumbbad','Stree (2018 film)','Badhaai Ho','Pink (2016 film)','Masaan',
+  'Piku','Swades','Chak De! India','Bhaag Milkha Bhaag','A Wednesday!'
+];
+
+const HIGH_CONFIDENCE_SHOWS = [
+  'Breaking Bad','Better Call Saul','Chernobyl (miniseries)','True Detective','Fargo (TV series)','The Bear (TV series)',
+  'The Last of Us (TV series)','Black Mirror','Mindhunter (TV series)','Stranger Things','The Boys (TV series)',
+  'Sherlock (TV series)','Mr. Robot','Narcos','Mad Men','House of Cards (American TV series)',
+  'Delhi Crime','Scam 1992','Paatal Lok','The Family Man (Indian TV series)','Panchayat (TV series)',
+  'Kota Factory','Rocket Boys','Made in Heaven (TV series)','Kohrra','Farzi'
+];
+
 // ─────────────────────────────────────────────
 // STATE
 // ─────────────────────────────────────────────
 let activeTab = 'all';
 let tagFilter = 'all';
-let selectedConcept = '';
-let conceptView = 'all';
-let conceptVisibleLimit = 40;
+let selectedTag = '';
+let tagDetailView = 'all';
+let tagDetailVisibleLimit = 40;
 let poolExpansionInProgress = false;
 let fetchAbortRequested = false;
 let lastAutoExpandAt = 0;
@@ -166,11 +200,14 @@ const STRONG_REC_MIN_OVERLAP = 3;
 const FETCH_AUTO_ATTEMPT_BUDGET = 55;
 const FETCH_MANUAL_ATTEMPT_BUDGET = 90;
 const FETCH_MAX_ADDED_PER_RUN = 35;
+const DRIVE_TOKEN_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
 let recVisibleLimit = 10;
 let currentWikiAbortController = null;
 let currentSleepCancel = null;
 let autoFetchPaused = false;
 let autoExpandTimer = null;
+let startupDriveRestoreDone = false;
+let driveTokenRefreshTimer = null;
 let state = {
   movies: {},
   tagWeights: {},
@@ -178,6 +215,7 @@ let state = {
   settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
+  deletedMovieRecords: {},
   tagStats: { candidates:0, tags:0, rebuiltAt:'' },
   rejectedWikiTitles: {},
   rejectedRefresh: { additionsSinceRefresh:0, lastRunAt:0, totalRuns:0 },
@@ -189,6 +227,7 @@ let pendingManualRatingId = '';
 const PERFECT_REC_TARGET = STRONG_REC_TARGET;
 const PERFECT_REC_MIN_RATIO = 0.995;
 const MIN_PLOT_TAGS = 5;
+const MAX_STORY_TAGS = 34;
 const MIN_STORY_SECTION_CHARS = 140;
 const LOW_CONFIDENCE_PLOT_TAGS = new Set([
   'protagonist-driven','conflict-driven','character-driven','plot-driven','dramatic-stakes',
@@ -202,8 +241,8 @@ const LOW_CONFIDENCE_PLOT_TAGS = new Set([
 ]);
 
 const CONTAMINATED_FALLBACK_TAGS = new Set([...LOW_CONFIDENCE_PLOT_TAGS]);
-const GENERIC_CONCEPT_TOKENS = new Set('crime thriller child relationship father mother family return discover learn decide sent college school workplace time there around away full other first'.split(' '));
-const USER_AVOID_CONCEPTS = new Set([
+const GENERIC_TAG_TOKENS = new Set('crime thriller child relationship father mother family return discover learn decide sent college school workplace time there around away full other first'.split(' '));
+const USER_AVOID_TAGS = new Set([
   'unresolved-ending',
   'open-ending',
   'ambiguous-ending',
@@ -216,8 +255,8 @@ const USER_AVOID_CONCEPTS = new Set([
   'propaganda-driven'
 ]);
 const USER_AVOID_GENRES = new Set(['documentary']);
-const MAX_RECOMMENDATION_CONCEPT_SHARE = 0.10;
-let conceptStatsCache = null;
+const MAX_RECOMMENDATION_TAG_SHARE = 0.10;
+let tagCorpusStatsCache = null;
 
 const GENRE_RULES = [
   ['science-fiction', /\b(science fiction|sci-fi)\b/],
@@ -292,15 +331,15 @@ function rawScoringTags(movie) {
 }
 
 function suppressedTagSet(movie) {
-  return new Set([...(movie?.suppressedTags || []), ...(movie?.suppressedConcepts || [])].map(normaliseTagName).filter(Boolean));
+  return new Set((movie?.suppressedTags || []).map(normaliseTagName).filter(Boolean));
 }
 
 function suppressedRawTagSet(movie) {
   return new Set((movie?.suppressedRawTags || []).map(normaliseTagName).filter(Boolean));
 }
 
-function conceptAllowed(movie, concept) {
-  return !suppressedTagSet(movie).has(normaliseTagName(concept));
+function tagAllowed(movie, tag) {
+  return !suppressedTagSet(movie).has(normaliseTagName(tag));
 }
 
 function rawTagAllowed(movie, tag) {
@@ -418,7 +457,7 @@ function rebuildTagBrain() {
       if ((supportFor.get(tag) || 0) > 1) learned.push(labelFor.get(tag) || feature.phrase);
     });
     const fallback = rawScoringTags(movie).map(tag => labelFor.get(tag) || canonicalTagFeatures(tag).phrase).filter(Boolean);
-    const normalizedTags = cleanTagArray([...new Set(learned.length ? learned : fallback)].filter(tag => conceptAllowed(movie, tag)), movie, false);
+    const normalizedTags = cleanTagArray([...new Set(learned.length ? learned : fallback)].filter(tag => tagAllowed(movie, tag)), movie, false);
     movie.tags = normalizedTags;
     movie.coreTags = normalizedTags;
     movie.plotTags = normalizedTags;
@@ -433,44 +472,44 @@ function rebuildTagBrain() {
   });
   state.tagStats = { candidates:tags.length, tags:new Set(records.flatMap(movie => movie.tags || [])).size, rebuiltAt:new Date().toISOString() };
   delete state.canonicalTagStats;
-  conceptStatsCache = null;
+  tagCorpusStatsCache = null;
   return changed;
 }
 
-function conceptCorpusStats() {
-  if (conceptStatsCache) return conceptStatsCache;
+function tagCorpusStats() {
+  if (tagCorpusStatsCache) return tagCorpusStatsCache;
   const records=[...Object.values(state.movies || {}),...Object.values(state.hiddenTitles || {})];
   const df={};
   records.forEach(movie=>new Set(scoringTags(movie)).forEach(tag=>{df[tag]=(df[tag]||0)+1;}));
-  conceptStatsCache={docCount:Math.max(1,records.length),df};
-  return conceptStatsCache;
+  tagCorpusStatsCache={docCount:Math.max(1,records.length),df};
+  return tagCorpusStatsCache;
 }
 
-function conceptSpecificity(tag) {
-  const stats=conceptCorpusStats();
+function tagSpecificity(tag) {
+  const stats=tagCorpusStats();
   const docs=stats.df[tag]||1;
   return Math.max(0.08,Math.log((stats.docCount+1)/(docs+1))/Math.log(stats.docCount+1));
 }
 
-function conceptDocumentShare(tag) {
-  const stats=conceptCorpusStats();
+function tagDocumentShare(tag) {
+  const stats=tagCorpusStats();
   return (stats.df[tag] || 0) / Math.max(1, stats.docCount);
 }
 
-function conceptTooCommon(tag) {
-  return conceptDocumentShare(tag) > MAX_RECOMMENDATION_CONCEPT_SHARE;
+function tagTooCommon(tag) {
+  return tagDocumentShare(tag) > MAX_RECOMMENDATION_TAG_SHARE;
 }
 
-function conceptIsPresentable(tag) {
+function tagIsPresentable(tag) {
   const feature=canonicalTagFeatures(tag);
   if (!feature.tokens.length) return false;
-  if (feature.tokens.length===1 && GENERIC_CONCEPT_TOKENS.has(feature.tokens[0])) return false;
-  if (conceptTooCommon(tag)) return false;
+  if (feature.tokens.length===1 && GENERIC_TAG_TOKENS.has(feature.tokens[0])) return false;
+  if (tagTooCommon(tag)) return false;
   return true;
 }
 
-function recommendationConcepts(movie) {
-  return scoringTags(movie).filter(conceptIsPresentable);
+function recommendationScoringTags(movie) {
+  return scoringTags(movie).filter(tagIsPresentable);
 }
 
 function cleanTagArray(tags, movie=null, keepLowConfidence=false) {
@@ -579,7 +618,7 @@ function extractRawDescriptors(text) {
     let score = repetitionScore * lengthScore * positionScore * usefulRatio;
     if (actionWords.test(phrase)) score *= 1.65;
     if (storyAttributeWords.test(phrase)) score *= 1.35;
-    if (words.some(w => GENERIC_CONCEPT_TOKENS.has(stemCanonicalToken(w)))) score *= 0.72;
+    if (words.some(w => GENERIC_TAG_TOKENS.has(stemCanonicalToken(w)))) score *= 0.72;
     return { phrase, count, score, first:firstSeen.get(phrase) || 0 };
   }).sort((a,b) => b.score - a.score || a.phrase.localeCompare(b.phrase)).slice(0, 40);
 }
@@ -613,18 +652,19 @@ function explicitAvoidTags(storyText='') {
   return tags;
 }
 
-function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats()) {
+function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats(), opts={}) {
+  const maxTags = opts.maxTags || MAX_STORY_TAGS;
   const rawDescriptors = extractRawDescriptors(storyText || '');
-  const descriptors = selectContrastiveDescriptors(rawDescriptors, stats, 18).slice(0, 16);
-  const storyOnlyMeta = { ...meta, leadText: '', categoryText: '' };
-  const evidenceTags = cleanTagArray(deriveTagsFromText(storyText || '', storyOnlyMeta), meta, false)
+  const descriptors = selectContrastiveDescriptors(rawDescriptors, stats, opts.descriptorLimit || 28).slice(0, opts.descriptorSlice || 24);
+  const tagMeta = opts.includeContext ? meta : { ...meta, leadText: '', categoryText: '' };
+  const evidenceTags = cleanTagArray(deriveTagsFromText(storyText || '', tagMeta), meta, false)
     .filter(t => !isMetaTag(t))
     .filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t))
-    .slice(0, 14);
-  let tags = cleanTagArray([...explicitAvoidTags(storyText), ...evidenceTags, ...descriptors], meta, false).slice(0, 24);
+    .slice(0, opts.evidenceLimit || 14);
+  let tags = cleanTagArray([...explicitAvoidTags(storyText), ...evidenceTags, ...descriptors], meta, false).slice(0, maxTags);
   if (tags.length < MIN_PLOT_TAGS && rawDescriptors.length) {
-    const extras = selectContrastiveDescriptors(rawDescriptors, stats, 24).filter(tag => !tags.includes(tag));
-    tags = cleanTagArray([...tags, ...extras], meta, false).slice(0, 24);
+    const extras = selectContrastiveDescriptors(rawDescriptors, stats, maxTags).filter(tag => !tags.includes(tag));
+    tags = cleanTagArray([...tags, ...extras], meta, false).slice(0, maxTags);
   }
   return {
     rawDescriptors,
@@ -704,15 +744,20 @@ function cleanContaminatedTags(silent=true) {
 // ─────────────────────────────────────────────
 // INIT
 // ─────────────────────────────────────────────
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   loadLocalState();
   migrateLegacyPoolItems();
   cleanContaminatedTags(true);
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   render();
-  restoreDriveSession();
+  try {
+    await restoreDriveSession();
+  } finally {
+    startupDriveRestoreDone = true;
+    render();
+  }
   // Auto-expand if pool is small
-  if (Object.keys(state.movies).length < 50) {
+  if (Object.keys(state.movies).length < 50 && (!state.drive.enabled || state.drive.connected)) {
     scheduleAutoExpand(800);
   }
   window.addEventListener('scroll', handleScroll);
@@ -806,10 +851,15 @@ function obviousNonMovieTitle(title) {
 function isFranchiseOverviewPage(pageTitle, extract, cats=[]) {
   if (obviousNonMovieTitle(pageTitle)) return true;
   const lead = String(extract || '').slice(0, 700);
-  const categoryText = (cats || []).join(' ');
   if (/\b(film series|media franchise|shared universe)\b/i.test(pageTitle)) return true;
-  if (/\b(film series|media franchise|fictional universes)\b/i.test(categoryText)) return true;
+  if ((cats || []).some(categoryMarksOverviewPage)) return true;
   return /^\s*.+\s+is an? (?:American |British |Indian |English-language |Hindi-language )?(?:media franchise|film series|shared universe)\b/i.test(lead);
+}
+
+function categoryMarksOverviewPage(category) {
+  const cat = String(category || '').toLowerCase();
+  return /^category:(film series|media franchises|fictional universes)\b/.test(cat)
+    || /^category:.*(?:media franchise|fictional universe) articles\b/.test(cat);
 }
 
 function isMetaTag(tag) {
@@ -830,7 +880,13 @@ function sourceCategoriesForMode(mode) {
   return collectionLanesForMode(mode).flatMap(lane => WIKI_SOURCES[lane.key] || []);
 }
 
-function curatedTitlesForMode(mode) { return []; }
+function curatedTitlesForMode(mode) {
+  if (mode === 'englishMovies') return [...HIGH_CONFIDENCE_ENGLISH, ...EXPANSION_ENGLISH].map(title => ({title, lane:COLLECTION_LANES.find(l => l.key === 'englishMovies'), tier:0}));
+  if (mode === 'hindiMovies') return [...HIGH_CONFIDENCE_HINDI, ...EXPANSION_HINDI].map(title => ({title, lane:COLLECTION_LANES.find(l => l.key === 'hindiMovies'), tier:0}));
+  if (mode === 'englishShows') return [...HIGH_CONFIDENCE_SHOWS, ...EXPANSION_SHOWS].map(title => ({title, lane:COLLECTION_LANES.find(l => l.key === 'englishShows'), tier:0}));
+  if (mode === 'hindiShows') return [...HIGH_CONFIDENCE_SHOWS, ...EXPANSION_SHOWS].map(title => ({title, lane:COLLECTION_LANES.find(l => l.key === 'hindiShows'), tier:0}));
+  return collectionLanesForMode(mode).flatMap(lane => curatedTitlesForMode(lane.key));
+}
 
 function matchesExpansionMode(movie, mode) {
   if (mode === 'movies') return !movie.format;
@@ -1066,6 +1122,23 @@ function titleSortKey(movie) {
   return String(movie?.title || '').toLowerCase();
 }
 
+function candidateRelevanceScore(item) {
+  const title = normaliseTagName(typeof item === 'string' ? item : item.title);
+  const tier = Number(typeof item === 'string' ? 2 : item.tier ?? 2);
+  let score = (3 - tier) * 100;
+  Object.entries(state.tagWeights || {}).forEach(([tag, weight]) => {
+    if (Number(weight) <= 0) return;
+    const tokens = canonicalTagFeatures(tag).tokens || [];
+    if (tokens.some(token => token.length > 3 && title.includes(token))) score += Number(weight) * 12;
+  });
+  if (/\b(20[0-2]\d|19[8-9]\d)\b/.test(String(typeof item === 'string' ? item : item.title))) score += 8;
+  return score;
+}
+
+function sortCandidateTitles(items) {
+  return [...items].sort((a,b)=>candidateRelevanceScore(b)-candidateRelevanceScore(a)||String(typeof a === 'string' ? a : a.title).localeCompare(String(typeof b === 'string' ? b : b.title)));
+}
+
 function movieTime(movie) {
   return Date.parse(movie?._updatedAt || movie?.hiddenAt || movie?.updatedAt || movie?.at || '') || 0;
 }
@@ -1097,7 +1170,7 @@ function roundRobinUnique(lanes) {
       if (!item) continue;
       const title = typeof item === 'string' ? item : item.title;
       const key = normaliseTitleKey(title);
-      if (!key || seen.has(key) || obviousNonMovieTitle(title)) continue;
+      if (!key || seen.has(key) || TITLE_BLOCKLIST.has(key) || obviousNonMovieTitle(title)) continue;
       seen.add(key); out.push(item); added = true;
     }
   }
@@ -1169,9 +1242,15 @@ async function fetchNavigationLaneTitles(mode, limitPerPage=180) {
 async function candidateTitlesForMode(mode, pageDepth=4) {
   const laneItems = [];
   for (const lane of collectionLanesForMode(mode)) {
-    const categoryTitles = await fetchWikiSourceTitles(lane.key, pageDepth);
+    const curatedTitles = curatedTitlesForMode(lane.key);
     const navigationTitles = await fetchNavigationLaneTitles(lane.key, 220);
-    laneItems.push({ lane, titles: roundRobinUnique([navigationTitles, categoryTitles]).map(title => ({ title, lane })) });
+    const categoryTitles = pageDepth >= 12 ? await fetchWikiSourceTitles(lane.key, Math.max(2, pageDepth - 10)) : [];
+    const titles = roundRobinUnique([
+      curatedTitles,
+      navigationTitles.map(title => ({title, lane, tier:1})),
+      categoryTitles.map(title => ({title, lane, tier:2}))
+    ]);
+    laneItems.push({ lane, titles });
   }
   return roundRobinUnique(weightedLaneLists(laneItems));
 }
@@ -1231,13 +1310,13 @@ async function expandPool(manual=true) {
   while (!fetchAbortRequested) {
     const allTitles = await candidateTitlesForMode(mode, pageDepth);
     const existing = new Set(Object.values(state.movies).map(m => normaliseTitleKey(m.title)));
-    const toFetch = allTitles.filter(item => {
+    const toFetch = sortCandidateTitles(allTitles.filter(item => {
       const title = typeof item === 'string' ? item : item.title;
       const lane = typeof item === 'string' ? null : item.lane;
       const clean = normaliseTitleKey(title);
       const keyMode = lane?.key || mode;
-      return clean && !existing.has(clean) && !hiddenTitleMatches(title) && !seenThisRun.has(clean) && !state.rejectedWikiTitles[rejectKey(title, keyMode)] && !obviousNonMovieTitle(title);
-    });
+      return clean && !TITLE_BLOCKLIST.has(clean) && !existing.has(clean) && !hiddenTitleMatches(title) && !seenThisRun.has(clean) && !state.rejectedWikiTitles[rejectKey(title, keyMode)] && !obviousNonMovieTitle(title);
+    }));
 
     if (!toFetch.length) {
       if (needsMoreStrongRecommendations() && pageDepth < 80 && attempts < attemptBudget) { pageDepth += 8; continue; }
@@ -1485,7 +1564,6 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   if (cats.some(c => c.includes('television series') || c.includes('tv series') || c.includes('web series'))) format = 'series';
   if (cats.some(c => c.includes('miniseries'))) format = 'miniseries';
   if (!format && /\b(television series|tv series|web series|miniseries|streaming television series)\b/i.test(leadText)) format = 'series';
-  if (cats.some(c => c.includes('film series') || c.includes('media franchise') || c.includes('fictional universes'))) return rejectWikiParse(diagnostics, 'franchise page, not one movie or show');
   if (mode === 'movies' && format) return rejectWikiParse(diagnostics, 'title is a show, not a movie');
   if (mode === 'shows' && !format) return rejectWikiParse(diagnostics, 'title is a movie, not a show');
 
@@ -1536,7 +1614,23 @@ function extractNarrativeSection(extract) {
     if (score > 0) candidates.push({ section, score });
   }
   candidates.sort((a,b) => b.score - a.score || b.section.length - a.section.length);
-  return candidates[0]?.section || '';
+  return candidates[0]?.section || extractInlineNarrative(text);
+}
+
+function extractInlineNarrative(text) {
+  const compact = String(text || '').replace(/\s+/g, ' ').trim();
+  const sentences = compact.match(/[^.!?]+[.!?]+/g) || [];
+  const start = sentences.findIndex(sentence => /^\s*In the (?:film|series|show),/i.test(sentence));
+  if (start < 0) return '';
+  const out = [];
+  for (let i = start; i < sentences.length && out.length < 8; i++) {
+    const sentence = sentences[i].trim();
+    if (out.length && /\b(production|filming|casting|cast members?|development began|premiered|released|received praise|grossed|box office|accolades|sequel)\b/i.test(sentence)) break;
+    out.push(sentence);
+    if (out.join(' ').length > 1800) break;
+  }
+  const section = out.join(' ').replace(/\s+/g, ' ').trim();
+  return section.length >= MIN_STORY_SECTION_CHARS ? section : '';
 }
 
 function narrativeSectionScore(heading, section) {
@@ -1741,7 +1835,7 @@ function tagEvidenceOk(tag, movie) {
 
 function scoringTags(movie) {
   if (!movie) return [];
-  return [...new Set(rawScoringTags(movie).map(tag => canonicalTagFeatures(tag).phrase).filter(Boolean))].filter(tag => conceptAllowed(movie, tag));
+  return [...new Set(rawScoringTags(movie).map(tag => canonicalTagFeatures(tag).phrase).filter(Boolean))].filter(tag => tagAllowed(movie, tag));
 }
 
 function abortableSleep(ms) {
@@ -2011,13 +2105,13 @@ function meetsYearCutoff(m) {
   return !m.year || m.year >= state.settings.minYear;
 }
 
-function hasUserAvoidedConcept(movie) {
-  const concepts = new Set([...scoringTags(movie), ...rawScoringTags(movie)].map(normaliseTagName));
-  return [...USER_AVOID_CONCEPTS].some(tag => concepts.has(tag));
+function hasUserAvoidedTag(movie) {
+  const tags = new Set([...scoringTags(movie), ...rawScoringTags(movie)].map(normaliseTagName));
+  return [...USER_AVOID_TAGS].some(tag => tags.has(tag));
 }
 
 function recommendableTitle(movie) {
-  return !hasUserAvoidedConcept(movie) && !movieGenres(movie).some(genre => USER_AVOID_GENRES.has(genre));
+  return !hasUserAvoidedTag(movie) && !movieGenres(movie).some(genre => USER_AVOID_GENRES.has(genre));
 }
 
 function personalizedEnough() {
@@ -2063,6 +2157,7 @@ function maybeAutoExpandPool() {
 }
 
 function scheduleAutoExpand(delay=600) {
+  if (!startupDriveRestoreDone) return;
   if (autoExpandTimer || autoFetchPaused) return;
   autoExpandTimer = setTimeout(() => {
     autoExpandTimer = null;
@@ -2292,9 +2387,9 @@ function restoreManualStars() {
   box.querySelectorAll('.star').forEach(st => st.classList.remove('active'));
 }
 function buildCard(movie, opts={}) {
-  const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextConcept } = opts;
+  const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag } = opts;
   const card = document.createElement('div');
-  card.className = 'movie-card' + (movie.rating > 0 ? ' rated' : '');
+  card.className = `movie-card ${isShow(movie) ? 'show-card' : 'film-card'}` + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
   const matchPct = rank ? Math.round((Number(matchScore ?? tasteFit) || 0) * 100) : 0;
   const safeId = movie.id.replace(/'/g,"\\'");
@@ -2326,13 +2421,13 @@ function buildCard(movie, opts={}) {
       ${renderGenres(movie, matchedGenres)}
       ${poolView && movie.retagMessage ? `<div class="pool-card-note">${movie.retagMessage}</div>`:''}
       ${movie.retagStatus === 'failed' || movie.needsManualUrl ? renderWikiRepairRow(safeId, movie.retagMessage) : ''}
-      <div class="card-tags" id="tags-${movie.id}">${renderConceptChips(movie, safeId, true, matchedTags, contextConcept)}</div>
+      <div class="card-tags" id="tags-${movie.id}">${renderTagInsightChips(movie, safeId, true, matchedTags, contextTag)}</div>
       <div class="card-actions">
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
         ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
         <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
       </div>
-      ${contextLabel ? `<div class="concept-status">${contextLabel}</div>` : ''}
+      ${contextLabel ? `<div class="tag-status">${contextLabel}</div>` : ''}
     </div>`;
   if (hiddenView) {
     const stars = card.querySelector('.star-rating');
@@ -2342,7 +2437,7 @@ function buildCard(movie, opts={}) {
       star.removeAttribute('onmouseleave');
     });
     const tags = card.querySelector('.card-tags');
-    if (tags) tags.querySelectorAll('.concept-chip').forEach(tag => {
+    if (tags) tags.querySelectorAll('.tag-insight-chip').forEach(tag => {
       tag.removeAttribute('onclick');
       tag.removeAttribute('title');
       tag.classList.remove('removable');
@@ -2421,25 +2516,25 @@ function renderTagChips(tags, matchedTags, expanded) {
     + (tags.length>5&&!expanded?`<span class="tag" style="color:var(--muted2)">+${tags.length-5}</span>`:'');
 }
 
-function conceptChipHtml(tag, movieId, kind='', impact='') {
+function tagInsightChipHtml(tag, movieId, kind='', impact='') {
     const safeTag = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     const weight = Number(state.tagWeights[tag] || 0);
     const title = weight ? `Taste weight ${weight > 0 ? '+' : ''}${weight}. Click to ${state.settings.tagDeleteMode ? 'remove permanently from this title' : 'explore this tag'}.` : `Click to ${state.settings.tagDeleteMode ? 'remove permanently from this title' : 'explore this tag'}.`;
-    return `<span class="concept-chip ${kind}" title="${title}" onclick="handleConceptClick('${movieId}','${safeTag}',event)">${tag}${impact ? `<span class="impact">${impact}</span>` : ''}</span>`;
+    return `<span class="tag-insight-chip ${kind}" title="${title}" onclick="handleTagClick('${movieId}','${safeTag}',event)">${tag}${impact ? `<span class="impact">${impact}</span>` : ''}</span>`;
 }
 
 function rawTagChipHtml(tag, movieId) {
     const safeTag = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     const title = state.settings.tagDeleteMode ? 'Click to remove this raw tag permanently from this title.' : 'Raw candidate used before tag cleanup. Turn on remove mode to delete it from this title.';
-    return `<span class="concept-chip raw-tag" title="${title}" onclick="handleRawTagClick('${movieId}','${safeTag}',event)">${tag}</span>`;
+    return `<span class="tag-insight-chip raw-tag" title="${title}" onclick="handleRawTagClick('${movieId}','${safeTag}',event)">${tag}</span>`;
 }
 
-function cardConceptGroups(movie, matchedTags=null, contextConcept='') {
-  const concepts=scoringTags(movie).filter(conceptIsPresentable);
+function cardTagGroups(movie, matchedTags=null, contextTag='') {
+  const tags=scoringTags(movie).filter(tagIsPresentable);
   const matched=matchedTags || new Set();
-  const scored=concepts.map(tag => {
+  const scored=tags.map(tag => {
     const weight=Number(state.tagWeights[tag]||0);
-    const contribution=weight*conceptSpecificity(tag);
+    const contribution=weight*tagSpecificity(tag);
     return {tag,weight,contribution,matched:matched.has?.(tag)};
   });
   const matchedPositive=scored.filter(item=>item.matched && item.contribution>0)
@@ -2447,31 +2542,31 @@ function cardConceptGroups(movie, matchedTags=null, contextConcept='') {
   const matchedNegative=scored.filter(item=>item.matched && item.weight<0)
     .sort((a,b)=>Math.abs(b.contribution)-Math.abs(a.contribution)||a.tag.localeCompare(b.tag));
   const highlighted=new Set([...matchedPositive,...matchedNegative].map(item=>item.tag));
-  const distinctive=concepts.filter(tag=>!highlighted.has(tag) && conceptSpecificity(tag)>=0.2)
-    .sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||Math.abs(state.tagWeights[b]||0)-Math.abs(state.tagWeights[a]||0)||a.localeCompare(b))
+  const distinctive=tags.filter(tag=>!highlighted.has(tag) && tagSpecificity(tag)>=0.2)
+    .sort((a,b)=>tagSpecificity(b)-tagSpecificity(a)||Math.abs(state.tagWeights[b]||0)-Math.abs(state.tagWeights[a]||0)||a.localeCompare(b))
     .slice(0,10);
   const shown=new Set([...highlighted,...distinctive]);
-  const more=concepts.filter(tag=>!shown.has(tag)).sort((a,b)=>conceptSpecificity(b)-conceptSpecificity(a)||a.localeCompare(b));
+  const more=tags.filter(tag=>!shown.has(tag)).sort((a,b)=>tagSpecificity(b)-tagSpecificity(a)||a.localeCompare(b));
   return {matchedPositive,matchedNegative,distinctive,more,matchedTotal:matchedPositive.length};
 }
 
-function renderConceptChips(movie, movieId, expanded, matchedTags=null, contextConcept='') {
-  const groups=cardConceptGroups(movie,matchedTags,contextConcept);
+function renderTagInsightChips(movie, movieId, expanded, matchedTags=null, contextTag='') {
+  const groups=cardTagGroups(movie,matchedTags,contextTag);
   if (!groups.matchedPositive.length && !groups.matchedNegative.length && !groups.distinctive.length && !groups.more.length) return '';
   const scoringChips=[
-    ...groups.matchedPositive.map(item=>conceptChipHtml(item.tag,movieId,'score-positive',`+${item.contribution.toFixed(1)}`)),
-    ...groups.matchedNegative.map(item=>conceptChipHtml(item.tag,movieId,'score-negative',`${item.contribution.toFixed(1)}`))
+    ...groups.matchedPositive.map(item=>tagInsightChipHtml(item.tag,movieId,'score-positive',`+${item.contribution.toFixed(1)}`)),
+    ...groups.matchedNegative.map(item=>tagInsightChipHtml(item.tag,movieId,'score-negative',`${item.contribution.toFixed(1)}`))
   ].join('');
-  const otherTags=[...groups.distinctive,...groups.more].map(tag=>conceptChipHtml(tag,movieId,'')).join('');
+  const otherTags=[...groups.distinctive,...groups.more].map(tag=>tagInsightChipHtml(tag,movieId,'')).join('');
   const scoringRow=scoringChips?`<div class="score-chip-row">${scoringChips}</div>`:'';
   const tagRow=otherTags?`<div class="tag-chip-row">${otherTags}</div>`:'';
-  return `<div class="concept-explanation">${scoringRow}${tagRow}</div>`;
+  return `<div class="tag-explanation">${scoringRow}${tagRow}</div>`;
 }
 
-function handleConceptClick(id, tag, event) {
+function handleTagClick(id, tag, event) {
   if (event) event.stopPropagation();
   if (state.settings.tagDeleteMode) removeTagFromMovie(id, tag, event);
-  else openConceptFromCard(tag);
+  else openTagFromCard(tag);
 }
 
 function handleRawTagClick(id, tag, event) {
@@ -2532,7 +2627,7 @@ function tasteEvidenceMovies() {
 function computeTagWeights() {
   const w={}, genres={};
   tasteEvidenceMovies().forEach(m => {
-    const tags = recommendationConcepts(m);
+    const tags = recommendationScoringTags(m);
     if (m.rating>0) {
       const wt = m.rating-3;
       tags.forEach(t => { w[t]=(w[t]||0)+wt; });
@@ -2545,7 +2640,7 @@ function computeTagWeights() {
 
 function scoreMovies() {
   computeTagWeights();
-  const totalPositiveWeight=Object.entries(state.tagWeights).reduce((sum,[tag,weight])=>weight>0?sum+weight*conceptSpecificity(tag):sum,0);
+  const totalPositiveWeight=Object.entries(state.tagWeights).reduce((sum,[tag,weight])=>weight>0?sum+weight*tagSpecificity(tag):sum,0);
   const totalPositiveGenreWeight=Object.values(state.genreWeights).reduce((sum,weight)=>weight>0?sum+weight*GENRE_SCORE_FACTOR:sum,0);
   const ranked = Object.values(state.movies)
     .filter(m => m.rating===0&&scoringTags(m).length>0)
@@ -2553,10 +2648,10 @@ function scoreMovies() {
       let score=0, posOverlap=0, genreOverlap=0, negativeOverlap=0, positiveScore=0, negativePenalty=0;
       const matched=new Set();
       const matchedGenres=new Set();
-      const tags = recommendationConcepts(m);
+      const tags = recommendationScoringTags(m);
       tags.forEach(t => {
         const w=state.tagWeights[t] || 0;
-        const specificity=conceptSpecificity(t);
+        const specificity=tagSpecificity(t);
         if (w>0) { positiveScore+=w*specificity; matched.add(t); posOverlap++; }
         else if (w<0) { negativePenalty+=Math.abs(w)*specificity*0.5; negativeOverlap++; }
       });
@@ -2651,12 +2746,13 @@ function toggleWatchlist(id, e) {
 function skipMovie(id, e) { toggleWatchlist(id, e); }
 
 function applyFreshWikiMovie(oldId, fresh, previous={}) {
+  const stamp = nowStamp();
   const preserved = {
     rating: Number(previous.rating || 0),
     watchlist: !!previous.watchlist,
     skipped: !!previous.skipped,
     userNotes: previous.userNotes || '',
-    suppressedTags: previous.suppressedTags || previous.suppressedConcepts || [],
+    suppressedTags: previous.suppressedTags || previous.suppressedTags || [],
     thumbnailUrl: fresh.thumbnailUrl || previous.thumbnailUrl || '',
     // Explicitly preserve wiki metadata if fresh doesn't have it
     wikiPageId: fresh.wikiPageId || previous.wikiPageId,
@@ -2672,10 +2768,33 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
     retagStatus: 'verified',
     retagMessage: ''
   };
-  touchRecord(next);
-  if (oldId && oldId !== next.id) delete state.movies[oldId];
+  touchRecord(next, stamp);
+  if (oldId && oldId !== next.id) {
+    delete state.movies[oldId];
+    state.deletedMovieRecords = state.deletedMovieRecords || {};
+    state.deletedMovieRecords[oldId] = { id:oldId, replacementId:next.id, at:stamp, updatedAt:stamp };
+  }
   state.movies[next.id] = next;
   return next;
+}
+
+function refreshMovieTags(movie, opts={}) {
+  if (!movie?.storyText) return movie;
+  const built = buildStoryTagSet(movie.storyText, movie, descriptorCorpusStats(), {
+    includeContext: !!opts.includeContext,
+    maxTags: opts.maxTags || MAX_STORY_TAGS,
+    evidenceLimit: opts.evidenceLimit || 18,
+    descriptorLimit: opts.descriptorLimit || 36,
+    descriptorSlice: opts.descriptorSlice || 30
+  });
+  movie.rawDescriptors = built.rawDescriptors;
+  movie.descriptorTags = built.descriptorTags;
+  movie.coreTags = built.coreTags;
+  movie.plotTags = built.plotTags;
+  movie.tags = built.tags;
+  movie.tagged = built.tagged;
+  touchRecord(movie);
+  return movie;
 }
 
 async function findFreshWikiForMovie(movie) {
@@ -2744,6 +2863,7 @@ async function retagMovie(id, e) {
   if (e) e.stopPropagation();
   const m = state.movies[id];
   if (!m) return;
+  const beforeTags = new Set(scoringTags(m));
 
   if (poolExpansionInProgress || autoExpandTimer) {
     stopFetching({silent:true});
@@ -2766,9 +2886,13 @@ async function retagMovie(id, e) {
       return;
     }
     const updated = applyFreshWikiMovie(id, fresh, m);
-    runHousekeeping(false);
+    refreshMovieTags(updated, {includeContext:true, maxTags:40});
+    rebuildTagBrain();
+    computeTagWeights();
     saveLocalState(); syncDrive(); render();
-    showToast(`Re-tagged "${updated.title}"`, 'success');
+    const afterTags = scoringTags(updated);
+    const addedTags = afterTags.filter(tag => !beforeTags.has(tag));
+    showToast(addedTags.length ? `Re-tagged "${updated.title}" · +${addedTags.length} tags` : `Re-tagged "${updated.title}" · tags refreshed`, 'success');
   } catch(err) {
     hideFetchProgress();
     m.retagStatus = 'failed';
@@ -2785,7 +2909,7 @@ function toggleTags(id, e) {
   if (!tags||!tags.length) return;
   m._expanded = !m._expanded;
   const el = document.getElementById('tags-'+id);
-  if (el) el.innerHTML = renderConceptChips(m, id, m._expanded);
+  if (el) el.innerHTML = renderTagInsightChips(m, id, m._expanded);
   const card = document.getElementById('card-'+id);
   if (card) { const b=card.querySelector('.card-act'); if(b&&(b.textContent.includes('tags')||b.textContent.includes('less'))) b.textContent=m._expanded?'▲ less':'▼ tags'; }
 }
@@ -2846,12 +2970,12 @@ function renderTagBrain() {
   computeTagWeights();
   const grid=document.getElementById('tagBrainGrid');
   const countEl=document.getElementById('tagBrainCount');
-  const search=(document.getElementById('conceptSearch')?.value || '').trim().toLowerCase();
+  const search=(document.getElementById('tagSearch')?.value || '').trim().toLowerCase();
   updateControlDeck();
   const map={};
   [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(m => {
     if (!m.tagged) return;
-    scoringTags(m).filter(conceptIsPresentable).forEach(tag => {
+    scoringTags(m).filter(tagIsPresentable).forEach(tag => {
       if (!map[tag]) map[tag]={weight:state.tagWeights[tag]||0,movieCount:0,movies:[]};
       map[tag].movieCount++; map[tag].movies.push(m);
     });
@@ -2870,24 +2994,24 @@ function renderTagBrain() {
     const safe=tag.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     return `<span class="tb-tag ${cls}" onclick="openTagPanel('${safe}')">${tag}<span class="tb-weight">${ws}</span><span class="tb-count">${data.movieCount}</span></span>`;
   }).join('');
-  renderConceptDetail();
+  renderTagDetail();
 }
 function openTagPanel(tag) {
-  selectedConcept=tag;
-  conceptVisibleLimit=40;
-  renderConceptDetail();
-  document.getElementById('conceptDetail')?.scrollIntoView({behavior:'smooth',block:'start'});
+  selectedTag=tag;
+  tagDetailVisibleLimit=40;
+  renderTagDetail();
+  document.getElementById('tagDetail')?.scrollIntoView({behavior:'smooth',block:'start'});
 }
 
-function openConceptFromCard(tag) {
-  selectedConcept=tag;
-  conceptView='all';
-  conceptVisibleLimit=40;
+function openTagFromCard(tag) {
+  selectedTag=tag;
+  tagDetailView='all';
+  tagDetailVisibleLimit=40;
   activeTab='tags';
   document.querySelectorAll('.tab-btn').forEach(button=>button.classList.toggle('active', button.textContent.trim()==='Tags'));
   if (!recommendationPageActive()) stopFetching({silent:true});
   render();
-  document.getElementById('conceptDetail')?.scrollIntoView({behavior:'smooth',block:'start'});
+  document.getElementById('tagDetail')?.scrollIntoView({behavior:'smooth',block:'start'});
 }
 
 function toggleTagDeleteMode() {
@@ -2897,45 +3021,45 @@ function toggleTagDeleteMode() {
   updateControlDeck();
 }
 
-function setConceptView(view, btn) {
-  conceptView=view;
-  conceptVisibleLimit=40;
-  document.querySelectorAll('.concept-view-btn').forEach(button=>button.classList.remove('active'));
+function setTagDetailView(view, btn) {
+  tagDetailView=view;
+  tagDetailVisibleLimit=40;
+  document.querySelectorAll('.tag-detail-view-btn').forEach(button=>button.classList.remove('active'));
   btn?.classList.add('active');
-  renderConceptDetail();
+  renderTagDetail();
 }
 
-function clearSelectedConcept() {
-  selectedConcept='';
-  renderConceptDetail();
+function clearSelectedTag() {
+  selectedTag='';
+  renderTagDetail();
 }
 
-function showMoreConceptTitles() {
-  conceptVisibleLimit+=40;
-  renderConceptDetail();
+function showMoreTagTitles() {
+  tagDetailVisibleLimit+=40;
+  renderTagDetail();
 }
 
-function renderConceptDetail() {
-  const detail=document.getElementById('conceptDetail');
-  const grid=document.getElementById('conceptMoviesGrid');
+function renderTagDetail() {
+  const detail=document.getElementById('tagDetail');
+  const grid=document.getElementById('tagMoviesGrid');
   if (!detail || !grid) return;
-  if (!selectedConcept) { detail.hidden=true; grid.innerHTML=''; return; }
+  if (!selectedTag) { detail.hidden=true; grid.innerHTML=''; return; }
   detail.hidden=false;
   computeTagWeights();
-  document.getElementById('conceptDetailName').textContent=selectedConcept;
-  const activeMovies=Object.values(state.movies || {}).filter(m=>m.tagged&&scoringTags(m).includes(selectedConcept));
-  const hiddenMovies=Object.values(state.hiddenTitles || {}).filter(m=>m.tagged&&scoringTags(m).includes(selectedConcept));
+  document.getElementById('tagDetailName').textContent=selectedTag;
+  const activeMovies=Object.values(state.movies || {}).filter(m=>m.tagged&&scoringTags(m).includes(selectedTag));
+  const hiddenMovies=Object.values(state.hiddenTitles || {}).filter(m=>m.tagged&&scoringTags(m).includes(selectedTag));
   const all=[...activeMovies.map(movie=>({movie,status:movie.rating>0?'rated':'pool'})),...hiddenMovies.map(movie=>({movie,status:'hidden'}))];
-  const weight=state.tagWeights[selectedConcept]||0;
+  const weight=state.tagWeights[selectedTag]||0;
   const ws=weight>0?`+${weight} (you like this)`:weight<0?`${weight} (you dislike this)`:'~ unweighted';
   const counts={rated:all.filter(x=>x.status==='rated').length,pool:all.filter(x=>x.status==='pool').length,hidden:all.filter(x=>x.status==='hidden').length};
-  document.getElementById('conceptDetailStat').textContent=`weight ${ws} · ${all.length} titles · ${counts.rated} rated · ${counts.pool} pool · ${counts.hidden} hidden`;
-  let rows=(conceptView==='all'?all:all.filter(item=>item.status===conceptView)).filter(item=>matchesGlobalFilters(item.movie));
+  document.getElementById('tagDetailStat').textContent=`weight ${ws} · ${all.length} titles · ${counts.rated} rated · ${counts.pool} pool · ${counts.hidden} hidden`;
+  let rows=(tagDetailView==='all'?all:all.filter(item=>item.status===tagDetailView)).filter(item=>matchesGlobalFilters(item.movie));
   rows.sort((a,b)=>(a.status==='rated'?0:a.status==='pool'?1:2)-(b.status==='rated'?0:b.status==='pool'?1:2)||Number(b.movie.rating||0)-Number(a.movie.rating||0)||a.movie.title.localeCompare(b.movie.title));
   grid.innerHTML='';
   if (!rows.length) { grid.innerHTML='<div class="empty-state"><h3>No Titles In This Group</h3></div>'; return; }
-  rows.slice(0,conceptVisibleLimit).forEach(({movie,status})=>grid.appendChild(buildCard(movie,{hiddenView:status==='hidden',showEdit:status==='rated',poolView:status==='pool',matchedTags:new Set([selectedConcept]),contextLabel:status==='rated'?'Rated':status==='hidden'?'Hidden':'In Pool',contextConcept:selectedConcept})));
-  if (rows.length>conceptVisibleLimit) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreConceptTitles()">Show 40 more · ${rows.length-conceptVisibleLimit} remaining</button></div>`);
+  rows.slice(0,tagDetailVisibleLimit).forEach(({movie,status})=>grid.appendChild(buildCard(movie,{hiddenView:status==='hidden',showEdit:status==='rated',poolView:status==='pool',matchedTags:new Set([selectedTag]),contextLabel:status==='rated'?'Rated':status==='hidden'?'Hidden':'In Pool',contextTag:selectedTag})));
+  if (rows.length>tagDetailVisibleLimit) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreTagTitles()">Show 40 more · ${rows.length-tagDetailVisibleLimit} remaining</button></div>`);
 }
 // ─────────────────────────────────────────────
 // STATS
@@ -3007,12 +3131,13 @@ function dataTimestamp(data) {
 function ensureSyncMetadata({touchDataset=false}={}) {
   const stamp = nowStamp();
   Object.values(state.movies || {}).forEach(movie => {
-    if (movie?.suppressedConcepts?.length && !movie.suppressedTags) movie.suppressedTags = movie.suppressedConcepts;
     if (!movie._updatedAt) touchRecord(movie, stamp);
   });
   Object.values(state.hiddenTitles || {}).forEach(movie => {
-    if (movie?.suppressedConcepts?.length && !movie.suppressedTags) movie.suppressedTags = movie.suppressedConcepts;
     if (!movie._updatedAt) touchRecord(movie, movie.hiddenAt || stamp);
+  });
+  Object.values(state.deletedMovieRecords || {}).forEach(record => {
+    if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
   });
   Object.values(state.rejectedWikiTitles || {}).forEach(record => {
     if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
@@ -3028,6 +3153,7 @@ function exportCinelensData() {
     movies: state.movies,
     settings: state.settings,
     hiddenTitles: state.hiddenTitles,
+    deletedMovieRecords: state.deletedMovieRecords,
     tagStats: state.tagStats,
     rejectedWikiTitles: state.rejectedWikiTitles,
     rejectedRefresh: state.rejectedRefresh
@@ -3041,6 +3167,7 @@ function normaliseIncomingData(d={}) {
     movies: d.movies || {},
     settings: d.settings || {},
     hiddenTitles: d.hiddenTitles || {},
+    deletedMovieRecords: d.deletedMovieRecords || {},
     tagStats,
     rejectedWikiTitles: d.rejectedWikiTitles || {},
     rejectedRefresh: d.rejectedRefresh || {}
@@ -3075,10 +3202,17 @@ function mergeRemoteData(remoteRaw={}) {
 
   const hiddenMovieKeys = new Set(Object.keys(state.hiddenTitles || {}));
   const remoteHiddenKeys = new Set(Object.keys(remote.hiddenTitles || {}));
+  const tombstoneMerge = mergeRecordMap(state.deletedMovieRecords || {}, remote.deletedMovieRecords || {});
+  state.deletedMovieRecords = tombstoneMerge.merged;
   const localMovies = {...state.movies};
   const remoteMovies = {...remote.movies};
   hiddenMovieKeys.forEach(id => { delete remoteMovies[id]; });
   remoteHiddenKeys.forEach(id => { delete localMovies[id]; });
+  Object.entries(state.deletedMovieRecords || {}).forEach(([id, tombstone]) => {
+    const tombstoneTime = recordTimestamp(tombstone);
+    if (localMovies[id] && tombstoneTime >= recordTimestamp(localMovies[id])) { delete localMovies[id]; localChanged = true; }
+    if (remoteMovies[id] && tombstoneTime >= recordTimestamp(remoteMovies[id])) { delete remoteMovies[id]; remoteChanged = true; }
+  });
 
   const movieMerge = mergeRecordMap(localMovies, remoteMovies);
   const hiddenMerge = mergeRecordMap(state.hiddenTitles || {}, remote.hiddenTitles || {}, {preferHidden:true});
@@ -3086,8 +3220,8 @@ function mergeRemoteData(remoteRaw={}) {
   state.movies = movieMerge.merged;
   state.hiddenTitles = hiddenMerge.merged;
   state.rejectedWikiTitles = rejectedMerge.merged;
-  localChanged = movieMerge.localChanged || hiddenMerge.localChanged || rejectedMerge.localChanged;
-  remoteChanged = movieMerge.remoteChanged || hiddenMerge.remoteChanged || rejectedMerge.remoteChanged;
+  localChanged = localChanged || tombstoneMerge.localChanged || movieMerge.localChanged || hiddenMerge.localChanged || rejectedMerge.localChanged;
+  remoteChanged = remoteChanged || tombstoneMerge.remoteChanged || movieMerge.remoteChanged || hiddenMerge.remoteChanged || rejectedMerge.remoteChanged;
 
   if (remoteStamp > localStamp) {
     state.settings = {...state.settings, ...remote.settings};
@@ -3132,6 +3266,7 @@ function loadLocalState() {
       if (s.movies) state.movies=s.movies;
       if (s.settings) state.settings={...state.settings,...s.settings};
       if (s.hiddenTitles) state.hiddenTitles=s.hiddenTitles;
+      if (s.deletedMovieRecords) state.deletedMovieRecords=s.deletedMovieRecords;
       if (s.tagStats) state.tagStats=s.tagStats;
       else if (s.canonicalTagStats) state.tagStats={candidates:s.canonicalTagStats.raw||0,tags:s.canonicalTagStats.canonical||0,rebuiltAt:s.canonicalTagStats.rebuiltAt||''};
       delete state.canonicalTagStats;
@@ -3181,6 +3316,8 @@ const DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
 let driveTokenClient=null;
 let driveRestoreInProgress=false;
 let gisScriptLoading=false;
+let driveSyncInProgress=false;
+let driveSyncQueued=false;
 const DRIVE_TOKEN_KEY='cinelens_drive_token_v1';
 const DRIVE_TOKEN_EXPIRY_KEY='cinelens_drive_token_expiry_v1';
 
@@ -3194,7 +3331,27 @@ function rememberDriveToken(token, expiresInSeconds=3300) {
     localStorage.setItem(DRIVE_TOKEN_KEY, token);
     localStorage.setItem(DRIVE_TOKEN_EXPIRY_KEY, String(expiry));
   } catch(e) {}
+  scheduleDriveTokenRefresh(expiry);
 }
+
+function scheduleDriveTokenRefresh(expiry=0) {
+  clearTimeout(driveTokenRefreshTimer);
+  if (!expiry) return;
+  const delay = Math.max(60000, Number(expiry) - Date.now() - DRIVE_TOKEN_REFRESH_LEEWAY_MS);
+  driveTokenRefreshTimer = setTimeout(async () => {
+    if (!state.drive.enabled && !state.drive.connected) return;
+    try {
+      state.drive.accessToken = '';
+      await requestDriveTokenSilent();
+      state.drive.connected = true;
+      setDriveStatus('connected');
+    } catch(e) {
+      state.drive.connected = false;
+      setDriveStatus('');
+    }
+  }, delay);
+}
+
 function getStoredDriveToken() {
   try {
     const sessionToken=sessionStorage.getItem('cinelens_drive_token')||'';
@@ -3205,6 +3362,7 @@ function getStoredDriveToken() {
     if (localToken && localExpiry>Date.now()+30000) {
       sessionStorage.setItem('cinelens_drive_token', localToken);
       sessionStorage.setItem('cinelens_drive_token_expiry', String(localExpiry));
+      scheduleDriveTokenRefresh(localExpiry);
       return localToken;
     }
   } catch(e) {}
@@ -3278,7 +3436,11 @@ async function connectDrive() {
   setDriveStatus('syncing');
   try {
     if (!googleIdentityReady()) await waitForGoogleIdentity();
-    await requestDriveTokenInteractive();
+    try {
+      await requestDriveTokenSilent();
+    } catch(e) {
+      await requestDriveTokenInteractive();
+    }
     state.drive.enabled=true;
     const fileId=state.drive.fileId||await findDriveFile();
     if (fileId) { state.drive.fileId=fileId; await loadFromDrive(); }
@@ -3361,7 +3523,11 @@ async function requestDriveTokenInteractive() {
   const stored=getStoredDriveToken();
   if (stored) { state.drive.accessToken=stored; return stored; }
   await waitForGoogleIdentity();
-  return tokenRequest('consent');
+  try {
+    return await tokenRequest('');
+  } catch(e) {
+    return tokenRequest('select_account');
+  }
 }
 async function requestDriveTokenSilent() {
   if (state.drive.accessToken) return state.drive.accessToken;
@@ -3370,7 +3536,7 @@ async function requestDriveTokenSilent() {
   await waitForGoogleIdentity();
   return tokenRequest('');
 }
-async function requestDriveToken(prompt='consent') {
+async function requestDriveToken(prompt='select_account') {
   return prompt === '' ? requestDriveTokenSilent() : requestDriveTokenInteractive();
 }
 function clearDriveToken() {
@@ -3443,11 +3609,26 @@ async function createDriveFile() {
   } catch(e){showToast('Drive file create failed','error');}
 }
 async function syncDrive(manual=false) {
-  if(!state.drive.connected&&!state.drive.accessToken){
-    if(state.drive.enabled) await restoreDriveSession(manual);
-    if(!state.drive.connected&&!state.drive.accessToken){ if(manual) await connectDrive(); return; }
+  if (driveSyncInProgress) {
+    driveSyncQueued = true;
+    return;
   }
-  if(!state.drive.fileId){await createDriveFile(); if(!state.drive.fileId)return;}
+  const finishSync = () => {
+    driveSyncInProgress = false;
+    if (driveSyncQueued) {
+      driveSyncQueued = false;
+      syncDrive(manual);
+    }
+  };
+  driveSyncInProgress = true;
+  if(!state.drive.connected&&!state.drive.accessToken){
+    if(state.drive.enabled) {
+      try { await restoreDriveSession(manual); }
+      catch(e) { state.drive.connected=false; state.drive.accessToken=''; }
+    }
+    if(!state.drive.connected&&!state.drive.accessToken){ if(manual) await connectDrive(); finishSync(); return; }
+  }
+  if(!state.drive.fileId){await createDriveFile(); if(!state.drive.fileId){finishSync(); return;}}
   setDriveStatus('syncing');
   try {
     const remoteResp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media`);
@@ -3457,8 +3638,12 @@ async function syncDrive(manual=false) {
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
     saveLocalState({preserveUpdatedAt:true});
+    render();
     setDriveStatus('connected'); showToast('Synced to Drive','success');
   } catch(e){state.drive.connected=false; setDriveStatus(''); showToast(driveErrorMessage(e)||'Drive sync failed','error');}
+  finally {
+    finishSync();
+  }
 }
 
 // ─────────────────────────────────────────────

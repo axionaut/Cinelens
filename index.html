@@ -199,23 +199,23 @@
     <button class="tb-filter-btn taste-filter-btn" onclick="setTagFilter('positive',this)">You Like</button>
     <button class="tb-filter-btn taste-filter-btn" onclick="setTagFilter('negative',this)">You Dislike</button>
     <button class="tb-filter-btn taste-filter-btn" onclick="setTagFilter('neutral',this)">Unweighted</button>
-    <input class="concept-search" id="conceptSearch" type="search" placeholder="find a tag" oninput="renderTagBrain()">
+    <input class="tag-search" id="tagSearch" type="search" placeholder="find a tag" oninput="renderTagBrain()">
   </div>
   <div class="tag-brain-grid tag-only" id="tagBrainGrid">
     <span style="font-size:12px;color:var(--muted)">No useful tags yet.</span>
   </div>
-  <div class="concept-detail tag-only" id="conceptDetail" hidden>
-    <div class="concept-detail-head">
-      <div><div class="concept-detail-name" id="conceptDetailName"></div><div class="concept-detail-stat" id="conceptDetailStat"></div></div>
-      <button class="card-act" onclick="clearSelectedConcept()">close</button>
+  <div class="tag-detail tag-only" id="tagDetail" hidden>
+    <div class="tag-detail-head">
+      <div><div class="tag-detail-name" id="tagDetailName"></div><div class="tag-detail-stat" id="tagDetailStat"></div></div>
+      <button class="card-act" onclick="clearSelectedTag()">close</button>
     </div>
     <div class="tag-brain-controls">
-      <button class="tb-filter-btn concept-view-btn active" onclick="setConceptView('all',this)">All titles</button>
-      <button class="tb-filter-btn concept-view-btn" onclick="setConceptView('rated',this)">Rated</button>
-      <button class="tb-filter-btn concept-view-btn" onclick="setConceptView('pool',this)">In Pool</button>
-      <button class="tb-filter-btn concept-view-btn" onclick="setConceptView('hidden',this)">Hidden</button>
+      <button class="tb-filter-btn tag-detail-view-btn active" onclick="setTagDetailView('all',this)">All titles</button>
+      <button class="tb-filter-btn tag-detail-view-btn" onclick="setTagDetailView('rated',this)">Rated</button>
+      <button class="tb-filter-btn tag-detail-view-btn" onclick="setTagDetailView('pool',this)">In Pool</button>
+      <button class="tb-filter-btn tag-detail-view-btn" onclick="setTagDetailView('hidden',this)">Hidden</button>
     </div>
-    <div class="movies-grid" id="conceptMoviesGrid"></div>
+    <div class="movies-grid" id="tagMoviesGrid"></div>
   </div>
 
 </div>
