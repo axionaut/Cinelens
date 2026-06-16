@@ -846,6 +846,86 @@ function normaliseTitleKey(title) {
   return (title||'').replace(/^Category:/,'').replace(/\s+\(.*?\)$/,'').trim().toLowerCase();
 }
 
+function movieIdentityKeys(movie) {
+  if (!movie) return [];
+  const keys = new Set();
+  const pageId = wikiPageIdFromMovie(movie);
+  if (pageId) keys.add(`page:${pageId}`);
+  const format = movie.format || 'movie';
+  const year = movie.year || '';
+  [movie.title, movie.wikiTitle, movie.pageTitle].forEach(title => {
+    const key = normaliseTitleKey(title);
+    if (key) keys.add(`title:${key}|${year}|${format}`);
+  });
+  return [...keys];
+}
+
+function sameMovieIdentity(a, b) {
+  const bKeys = new Set(movieIdentityKeys(b));
+  return movieIdentityKeys(a).some(key => bKeys.has(key));
+}
+
+function findExistingMovieByIdentity(movie, collection=state.movies) {
+  return Object.values(collection || {}).find(existing => sameMovieIdentity(existing, movie));
+}
+
+function mergeUserState(target, source) {
+  if (!target || !source) return target;
+  if (!Number(target.rating || 0) && Number(source.rating || 0)) target.rating = Number(source.rating || 0);
+  if (source.watchlist) target.watchlist = true;
+  if (source.skipped) target.skipped = true;
+  if (!target.userNotes && source.userNotes) target.userNotes = source.userNotes;
+  target.suppressedTags = [...new Set([...(target.suppressedTags || []), ...(source.suppressedTags || [])])];
+  target.suppressedRawTags = [...new Set([...(target.suppressedRawTags || []), ...(source.suppressedRawTags || [])])];
+  return target;
+}
+
+function upsertMoviePreservingUserState(fresh, existing=null) {
+  const previous = existing || state.movies?.[fresh?.id] || findExistingMovieByIdentity(fresh);
+  const next = previous ? mergeUserState({ ...fresh }, previous) : fresh;
+  if (!next) return null;
+  touchRecord(next);
+  if (previous?.id && previous.id !== next.id) {
+    delete state.movies[previous.id];
+    state.deletedMovieRecords = state.deletedMovieRecords || {};
+    state.deletedMovieRecords[previous.id] = { id:previous.id, replacementId:next.id, at:next._updatedAt, updatedAt:next._updatedAt };
+  }
+  state.movies[next.id] = next;
+  return next;
+}
+
+function collapseDuplicateMovies(collection=state.movies) {
+  const map = collection || {};
+  const byIdentity = new Map();
+  let changed = false;
+  const keepScore = movie => (movie.tagged ? 100 : 0)
+    + (!movie.needsManualUrl ? 50 : 0)
+    + (movie.storyText ? 25 : 0)
+    + (movie.wikiPageId || String(movie.id || '').startsWith('wiki_') ? 10 : 0)
+    + (Number(movie.rating || 0) > 0 ? 5 : 0);
+  Object.entries(map).forEach(([id, movie]) => {
+    const keys = movieIdentityKeys(movie);
+    const existingId = keys.map(key => byIdentity.get(key)).find(Boolean);
+    if (!existingId || existingId === id) {
+      keys.forEach(key => byIdentity.set(key, id));
+      return;
+    }
+    const existing = map[existingId];
+    if (!existing) return;
+    const keepId = keepScore(movie) > keepScore(existing) ? id : existingId;
+    const dropId = keepId === id ? existingId : id;
+    const keep = map[keepId];
+    const drop = map[dropId];
+    mergeUserState(keep, drop);
+    if (recordTimestamp(drop) > recordTimestamp(keep)) touchRecord(keep, recordTimestamp(drop) ? drop._updatedAt || drop.updatedAt : undefined);
+    delete map[dropId];
+    keys.forEach(key => byIdentity.set(key, keepId));
+    movieIdentityKeys(keep).forEach(key => byIdentity.set(key, keepId));
+    changed = true;
+  });
+  return changed;
+}
+
 function obviousNonMovieTitle(title) {
   return /^(list of|category:|template:|wikipedia:|portal:)/i.test(title)
     || /\b(film series|media franchise|franchise|universe|timeline|soundtrack|discography|filmography|list)\b/i.test(title);
@@ -1073,9 +1153,10 @@ async function refreshRejectedLane(force=false) {
       } else if (movie && state.movies[movie.id]) {
         delete state.rejectedWikiTitles[item.key];
       } else if (movie && (movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, mode)) {
-        state.movies[movie.id] = movie;
+        const existingMovie = findExistingMovieByIdentity(movie);
+        upsertMoviePreservingUserState(movie, existingMovie);
         delete state.rejectedWikiTitles[item.key];
-        recovered++;
+        if (!existingMovie) recovered++;
       } else {
         recordRejectedTitle(item.title, mode, diagnostics.reason || 'still not a usable Hindi/English movie or show', item.source || 'rejected-refresh', { retry:true });
       }
@@ -1384,12 +1465,18 @@ async function expandPool(manual=true) {
         const movie = await fetchWikiMovie(title, fetchMode);
         if (movie && isMovieHidden(movie)) {
           // Keep explicitly hidden titles out of both the pool and rejected list.
-        } else if (movie && !state.movies[movie.id]) {
+        } else if (movie) {
           if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
-            touchRecord(movie);
-            state.movies[movie.id] = movie;
-            added++;
-            const rejectedRefreshDue = notePoolAddition();
+            const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
+            let addedFreshMovie = false;
+            if (existingMovie) {
+              upsertMoviePreservingUserState(movie, existingMovie);
+            } else {
+              upsertMoviePreservingUserState(movie);
+              added++;
+              addedFreshMovie = true;
+            }
+            const rejectedRefreshDue = addedFreshMovie && notePoolAddition();
             if (added % CARD_REFRESH_BATCH_SIZE === 0) {
               rebuildTagBrain();
               computeTagWeights();
@@ -1469,7 +1556,7 @@ async function addManualTitle() {
   if (!wikiTitle) { showToast('Use a valid Wikipedia page URL','error'); return; }
 
   const mode = expansionMode();
-  const existing = Object.values(state.movies).find(m => sameCanonicalTitle(m.title, wikiTitle) || sameCanonicalTitle(m.wikiTitle, wikiTitle) || sameCanonicalTitle(m.pageTitle, wikiTitle));
+  let existing = Object.values(state.movies).find(m => sameCanonicalTitle(m.title, wikiTitle) || sameCanonicalTitle(m.wikiTitle, wikiTitle) || sameCanonicalTitle(m.pageTitle, wikiTitle));
   if (hiddenTitleMatches(wikiTitle)) { showToast(`"${wikiTitle}" is hidden. Restore it from the Hidden tab.`, ''); return; }
 
   if (btn) { btn.disabled = true; btn.textContent = 'fetching...'; }
@@ -1502,19 +1589,18 @@ async function addManualTitle() {
     return;
   }
   if (isMovieHidden(movie)) { showToast(`"${movie.title}" is hidden. Restore it from the Hidden tab.`, ''); return; }
+  existing = existing || state.movies[movie.id] || findExistingMovieByIdentity(movie);
   if (existing) {
-    const keep = { rating: Number(existing.rating || 0), watchlist: !!existing.watchlist, skipped: !!existing.skipped, userNotes: existing.userNotes || '' };
-    delete state.movies[existing.id];
-    state.movies[movie.id] = { ...movie, ...keep, retagStatus:'verified', retagMessage:'manual URL verified' };
+    const repaired = upsertMoviePreservingUserState({ ...movie, retagStatus:'verified', retagMessage:'manual URL verified' }, existing);
     runHousekeeping(false);
     if (input) input.value = '';
     saveLocalState(); syncDrive(); render();
-    showToast(`Repaired "${movie.title}" from Wikipedia URL`, 'success');
+    showToast(`Repaired "${repaired?.title || movie.title}" from Wikipedia URL`, 'success');
     return;
   }
   if (state.movies[movie.id]) { showToast(`Already in pool: "${state.movies[movie.id].title}"`, ''); return; }
 
-  state.movies[movie.id] = movie;
+  upsertMoviePreservingUserState(movie);
   runHousekeeping(false);
   if (input) input.value = '';
   saveLocalState(); syncDrive(); render();
@@ -2737,6 +2823,7 @@ function rateMovie(id, rating) {
     rebuildTagBrain();
   }
   touchRecord(movie);
+  collapseDuplicateMovies(state.movies);
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
   showToast(`"${movie.title}" → ${rating}/5`, 'success');
@@ -3000,8 +3087,9 @@ function runHousekeeping(manual=true, deferCanonical=false) {
     }
     m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length || (m.descriptorTags && m.descriptorTags.length));
   });
+  const collapsed = collapseDuplicateMovies(state.movies);
   if (!deferCanonical) {
-    rebuildTagBrain();
+    if (collapsed) rebuildTagBrain();
     computeTagWeights();
   }
   if (manual) {
@@ -3335,9 +3423,11 @@ function mergeRemoteData(remoteRaw={}) {
   const rejectedMerge = mergeRecordMap(state.rejectedWikiTitles || {}, remote.rejectedWikiTitles || {});
   state.movies = movieMerge.merged;
   state.hiddenTitles = hiddenMerge.merged;
+  const collapsedMovies = collapseDuplicateMovies(state.movies);
+  const collapsedHidden = collapseDuplicateMovies(state.hiddenTitles);
   state.rejectedWikiTitles = rejectedMerge.merged;
   localChanged = localChanged || tombstoneMerge.localChanged || movieMerge.localChanged || hiddenMerge.localChanged || rejectedMerge.localChanged;
-  remoteChanged = remoteChanged || tombstoneMerge.remoteChanged || movieMerge.remoteChanged || hiddenMerge.remoteChanged || rejectedMerge.remoteChanged;
+  remoteChanged = remoteChanged || tombstoneMerge.remoteChanged || movieMerge.remoteChanged || hiddenMerge.remoteChanged || rejectedMerge.remoteChanged || collapsedMovies || collapsedHidden;
 
   if (remoteSettingsStamp > localSettingsStamp) {
     state.settings = {...state.settings, ...remote.settings};
@@ -3430,6 +3520,7 @@ function loadLocalState() {
     m.plotTags = cleanTagArray(m.plotTags || [], m, false);
     m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length);
   });
+  if (collapseDuplicateMovies(state.movies)) saveLocalState();
 }
 
 // ─────────────────────────────────────────────
@@ -3600,7 +3691,6 @@ async function restoreDriveSession(showFailure=false) {
   } catch(e) {
     state.drive.connected=false;
     state.drive.accessToken='';
-    clearStoredDriveToken();
     setDriveStatus('');
     if (showFailure) showToast(driveErrorMessage(e),'error');
   } finally {
@@ -3608,7 +3698,10 @@ async function restoreDriveSession(showFailure=false) {
   }
 }
 
-function setDriveStatus(s) { document.getElementById('driveDot').className='drive-dot '+s; document.getElementById('driveLabel').textContent=s==='connected'?'drive connected':s==='syncing'?'syncing...':'not connected'; }
+function setDriveStatus(s) {
+  document.getElementById('driveDot').className='drive-dot '+s;
+  document.getElementById('driveLabel').textContent=s==='connected'?'drive connected':s==='syncing'?'syncing...':state.drive.enabled?'drive ready':'not connected';
+}
 function driveErrorMessage(e) {
   const code = e?.error || e?.message || 'unknown';
   if (String(code).includes('Google sign-in script not loaded')) return 'Google sign-in loading. Tap Drive again.';
