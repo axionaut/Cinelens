@@ -208,6 +208,7 @@ let autoFetchPaused = false;
 let autoExpandTimer = null;
 let startupDriveRestoreDone = false;
 let driveTokenRefreshTimer = null;
+let settingsSyncTimer = null;
 let state = {
   movies: {},
   tagWeights: {},
@@ -749,7 +750,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   migrateLegacyPoolItems();
   cleanContaminatedTags(true);
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
-  render();
+  const shouldRestoreDriveBeforeRender = state.drive.enabled && (state.drive.fileId || state.drive.accessToken);
+  if (shouldRestoreDriveBeforeRender) setDriveStatus('syncing');
+  else render();
   try {
     await restoreDriveSession();
   } finally {
@@ -2063,20 +2066,20 @@ function updateControlDeck() {
 
 function updateLanguageFilter(language) {
   state.settings.languageFilter = language || 'all';
-  saveLocalState();
+  saveSettingsState();
   renderActiveCards();
 }
 
 function updateGenreFilter(genre) {
   state.settings.genreFilter = genre || 'all';
-  saveLocalState();
+  saveSettingsState();
   renderActiveCards();
 }
 
 function updateSortMode(mode) {
   state.settings.sortMode = mode || 'recommended';
   if (state.settings.sortMode === 'random' && !state.settings.shuffleSeed) state.settings.shuffleSeed = Date.now();
-  saveLocalState();
+  saveSettingsState();
   renderActiveCards();
   updateControlDeck();
 }
@@ -2084,20 +2087,20 @@ function updateSortMode(mode) {
 function shuffleAgain() {
   state.settings.sortMode = 'random';
   state.settings.shuffleSeed = Date.now();
-  saveLocalState();
+  saveSettingsState();
   renderActiveCards();
   updateControlDeck();
 }
 
 function updateTitleSearch(value) {
   state.settings.titleSearch = String(value || '').trim();
-  saveLocalState();
+  saveSettingsState();
   renderActiveCards();
 }
 
 function toggleControlDeck() {
   state.settings.controlDeckCollapsed = !state.settings.controlDeckCollapsed;
-  saveLocalState();
+  saveSettingsState();
   updateControlDeck();
 }
 
@@ -3101,7 +3104,7 @@ function openTagFromCard(tag) {
 
 function toggleTagDeleteMode() {
   state.settings.tagDeleteMode=!state.settings.tagDeleteMode;
-  saveLocalState();
+  saveSettingsState();
   renderActiveCards();
   updateControlDeck();
 }
@@ -3161,13 +3164,13 @@ function updateStats() {
   document.getElementById('statAvg').textContent=avg;
   updateHKStatus(tagStatusText());
 }
-function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveLocalState(); renderRecs(); }
+function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveSettingsState(); renderRecs(); }
 function updateMinYear(val) {
   const year = Math.max(1900, Math.min(new Date().getFullYear(), parseInt(val, 10) || 1970));
   state.settings.minYear = year;
   const input = document.getElementById('minYear');
   if (input) input.value = year;
-  saveLocalState();
+  saveSettingsState();
   renderActiveCards();
 }
 
@@ -3214,6 +3217,29 @@ function dataTimestamp(data) {
   return Date.parse(data?.meta?.updatedAt || data?.updatedAt || '') || 0;
 }
 
+function settingsTimestamp(data) {
+  return Date.parse(data?.settings?.updatedAt || data?.meta?.settingsUpdatedAt || '') || 0;
+}
+
+function touchSettings(stamp=nowStamp()) {
+  if (!state.settings) state.settings = {};
+  state.settings.updatedAt = stamp;
+  if (!state.meta) state.meta = {};
+  state.meta.settingsUpdatedAt = stamp;
+}
+
+function queueSettingsSync() {
+  if (!state.drive?.enabled && !state.drive?.connected && !state.drive?.accessToken) return;
+  clearTimeout(settingsSyncTimer);
+  settingsSyncTimer = setTimeout(() => syncDrive(false), 900);
+}
+
+function saveSettingsState() {
+  touchSettings();
+  saveLocalState();
+  queueSettingsSync();
+}
+
 function ensureSyncMetadata({touchDataset=false}={}) {
   const stamp = nowStamp();
   Object.values(state.movies || {}).forEach(movie => {
@@ -3230,6 +3256,8 @@ function ensureSyncMetadata({touchDataset=false}={}) {
   });
   if (!state.meta) state.meta = {};
   if (touchDataset || !state.meta.updatedAt) state.meta.updatedAt = stamp;
+  if (!state.settings) state.settings = {};
+  if (state.settings.updatedAt) state.meta.settingsUpdatedAt = state.settings.updatedAt;
 }
 
 function exportCinelensData() {
@@ -3283,6 +3311,8 @@ function mergeRemoteData(remoteRaw={}) {
   const remote = normaliseIncomingData(remoteRaw);
   const remoteStamp = dataTimestamp(remote);
   const localStamp = dataTimestamp(state);
+  const remoteSettingsStamp = settingsTimestamp(remote);
+  const localSettingsStamp = settingsTimestamp(state);
   let localChanged = false;
   let remoteChanged = false;
 
@@ -3309,8 +3339,18 @@ function mergeRemoteData(remoteRaw={}) {
   localChanged = localChanged || tombstoneMerge.localChanged || movieMerge.localChanged || hiddenMerge.localChanged || rejectedMerge.localChanged;
   remoteChanged = remoteChanged || tombstoneMerge.remoteChanged || movieMerge.remoteChanged || hiddenMerge.remoteChanged || rejectedMerge.remoteChanged;
 
-  if (remoteStamp > localStamp) {
+  if (remoteSettingsStamp > localSettingsStamp) {
     state.settings = {...state.settings, ...remote.settings};
+    if (!state.meta) state.meta = {};
+    state.meta.settingsUpdatedAt = state.settings.updatedAt || remote.meta?.settingsUpdatedAt || remote.meta?.updatedAt || '';
+    localChanged = true;
+  } else if (localSettingsStamp > remoteSettingsStamp) {
+    remoteChanged = true;
+  } else {
+    state.settings = {...state.settings, ...remote.settings, updatedAt:state.settings.updatedAt || remote.settings?.updatedAt};
+  }
+
+  if (remoteStamp > localStamp) {
     state.tagStats = remote.tagStats || state.tagStats;
     state.rejectedRefresh = {...state.rejectedRefresh, ...remote.rejectedRefresh};
     state.meta = {...state.meta, ...remote.meta};
@@ -3318,7 +3358,6 @@ function mergeRemoteData(remoteRaw={}) {
   } else if (localStamp > remoteStamp) {
     remoteChanged = true;
   } else {
-    state.settings = {...state.settings, ...remote.settings};
     state.rejectedRefresh = {...state.rejectedRefresh, ...remote.rejectedRefresh};
   }
 
