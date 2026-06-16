@@ -862,6 +862,41 @@ function categoryMarksOverviewPage(category) {
     || /^category:.*(?:media franchise|fictional universe) articles\b/.test(cat);
 }
 
+function isPersonOrOrganizationPage(pageTitle, leadText, cats=[]) {
+  const title = String(pageTitle || '');
+  const lead = String(leadText || '').slice(0, 900);
+  const catText = (cats || []).join(' ');
+  const personLead = /^\s*.+\s+is an? .{0,90}\b(actor|actress|director|producer|screenwriter|writer|filmmaker|composer|singer|politician|business(?:man|woman)|executive)\b/i.test(lead);
+  const organizationLead = /^\s*.+\s+is an? .{0,90}\b(company|studio|organization|organisation|network|channel|label|agency)\b/i.test(lead);
+  if (personLead || organizationLead) return true;
+  if (/\bcategory:(?:\d{4} births|\d{4} deaths|living people|people from|.* alumni)\b/i.test(catText)) return true;
+  if (/\bcategory:.*(?:film directors|screenwriters|film producers|television producers|chief executives|founders)\b/i.test(catText) && !/\((?:film|tv series|television series|miniseries|web series)\)$/i.test(title)) return true;
+  if (/\bcategory:.*(?:companies established|film production companies|television production companies|entertainment companies|organizations established|organisations established|television networks|television channels|record labels|talent agencies)\b/i.test(catText) && !/\btelevision series\b/i.test(catText)) return true;
+  if (!/\((?:film|tv series|television series|miniseries|web series)\)$/i.test(title) && /\b(biography|filmography)\b/i.test(catText)) return true;
+  return false;
+}
+
+function hasAllowedLanguageEvidence(cats, leadText) {
+  const catText = (cats || []).join(' ');
+  return {
+    english: /\bcategory:\d{4} english-language films\b|\bcategory:english-language (?:films|television shows|web series|netflix original programming|amazon prime video original programming)\b/i.test(catText)
+      || /\benglish-language (?:film|television series|tv series|web series|miniseries)\b/i.test(leadText)
+      || /\b(?:american|british) (?:film|television|tv|web|streaming television)\b/i.test(leadText),
+    hindi: /\bcategory:\d{4} hindi-language films\b|\bcategory:hindi-language (?:films|television shows|web series)\b/i.test(catText)
+      || /\bhindi-language (?:film|television series|tv series|web series|miniseries)\b/i.test(leadText)
+      || /\bhindi (?:film|television series|tv series|web series|miniseries)\b/i.test(leadText)
+  };
+}
+
+function pageMediaEvidence(leadText, cats=[]) {
+  const catText = (cats || []).join(' ');
+  const show = /\bcategory:.*(?:television series|tv series|web series|miniseries|netflix original programming|amazon prime video original programming)\b/i.test(catText)
+    || /\b(?:is an?|was an?) .{0,140}\b(?:television series|tv series|web series|miniseries|streaming television series)\b/i.test(leadText);
+  const film = /\bcategory:\d{4} .*films\b|\bcategory:.*(?:action|adventure|animated|comedy|crime|drama|fantasy|horror|musical|mystery|romance|science fiction|sports|thriller|war|western|superhero).* films\b/i.test(catText)
+    || /\b(?:is an?|was an?) .{0,140}\bfilm\b/i.test(leadText);
+  return {film, show};
+}
+
 function isMetaTag(tag) {
   return /^(english-language|hindi-language|usa|uk|india|south-korea|brazil|poland|germany|japan|film|series|miniseries|prestige-tv|\d{4}s)$/.test(tag);
 }
@@ -1547,16 +1582,16 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   if (isFranchiseOverviewPage(pageTitle, extract, cats)) return rejectWikiParse(diagnostics, 'franchise or overview page, not one title');
   const catText = cats.join(' ');
   const leadText = extract.slice(0, 1400);
+  if (isPersonOrOrganizationPage(pageTitle, leadText, cats)) return rejectWikiParse(diagnostics, 'person or organization page, not a movie/show');
+  const mediaEvidence = pageMediaEvidence(leadText, cats);
+  if (!mediaEvidence.film && !mediaEvidence.show) return rejectWikiParse(diagnostics, 'no film/show evidence');
   const storyText = extractNarrativeSection(extract);
   if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return rejectWikiParse(diagnostics, 'no usable narrative section');
 
   let language = '';
-  const englishEvidence = cats.some(c => c.includes('english-language'))
-    || /\benglish-language\b/i.test(leadText)
-    || /\b(american|british) (film|television|tv|web|streaming television)\b/i.test(leadText);
-  const hindiEvidence = cats.some(c => c.includes('hindi-language'))
-    || /\bhindi-language\b/i.test(leadText)
-    || /\bhindi (film|television|tv|web|streaming television)\b/i.test(leadText);
+  const languageEvidence = hasAllowedLanguageEvidence(cats, leadText);
+  const englishEvidence = languageEvidence.english;
+  const hindiEvidence = languageEvidence.hindi;
   if (hindiEvidence) language = 'Hindi';
   else if (englishEvidence) language = 'English';
 
@@ -1564,6 +1599,8 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   if (cats.some(c => c.includes('television series') || c.includes('tv series') || c.includes('web series'))) format = 'series';
   if (cats.some(c => c.includes('miniseries'))) format = 'miniseries';
   if (!format && /\b(television series|tv series|web series|miniseries|streaming television series)\b/i.test(leadText)) format = 'series';
+  if (!format && mediaEvidence.show && !mediaEvidence.film) format = 'series';
+  if (!format && !mediaEvidence.film) return rejectWikiParse(diagnostics, 'not a movie page');
   if (mode === 'movies' && format) return rejectWikiParse(diagnostics, 'title is a show, not a movie');
   if (mode === 'shows' && !format) return rejectWikiParse(diagnostics, 'title is a movie, not a show');
 
@@ -2425,6 +2462,7 @@ function buildCard(movie, opts={}) {
       <div class="card-actions">
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
         ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
+        ${!hiddenView?`<button class="card-act wrong" onclick="markWrongPick('${safeId}',event)">wrong pick</button>`:''}
         <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
       </div>
       ${contextLabel ? `<div class="tag-status">${contextLabel}</div>` : ''}
@@ -2711,14 +2749,32 @@ function deleteMovie(id, e) {
   saveLocalState(); syncDrive(); render();
   showToast(`Hidden "${m.title}"`, '');
 }
+
+function markWrongPick(id, e) {
+  if (e) e.stopPropagation();
+  const m = state.movies[id];
+  if (!m || !confirm(`Mark "${m.title}" as a wrong pick? It will be hidden and skipped in future fetches.`)) return;
+  const stamp = nowStamp();
+  state.hiddenTitles[id] = touchRecord({ ...m, hiddenAt: stamp, wrongPick: true, retagStatus:'wrong-pick', retagMessage:'marked wrong pick' }, stamp);
+  state.deletedMovieRecords = state.deletedMovieRecords || {};
+  state.deletedMovieRecords[id] = { id, reason:'wrong-pick', at:stamp, updatedAt:stamp };
+  recordRejectedTitle(m.wikiTitle || m.pageTitle || m.title, m.format ? 'shows' : 'movies', 'wrong pick marked by user', 'wrong-pick');
+  delete state.movies[id];
+  rebuildTagBrain();
+  computeTagWeights();
+  saveLocalState(); syncDrive(); render();
+  showToast(`Marked wrong pick: "${m.title}"`, 'success');
+}
+
 function restoreHiddenMovie(id, e) {
   if (e) e.stopPropagation();
   const movie = state.hiddenTitles?.[id];
   if (!movie) return;
-  const { hiddenAt, ...restored } = movie;
+  const { hiddenAt, wrongPick, retagStatus, retagMessage, ...restored } = movie;
   touchRecord(restored);
   state.movies[id] = restored;
   delete state.hiddenTitles[id];
+  if (state.deletedMovieRecords) delete state.deletedMovieRecords[id];
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
   showToast(`Restored "${movie.title}"`, 'success');
@@ -3093,6 +3149,7 @@ async function resetAllData() {
       state.tagWeights = {};
       state.genreWeights = {};
   state.hiddenTitles = {};
+  state.deletedMovieRecords = {};
   state.tagStats = { candidates:0, tags:0, rebuiltAt:'' };
   delete state.canonicalTagStats;
   state.rejectedWikiTitles = {};

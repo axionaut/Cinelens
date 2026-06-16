@@ -24,6 +24,26 @@ the end of the body. The files must remain deployable together as a static site.
 Repository text files use LF line endings through `.gitattributes` so edits do
 not produce misleading whole-file diffs on Windows.
 
+### 2.0 Delivery Workflow
+
+Every implementation pass must keep this specification current. When code,
+style or data-shape behavior changes, update `spec.md` in the same change set
+before delivery.
+
+The required delivery sequence is:
+
+1. Inspect the current worktree and protect unrelated user changes.
+2. Implement the requested app change.
+3. Update `spec.md` with the new behavior or process rule.
+4. Run targeted verification for the changed code path plus repository hygiene
+   checks such as syntax checks and `git diff --check`.
+5. Commit the app and spec changes together.
+6. Push the commit to the remote branch.
+
+Assistant status and final responses for code-change work should start by
+confirming `spec.md` has been considered and should end by stating whether
+`spec.md` was updated in the delivered commit.
+
 ### 2.1 Unified Tag Model
 
 CineLens has one user-facing taste signal: tags.
@@ -171,6 +191,17 @@ The app must reject or skip:
 - Pages with no real plot/synopsis/premise/story section
 - Pages with only intro/lead text and no usable story section
 - Pages outside Hindi/English scope
+
+Wikipedia page acceptance must require positive film/show evidence and positive
+Hindi or English language evidence. It must not infer a valid title merely from
+a nearby movie-like category when the page lead identifies a person,
+organization, company, network, studio, agency or other non-title entity.
+
+Cards must provide a `wrong pick` action for cases where a bad title still gets
+through. Marking a title as a wrong pick hides it, stores it in Hidden for
+audit/restore, records it as rejected so collection avoids it later, saves
+locally and syncs Drive when connected. Restoring a wrong pick removes the
+wrong-pick tombstone so sync does not hide the restored title again.
 
 ### 3.2 Recommendation Goal
 

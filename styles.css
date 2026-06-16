@@ -99,6 +99,7 @@
   .card-act{padding:3px 7px;border-radius:3px;font-size:9px;font-family:'DM Mono',monospace;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--muted);transition:all .15s}
   .card-act:hover{color:var(--text);border-color:var(--muted2)}
   .card-act.del:hover{color:var(--danger);border-color:var(--danger)}
+  .card-act.wrong:hover{color:#ffb45c;border-color:#ff9f3a}
   .card-act.retag:hover{color:var(--accent);border-color:var(--accent2)}
   .card-act.watch:hover{color:var(--accent);border-color:var(--accent2)}
 
