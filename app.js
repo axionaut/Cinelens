@@ -2616,17 +2616,21 @@ function removeTagFromMovie(id, tag, event) {
   if (event) event.stopPropagation();
   const movie = state.movies[id] || state.hiddenTitles?.[id];
   if (!movie) return;
+  suppressTagOnMovie(movie, tag);
+  computeTagWeights();
+  saveLocalState();
+  syncDrive();
+  render();
+  showToast(`Removed tag from "${movie.title}": ${tag}`, 'success');
+}
+
+function suppressTagOnMovie(movie, tag) {
   movie.suppressedTags = [...new Set([...(movie.suppressedTags || []), normaliseTagName(tag)])];
   ['tags','coreTags','plotTags','descriptorTags'].forEach(key => {
     movie[key] = (movie[key] || []).filter(t => normaliseTagName(t) !== normaliseTagName(tag));
   });
   movie.tagged = scoringTags(movie).length > 0;
   touchRecord(movie);
-  computeTagWeights();
-  saveLocalState();
-  syncDrive();
-  render();
-  showToast(`Removed tag from "${movie.title}": ${tag}`, 'success');
 }
 
 function removeRawTagFromMovie(id, tag, event) {
@@ -3048,10 +3052,35 @@ function renderTagBrain() {
     const cls=data.weight>0?'positive':data.weight<0?'negative':'neutral';
     const ws=data.weight>0?'+'+data.weight:data.weight===0?'~':data.weight;
     const safe=tag.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-    return `<span class="tb-tag ${cls}" onclick="openTagPanel('${safe}')">${tag}<span class="tb-weight">${ws}</span><span class="tb-count">${data.movieCount}</span></span>`;
+    const title = state.settings.tagDeleteMode
+      ? `Remove "${tag}" from ${data.movieCount} ${data.movieCount === 1 ? 'title' : 'titles'}`
+      : `Explore "${tag}"`;
+    return `<span class="tb-tag ${cls}${state.settings.tagDeleteMode ? ' remove-mode' : ''}" title="${title}" onclick="handleTagBrainClick('${safe}',event)">${tag}<span class="tb-weight">${ws}</span><span class="tb-count">${data.movieCount}</span></span>`;
   }).join('');
   renderTagDetail();
 }
+
+function handleTagBrainClick(tag, event) {
+  if (event) event.stopPropagation();
+  if (state.settings.tagDeleteMode) removeTagFromBrain(tag);
+  else openTagPanel(tag);
+}
+
+function removeTagFromBrain(tag) {
+  const normalised = normaliseTagName(tag);
+  const affected = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})]
+    .filter(movie => scoringTags(movie).some(t => normaliseTagName(t) === normalised));
+  if (!affected.length) return;
+  affected.forEach(movie => suppressTagOnMovie(movie, tag));
+  if (normaliseTagName(selectedTag) === normalised) selectedTag = '';
+  rebuildTagBrain();
+  computeTagWeights();
+  saveLocalState();
+  syncDrive();
+  render();
+  showToast(`Removed "${tag}" from ${affected.length} ${affected.length === 1 ? 'title' : 'titles'}`, 'success');
+}
+
 function openTagPanel(tag) {
   selectedTag=tag;
   tagDetailVisibleLimit=40;

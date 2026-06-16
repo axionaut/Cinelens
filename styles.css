@@ -329,6 +329,7 @@
   .tb-tag{background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.1);color:#b9ab9a}
   .tb-tag.positive{background:rgba(53,201,135,.08);border-color:rgba(53,201,135,.45);color:#35c987}
   .tb-tag.negative{background:rgba(239,83,80,.08);border-color:rgba(239,83,80,.45);color:#ff706d}
+  .tb-tag.remove-mode:hover{border-color:var(--danger);color:#ff8a86;background:rgba(239,83,80,.12)}
   @media(max-width:768px){
     .container{max-width:100%;padding:0 14px}
     .movies-grid{grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px}

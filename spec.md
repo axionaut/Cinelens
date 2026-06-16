@@ -119,8 +119,10 @@ text in the user-facing deck. On desktop, filters, sort, search and manual URL
 controls should use a dense layout instead of spreading across unnecessary
 empty vertical space.
 
-Tag click mode is global, not Tags-page-only. In explore mode, tag clicks open
-the tag workspace. In remove mode, tag chips remove the tag from that title.
+Tag click mode is global. In explore mode, tag clicks open the tag workspace.
+In remove mode, tag chips on title cards remove the tag from that title, and
+Tag Brain chips remove the tag from every active or hidden title currently
+carrying that tag.
 
 Tag removals are persisted per title so retagging or housekeeping does not
 reapply the same removed tag to the same title.
@@ -375,6 +377,11 @@ Tags must be its own tab.
 Tag Brain should show user taste signals derived from ratings.
 
 Tag Brain is secondary to recommendations. It must not crowd the recommendation page.
+
+Tag Brain chips must honor the same global tag click mode as card chips:
+explore opens the selected tag workspace, while remove mode bulk-suppresses the
+clicked tag from every matching active or hidden title, recomputes weights,
+saves locally, syncs Drive when connected and rerenders the Tags view.
 
 ### 3.9 Infinite Recommendations
 
