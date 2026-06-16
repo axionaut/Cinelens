@@ -227,7 +227,6 @@ let state = {
 let pendingManualRatingId = '';
 const PERFECT_REC_TARGET = STRONG_REC_TARGET;
 const PERFECT_REC_MIN_RATIO = 0.995;
-const MIN_PLOT_TAGS = 5;
 const MAX_STORY_TAGS = 34;
 const MIN_STORY_SECTION_CHARS = 140;
 const LOW_CONFIDENCE_PLOT_TAGS = new Set([
@@ -656,17 +655,12 @@ function explicitAvoidTags(storyText='') {
 function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats(), opts={}) {
   const maxTags = opts.maxTags || MAX_STORY_TAGS;
   const rawDescriptors = extractRawDescriptors(storyText || '');
-  const descriptors = selectContrastiveDescriptors(rawDescriptors, stats, opts.descriptorLimit || 28).slice(0, opts.descriptorSlice || 24);
   const tagMeta = opts.includeContext ? meta : { ...meta, leadText: '', categoryText: '' };
   const evidenceTags = cleanTagArray(deriveTagsFromText(storyText || '', tagMeta), meta, false)
     .filter(t => !isMetaTag(t))
     .filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t))
     .slice(0, opts.evidenceLimit || 14);
-  let tags = cleanTagArray([...explicitAvoidTags(storyText), ...evidenceTags, ...descriptors], meta, false).slice(0, maxTags);
-  if (tags.length < MIN_PLOT_TAGS && rawDescriptors.length) {
-    const extras = selectContrastiveDescriptors(rawDescriptors, stats, maxTags).filter(tag => !tags.includes(tag));
-    tags = cleanTagArray([...tags, ...extras], meta, false).slice(0, maxTags);
-  }
+  const tags = cleanTagArray([...explicitAvoidTags(storyText), ...evidenceTags], meta, false).slice(0, maxTags);
   return {
     rawDescriptors,
     descriptorTags: tags,
@@ -741,16 +735,31 @@ function cleanContaminatedTags(silent=true) {
   return changed;
 }
 
+function runStartupMaintenance() {
+  const run = () => {
+    try {
+      const changed = cleanContaminatedTags(true);
+      if (changed) render();
+    } catch (err) {
+      console.error('Startup maintenance failed', err);
+    }
+  };
+  if ('requestIdleCallback' in window) {
+    requestIdleCallback(run, {timeout: 1500});
+  } else {
+    setTimeout(run, 50);
+  }
+}
+
 
 // ─────────────────────────────────────────────
 // INIT
 // ─────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
   loadLocalState();
-  migrateLegacyPoolItems();
-  cleanContaminatedTags(true);
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   render();
+  runStartupMaintenance();
   restoreDriveSession().finally(() => {
     startupDriveRestoreDone = true;
     render();
@@ -1844,6 +1853,7 @@ function deriveTagsFromText(text, meta) {
   if (has(/\b(musician|band|concert|jazz singer|rock band|composer|music career|recording artist)\b/)) add('music-world');
   if (has(/\b(cricket|football|basketball|baseball|tennis|boxing|wrestling|racing driver|athlete|sports coach|tournament|championship|world cup|olympics|sports team|hockey|kabaddi)\b/)) add('sports-drama');
   if (leadHas(/\bcomedy\b/) || catHas(/\bcomedy (films|television series)\b/) || storyHas(/\b(comic misunderstanding|farce|satirical comedy|dark comedy)\b/)) add('comedy');
+  if (leadHas(/\bdrama\b/) || catHas(/\bdrama (films|television series)\b/)) add('drama');
   if (leadHas(/\bromantic\b/) || has(/\b(falls in love|love affair|romantic relationship|heartbreak|wedding|marriage proposal)\b/)) add('romance');
   if (leadHas(/\bhorror\b/) || catHas(/\bhorror films\b/) || has(/\b(terrifying|monster attacks|slasher|haunting|creature stalks)\b/)) add('horror');
   if (has(/\b(based on a true story|based on actual events|true story|real-life|biographical|biopic|historical figure)\b/) || catHas(/\bbiographical films\b/)) add('based-on-true-story');
@@ -1876,6 +1886,8 @@ function deriveTagsFromText(text, meta) {
   if (has(/\b(seeks revenge|takes revenge|vengeance|avenges|payback)\b/)) add('revenge-driven');
   if (has(/\b(redemption|atone|second chance|seeks forgiveness)\b/)) add('redemption-arc');
   if (has(/\b(grief|mourning|bereavement|death of his|death of her|widow|widower)\b/)) add('grief-and-loss');
+  if (has(/\b(cancer|terminal illness|diagnosed with|illness|disease|medical diagnosis)\b/)) add('illness-story');
+  if (has(/\b(suicide|end his life|end her life|take his own life|take her own life|kill himself|kill herself)\b/)) add('suicide-theme');
   if (has(/\b(identity crisis|secret identity|double life|mistaken identity|false identity)\b/)) add('identity-crisis');
   if (has(/\b(power struggle|political ambition|rises to power|greed|corrupt ambition)\b/)) add('power-and-ambition');
   if (has(/\b(class divide|poverty|wealth inequality|working class|upper class|rich and poor)\b/)) add('class-divide');
@@ -1946,11 +1958,27 @@ function ensureMinimumPlotTags(coreTags, text, meta={}) {
 
 function tagEvidenceOk(tag, movie) {
   if (!movie || movie.source !== 'wikipedia') return true;
+  const normalised = normaliseTagName(tag);
   const t = `${movie.storyText || ''} ${movie.leadText || ''}`.toLowerCase();
   if (!t.trim()) return !['time-manipulation','sports-drama','war-drama'].includes(tag);
-  if (tag === 'time-manipulation') return /\b(time travel|travels? (back|forward) in time|time loop|temporal|paradox|alternate timeline|parallel timeline)\b/.test(t);
-  if (tag === 'sports-drama') return /\b(cricket|football|basketball|baseball|tennis|boxing|wrestling|racing driver|athlete|sports coach|tournament|championship|world cup|olympics|sports team|hockey|kabaddi)\b/.test(t);
-  if (tag === 'war-drama') return /\b(world war|wwii|world war ii|nazi|nazis|soldier|military unit|army officer|battlefield|combat mission|war-torn|wartime)\b/.test(t);
+  const evidenceRules = {
+    'time-manipulation': /\b(time travel|travels? (back|forward) in time|time loop|temporal|paradox|alternate timeline|parallel timeline)\b/,
+    'sports-drama': /\b(cricket|football|basketball|baseball|tennis|boxing|wrestling|racing driver|athlete|sports coach|tournament|championship|world cup|olympics|sports team|hockey|kabaddi)\b/,
+    'war-drama': /\b(world war|wwii|world war ii|nazi|nazis|soldier|military unit|army officer|battlefield|combat mission|war-torn|wartime)\b/,
+    'rape-case': /\b(rape|sexual assault|sexual violence)\b/,
+    'sexual-assault': /\b(rape|sexual assault|sexual violence)\b/,
+    'delhi-set': /\b(delhi|new delhi)\b/,
+    'delhi-setting': /\b(delhi|new delhi)\b/,
+    'class-divide': /\b(class divide|poverty|wealth inequality|working class|upper class|rich and poor)\b/,
+    'crime-boss': /\b(crime boss|crime lord|gang boss|mafia boss|cartel boss|underworld boss)\b/,
+    'major-case': /\b(major case|high-profile case|criminal case|legal case|court case)\b/,
+    'high-rise': /\b(high-rise|high rise|tower block|apartment tower)\b/,
+    'gay-school': /\b(gay|queer|homosexual|lgbt).{0,80}\b(school|student|classmate)|\b(school|student|classmate).{0,80}\b(gay|queer|homosexual|lgbt)\b/,
+    'marriage-proposal': /\b(marriage proposal|proposes marriage|propose to marry|wedding proposal)\b/,
+    'revenge-driven': /\b(seeks revenge|takes revenge|vengeance|avenges|payback)\b/,
+    'betrayal': /\b(betrayal|betrays|traitor|double-cross|deception)\b/
+  };
+  if (evidenceRules[normalised]) return evidenceRules[normalised].test(t);
   return true;
 }
 

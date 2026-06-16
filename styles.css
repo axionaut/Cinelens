@@ -359,7 +359,7 @@
   }
 
   /* INFINITE RECS + RATED TAB + GO TOP */
-  .rated-only{display:none}
+  .rated-only,.watchlist-only,.tag-only,.audit-only{display:none}
   .go-top-btn{position:fixed;right:22px;bottom:22px;z-index:1800;display:none;align-items:center;justify-content:center;width:42px;height:42px;border-radius:999px;border:1px solid rgba(255,204,51,.35);background:rgba(17,17,17,.92);color:var(--accent);font-family:'DM Mono',monospace;font-size:16px;cursor:pointer;box-shadow:0 12px 32px rgba(0,0,0,.35);backdrop-filter:blur(10px);transition:transform .15s,border-color .15s,color .15s}
   .go-top-btn.visible{display:flex}
   .go-top-btn:hover{transform:translateY(-2px);border-color:var(--accent);color:#fff}
