@@ -209,6 +209,8 @@ let autoExpandTimer = null;
 let startupDriveRestoreDone = false;
 let driveTokenRefreshTimer = null;
 let settingsSyncTimer = null;
+let poolVisibleLimit = 80;
+let hiddenVisibleLimit = 80;
 let state = {
   movies: {},
   tagWeights: {},
@@ -1500,18 +1502,13 @@ async function expandPool(manual=true) {
   const chasingPerfect = chasingStrong;
   let fetchStatus = recommendationFetchStatus();
   if (manual || chasingStrong) showFetchProgress(chasingStrong ? `Improving recommendations...` : `Expanding ${mode === 'all' ? 'movies and shows' : mode} from Wikipedia...`, 0, '');
+  await nextPaint();
 
   let added = 0;
-  let recovered = 0;
   let attempts = 0;
   const attemptBudget = manual ? FETCH_MANUAL_ATTEMPT_BUDGET : FETCH_AUTO_ATTEMPT_BUDGET;
   let pageDepth = manual ? 8 : 5;
   const seenThisRun = new Set();
-
-  if (ensureRejectedRefreshState().additionsSinceRefresh >= REJECTED_REFRESH_ADD_INTERVAL) {
-    const refreshResult = await refreshRejectedLane();
-    recovered += refreshResult.recovered;
-  }
 
   while (!fetchAbortRequested) {
     const allTitles = await candidateTitlesForMode(mode, pageDepth);
@@ -1555,24 +1552,17 @@ async function expandPool(manual=true) {
         } else if (movie) {
           if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
             const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
-            let addedFreshMovie = false;
             if (existingMovie) {
               upsertMoviePreservingUserState(movie, existingMovie);
             } else {
               upsertMoviePreservingUserState(movie);
               added++;
-              addedFreshMovie = true;
             }
-            const rejectedRefreshDue = addedFreshMovie && notePoolAddition();
             if (added % CARD_REFRESH_BATCH_SIZE === 0) {
               rebuildTagBrain();
               computeTagWeights();
               saveLocalState();
               updateStats();
-            }
-            if (rejectedRefreshDue && !fetchAbortRequested) {
-              const refreshResult = await refreshRejectedLane();
-              recovered += refreshResult.recovered;
             }
             if (added % 5 === 0) fetchStatus = recommendationFetchStatus();
             if (!needsMoreStrongRecommendations() && !manual) { fetchAbortRequested = true; break; }
@@ -1603,9 +1593,8 @@ async function expandPool(manual=true) {
   rebuildTagBrain();
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
-  const recoveredText = recovered ? ` Recovered ${recovered} rejected ${recovered === 1 ? 'title' : 'titles'}.` : '';
-  if (stopped && manual) showToast(`Stopped. Added ${added} titles.${recoveredText}`, (added || recovered)?'success':'');
-  else if (manual || added || recovered) showToast(`Added ${added} new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} to pool.${recoveredText}`, (added || recovered)?'success':'');
+  if (stopped && manual) showToast(`Stopped. Added ${added} titles.`, added?'success':'');
+  else if (manual || added) showToast(`Added ${added} new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} to pool.`, added?'success':'');
 }
 
 
@@ -2086,6 +2075,13 @@ function abortableSleep(ms) {
 
 function sleep(ms) { return abortableSleep(ms); }
 
+function nextPaint() {
+  return new Promise(resolve => {
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+    else setTimeout(resolve, 0);
+  });
+}
+
 function showFetchProgress(label, pct, sub) {
   const el = document.getElementById('fetchProgress');
   el.classList.add('visible');
@@ -2286,6 +2282,9 @@ function shuffleAgain() {
 
 function updateTitleSearch(value) {
   state.settings.titleSearch = String(value || '').trim();
+  recVisibleLimit = Math.max(parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
+  poolVisibleLimit = 80;
+  hiddenVisibleLimit = 80;
   saveSettingsState();
   renderActiveCards();
 }
@@ -2331,6 +2330,10 @@ function matchesTitleSearch(movie) {
   const q = String(state.settings.titleSearch || '').trim().toLowerCase();
   if (!q) return true;
   return [movie?.title, movie?.wikiTitle, movie?.pageTitle].some(value => String(value || '').toLowerCase().includes(q));
+}
+
+function titleSearchActive() {
+  return !!String(state.settings.titleSearch || '').trim();
 }
 
 function meetsYearCutoff(m) {
@@ -2400,6 +2403,10 @@ function scheduleAutoExpand(delay=600) {
 function renderRecs() {
   if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return;
   const grid = document.getElementById('recsGrid');
+  if (titleSearchActive()) {
+    renderGlobalTitleSearch(grid);
+    return;
+  }
   const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
   grid.innerHTML = '';
 
@@ -2433,6 +2440,29 @@ function renderRecs() {
   document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building recommendation pool · showing ${batch.length} unrated`;
   if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expanding the pool in the background.</p></div>`; return; }
   batch.forEach(m => grid.appendChild(buildCard(m, {})));
+}
+
+function renderGlobalTitleSearch(grid) {
+  const results = sortMovies(Object.values(state.movies || {})
+    .filter(matchesTab)
+    .filter(matchesGlobalFilters), 'updated-desc');
+  const limit = Math.max(recVisibleLimit, REC_INFINITE_PAGE_SIZE);
+  document.getElementById('recCount').textContent = results.length ? `search found ${Math.min(limit, results.length)} of ${results.length}` : 'no title matches';
+  grid.innerHTML = '';
+  if (!results.length) {
+    grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Title Matches</h3></div>`;
+    return;
+  }
+  results.slice(0, limit).forEach(movie => {
+    const contextLabel = movie.rating > 0 ? 'Rated' : movie.watchlist ? 'Watchlist' : 'In Pool';
+    grid.appendChild(buildCard(movie, {showEdit:movie.rating > 0, watchlistView:!!movie.watchlist, poolView:!movie.rating && !movie.watchlist, contextLabel}));
+  });
+  if (results.length > limit) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreSearchResults()">Show ${Math.min(REC_INFINITE_PAGE_SIZE, results.length-limit)} more · ${results.length-limit} remaining</button></div>`);
+}
+
+function showMoreSearchResults() {
+  recVisibleLimit += REC_INFINITE_PAGE_SIZE;
+  renderRecs();
 }
 
 function renderRatedGrid() {
@@ -2512,20 +2542,34 @@ function renderPoolGrid() {
   const grid = document.getElementById('poolGrid');
   if (!grid) return;
   const rows = sortMovies(Object.values(state.movies).filter(matchesTab).filter(matchesGlobalFilters), 'rating-desc');
-  document.getElementById('poolCount').textContent = rows.length ? `${rows.length} titles` : 'nothing loaded';
+  const visible = rows.slice(0, poolVisibleLimit);
+  document.getElementById('poolCount').textContent = rows.length ? `showing ${visible.length} of ${rows.length} titles` : 'nothing loaded';
   grid.innerHTML = '';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>Pool Empty</h3></div>`; return; }
-  rows.forEach(m => grid.appendChild(buildCard(m, { poolView:true })));
+  visible.forEach(m => grid.appendChild(buildCard(m, { poolView:true })));
+  if (rows.length > visible.length) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMorePoolTitles()">Show ${Math.min(80, rows.length-visible.length)} more · ${rows.length-visible.length} remaining</button></div>`);
 }
 
 function renderHiddenGrid() {
   const grid = document.getElementById('hiddenGrid');
   if (!grid) return;
   const rows = sortMovies(Object.values(state.hiddenTitles || {}).filter(matchesGlobalFilters), 'updated-desc');
-  document.getElementById('hiddenCount').textContent = rows.length ? `${rows.length} hidden` : 'nothing hidden';
+  const visible = rows.slice(0, hiddenVisibleLimit);
+  document.getElementById('hiddenCount').textContent = rows.length ? `showing ${visible.length} of ${rows.length} hidden` : 'nothing hidden';
   grid.innerHTML = '';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">x</div><h3>Nothing Hidden</h3></div>`; return; }
-  rows.forEach(m => grid.appendChild(buildCard({ ...m, _expanded:true }, { hiddenView:true })));
+  visible.forEach(m => grid.appendChild(buildCard({ ...m, _expanded:true }, { hiddenView:true })));
+  if (rows.length > visible.length) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreHiddenTitles()">Show ${Math.min(80, rows.length-visible.length)} more · ${rows.length-visible.length} remaining</button></div>`);
+}
+
+function showMorePoolTitles() {
+  poolVisibleLimit += 80;
+  renderPoolGrid();
+}
+
+function showMoreHiddenTitles() {
+  hiddenVisibleLimit += 80;
+  renderHiddenGrid();
 }
 
 function renderRejectedGrid() {
@@ -2539,7 +2583,7 @@ function renderRejectedGrid() {
     const reason = (r.reason || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const key = r.key.replace(/'/g,"\\'");
     const retries = Number(r.retryCount || 0);
-    const retryText = retries ? `auto retry ${retries}/${REJECTED_REFRESH_MAX_ATTEMPTS}` : 'awaiting refresh lane';
+    const retryText = retries ? `retried ${retries}/${REJECTED_REFRESH_MAX_ATTEMPTS}` : 'manual retry available';
     return `<div class="audit-row">
       <div class="audit-title">${title}</div>
       <div class="audit-muted">—</div>
@@ -3284,6 +3328,7 @@ function renderTagBrain() {
   const map={};
   [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(m => {
     if (!m.tagged) return;
+    if (!matchesGlobalFilters(m)) return;
     scoringTags(m).filter(tagIsPresentable).forEach(tag => {
       if (!map[tag]) map[tag]={weight:state.tagWeights[tag]||0,preference:Number(state.settings.tagPreferences[tag]||0),movieCount:0,movies:[]};
       map[tag].movieCount++; map[tag].movies.push(m);
@@ -4066,7 +4111,9 @@ function handleScroll() {
   if (btn) btn.classList.toggle('visible', window.scrollY > 520);
   if (!recommendationPageActive()) return;
   if (window.innerHeight + window.scrollY < document.documentElement.scrollHeight - 700) return;
-  const total = personalizedEnough() ? recommendationCandidates().length : discoveryPool().length;
+  const total = titleSearchActive()
+    ? Object.values(state.movies || {}).filter(matchesTab).filter(matchesGlobalFilters).length
+    : personalizedEnough() ? recommendationCandidates().length : discoveryPool().length;
   if (recVisibleLimit >= total) return;
   recVisibleLimit += REC_INFINITE_PAGE_SIZE;
   renderRecs();
