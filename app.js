@@ -2273,9 +2273,8 @@ function recommendationCandidates() {
 
 function perfectRecommendationCount(scored) {
   if (!scored || !scored.length) return 0;
-  const maxOverlap = scored[0].posOverlap || 0;
-  const maxFit = scored[0].tasteFit || 0;
-  return scored.filter(x => x.posOverlap === maxOverlap && (!maxFit || x.tasteFit / maxFit >= PERFECT_REC_MIN_RATIO)).length;
+  const maxMatch = scored[0].matchScore || 0;
+  return scored.filter(x => maxMatch && x.matchScore / maxMatch >= PERFECT_REC_MIN_RATIO).length;
 }
 
 function recommendationFetchStatus(scored=recommendationCandidates()) {
@@ -2819,17 +2818,18 @@ function scoreMovies() {
       const tasteFit=totalTasteWeight?Math.max(0,Math.min(1,positiveScore/totalTasteWeight)):0;
       return { movie:m, score, matchedTags:matched, matchedGenres, posOverlap, genreOverlap, negativeOverlap, positiveScore, negativePenalty, tasteFit };
     })
-    .filter(x => x.posOverlap>0&&x.positiveScore>0&&x.score>0)
-    .sort((a,b) => b.posOverlap-a.posOverlap||a.negativeOverlap-b.negativeOverlap||b.score-a.score||b.genreOverlap-a.genreOverlap||b.positiveScore-a.positiveScore||a.movie.title.localeCompare(b.movie.title));
-  const best = ranked[0] || null;
+    .filter(x => x.posOverlap>0&&x.positiveScore>0&&x.score>0);
+  const maxOverlap = Math.max(...ranked.map(item => item.posOverlap || 0), 0);
+  const maxScore = Math.max(...ranked.map(item => item.score || 0), 0);
+  const maxGenreOverlap = Math.max(...ranked.map(item => item.genreOverlap || 0), 0);
   ranked.forEach(item => {
-    if (!best) { item.matchScore = 0; return; }
-    const overlapPart = best.posOverlap ? item.posOverlap / best.posOverlap : 0;
-    const scorePart = best.score ? Math.max(0, Math.min(1, item.score / best.score)) : 0;
-    const genrePart = best.genreOverlap ? item.genreOverlap / best.genreOverlap : 0;
+    const overlapPart = maxOverlap ? item.posOverlap / maxOverlap : 0;
+    const scorePart = maxScore ? Math.max(0, Math.min(1, item.score / maxScore)) : 0;
+    const genrePart = maxGenreOverlap ? item.genreOverlap / maxGenreOverlap : 0;
     const penalty = Math.min(0.25, item.negativeOverlap * 0.06);
     item.matchScore = Math.max(0, Math.min(1, overlapPart * 0.7 + scorePart * 0.25 + genrePart * 0.05 - penalty));
   });
+  ranked.sort((a,b) => b.matchScore-a.matchScore||b.score-a.score||b.positiveScore-a.positiveScore||b.posOverlap-a.posOverlap||a.negativeOverlap-b.negativeOverlap||b.genreOverlap-a.genreOverlap||a.movie.title.localeCompare(b.movie.title));
   return ranked;
 }
 
