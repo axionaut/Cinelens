@@ -213,7 +213,7 @@ let state = {
   movies: {},
   tagWeights: {},
   genreWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{} },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   deletedMovieRecords: {},
@@ -2882,6 +2882,12 @@ function computeTagWeights() {
       movieGenres(m).forEach(genre => { genres[genre]=(genres[genre]||0)+wt; });
     }
   });
+  Object.entries(state.settings?.tagPreferences || {}).forEach(([tag, preference]) => {
+    const normalised = normaliseTagName(tag);
+    const value = Math.max(-4, Math.min(4, Number(preference || 0)));
+    if (!normalised || !value) return;
+    w[normalised] = (w[normalised] || 0) + value;
+  });
   state.tagWeights=w;
   state.genreWeights=genres;
 }
@@ -3270,6 +3276,7 @@ function setTagFilter(filter, btn) {
 }
 function renderTagBrain() {
   computeTagWeights();
+  if (!state.settings.tagPreferences) state.settings.tagPreferences = {};
   const grid=document.getElementById('tagBrainGrid');
   const countEl=document.getElementById('tagBrainCount');
   const search=(document.getElementById('tagSearch')?.value || '').trim().toLowerCase();
@@ -3278,7 +3285,7 @@ function renderTagBrain() {
   [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(m => {
     if (!m.tagged) return;
     scoringTags(m).filter(tagIsPresentable).forEach(tag => {
-      if (!map[tag]) map[tag]={weight:state.tagWeights[tag]||0,movieCount:0,movies:[]};
+      if (!map[tag]) map[tag]={weight:state.tagWeights[tag]||0,preference:Number(state.settings.tagPreferences[tag]||0),movieCount:0,movies:[]};
       map[tag].movieCount++; map[tag].movies.push(m);
     });
   });
@@ -3293,11 +3300,12 @@ function renderTagBrain() {
   grid.innerHTML=entries.map(([tag,data])=>{
     const cls=data.weight>0?'positive':data.weight<0?'negative':'neutral';
     const ws=data.weight>0?'+'+data.weight:data.weight===0?'~':data.weight;
+    const pref=data.preference ? `<span class="tb-pref">${data.preference > 0 ? 'pref +' : 'pref '}${data.preference}</span>` : '';
     const safe=tag.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     const title = state.settings.tagDeleteMode
       ? `Remove "${tag}" from ${data.movieCount} ${data.movieCount === 1 ? 'title' : 'titles'}`
       : `Explore "${tag}"`;
-    return `<span class="tb-tag ${cls}${state.settings.tagDeleteMode ? ' remove-mode' : ''}" title="${title}" onclick="handleTagBrainClick('${safe}',event)">${tag}<span class="tb-weight">${ws}</span><span class="tb-count">${data.movieCount}</span></span>`;
+    return `<span class="tb-tag ${cls}${state.settings.tagDeleteMode ? ' remove-mode' : ''}" title="${title}" onclick="handleTagBrainClick('${safe}',event)">${tag}<span class="tb-weight">${ws}</span>${pref}<span class="tb-count">${data.movieCount}</span></span>`;
   }).join('');
   renderTagDetail();
 }
@@ -3366,6 +3374,36 @@ function showMoreTagTitles() {
   renderTagDetail();
 }
 
+function tagPreferenceValue(tag) {
+  return Number(state.settings?.tagPreferences?.[normaliseTagName(tag)] || 0);
+}
+
+function setTagPreference(tag, value) {
+  const normalised = normaliseTagName(tag);
+  if (!normalised) return;
+  if (!state.settings.tagPreferences) state.settings.tagPreferences = {};
+  const next = Math.max(-4, Math.min(4, Number(value || 0)));
+  if (next) state.settings.tagPreferences[normalised] = next;
+  else delete state.settings.tagPreferences[normalised];
+  computeTagWeights();
+  saveSettingsState();
+  render();
+  if (selectedTag) renderTagDetail();
+  showToast(next ? `Set "${normalised}" preference to ${next > 0 ? '+' : ''}${next}` : `Cleared "${normalised}" preference`, next ? 'success' : '');
+}
+
+function renderTagPreferenceControls(tag) {
+  const current = tagPreferenceValue(tag);
+  const safe = tag.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+  const options = [[-4,'Avoid'],[-2,'Dislike'],[0,'Neutral'],[2,'Like'],[4,'Love']];
+  return `<div class="tag-pref-panel">
+    <span class="tag-pref-label">Tag preference</span>
+    <div class="tag-pref-buttons">
+      ${options.map(([value,label]) => `<button class="tb-filter-btn tag-pref-btn${current===value?' active':''}" onclick="setTagPreference('${safe}',${value})">${label}</button>`).join('')}
+    </div>
+  </div>`;
+}
+
 function renderTagDetail() {
   const detail=document.getElementById('tagDetail');
   const grid=document.getElementById('tagMoviesGrid');
@@ -3378,9 +3416,13 @@ function renderTagDetail() {
   const hiddenMovies=Object.values(state.hiddenTitles || {}).filter(m=>m.tagged&&scoringTags(m).includes(selectedTag));
   const all=[...activeMovies.map(movie=>({movie,status:movie.rating>0?'rated':'pool'})),...hiddenMovies.map(movie=>({movie,status:'hidden'}))];
   const weight=state.tagWeights[selectedTag]||0;
-  const ws=weight>0?`+${weight} (you like this)`:weight<0?`${weight} (you dislike this)`:'~ unweighted';
+  const preference=tagPreferenceValue(selectedTag);
+  const prefText=preference ? `, preference ${preference > 0 ? '+' : ''}${preference}` : '';
+  const ws=weight>0?`+${weight} (you like this${prefText})`:weight<0?`${weight} (you dislike this${prefText})`:`~ unweighted${prefText}`;
   const counts={rated:all.filter(x=>x.status==='rated').length,pool:all.filter(x=>x.status==='pool').length,hidden:all.filter(x=>x.status==='hidden').length};
   document.getElementById('tagDetailStat').textContent=`weight ${ws} · ${all.length} titles · ${counts.rated} rated · ${counts.pool} pool · ${counts.hidden} hidden`;
+  const prefSlot=document.getElementById('tagPreferenceControls');
+  if (prefSlot) prefSlot.innerHTML=renderTagPreferenceControls(selectedTag);
   let rows=(tagDetailView==='all'?all:all.filter(item=>item.status===tagDetailView)).filter(item=>matchesGlobalFilters(item.movie));
   rows.sort((a,b)=>(a.status==='rated'?0:a.status==='pool'?1:2)-(b.status==='rated'?0:b.status==='pool'?1:2)||Number(b.movie.rating||0)-Number(a.movie.rating||0)||a.movie.title.localeCompare(b.movie.title));
   grid.innerHTML='';
@@ -3422,6 +3464,7 @@ async function resetAllData() {
   state.hiddenTitles = {};
   state.deletedMovieRecords = {};
   state.tagStats = { candidates:0, tags:0, rebuiltAt:'' };
+  state.settings.tagPreferences = {};
   delete state.canonicalTagStats;
   state.rejectedWikiTitles = {};
   state.rejectedRefresh = { additionsSinceRefresh:0, lastRunAt:0, totalRuns:0 };
@@ -3515,10 +3558,12 @@ function exportCinelensData() {
 
 function normaliseIncomingData(d={}) {
   const tagStats = d.tagStats || (d.canonicalTagStats ? {candidates:d.canonicalTagStats.raw||0,tags:d.canonicalTagStats.canonical||0,rebuiltAt:d.canonicalTagStats.rebuiltAt||''} : state.tagStats);
+  const settings = {...(d.settings || {})};
+  settings.tagPreferences = settings.tagPreferences || {};
   return {
     meta: d.meta || (d.updatedAt ? {updatedAt:d.updatedAt} : {}),
     movies: d.movies || {},
-    settings: d.settings || {},
+    settings,
     hiddenTitles: d.hiddenTitles || {},
     deletedMovieRecords: d.deletedMovieRecords || {},
     tagStats,
@@ -3633,6 +3678,7 @@ function loadLocalState() {
       const s=JSON.parse(raw);
       if (s.movies) state.movies=s.movies;
       if (s.settings) state.settings={...state.settings,...s.settings};
+      state.settings.tagPreferences = state.settings.tagPreferences || {};
       if (s.hiddenTitles) state.hiddenTitles=s.hiddenTitles;
       if (s.deletedMovieRecords) state.deletedMovieRecords=s.deletedMovieRecords;
       if (s.tagStats) state.tagStats=s.tagStats;
