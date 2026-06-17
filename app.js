@@ -225,6 +225,7 @@ let settingsSyncTimer = null;
 let poolVisibleLimit = 80;
 let hiddenVisibleLimit = 80;
 const yearCategoryIndexCache = {};
+const yearCategoryMembersCache = {};
 let state = {
   movies: {},
   tagWeights: {},
@@ -236,6 +237,7 @@ let state = {
   tagStats: { candidates:0, tags:0, rebuiltAt:'' },
   rejectedWikiTitles: {},
   rejectedRefresh: { additionsSinceRefresh:0, lastRunAt:0, totalRuns:0 },
+  discoveryCursor: {},
   meta: { updatedAt:'' },
   poolFetched: false
 };
@@ -1127,10 +1129,6 @@ function laneMatchesMovie(movie, lane) {
   return matchesExpansionMode(movie, lane.mode) && movie.language === lane.language;
 }
 
-function weightedLaneLists(laneItems) {
-  return laneItems.flatMap(item => Array.from({ length:item.lane.weight }, () => item.titles));
-}
-
 function yearFromTitleText(title) {
   const years = String(title || '').match(/\b(19\d{2}|20\d{2})\b/g);
   if (!years || !years.length) return 0;
@@ -1321,15 +1319,6 @@ async function waitForPoolIdle(timeoutMs=2500) {
   }
 }
 
-function shuffled(list) {
-  const a = [...list];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
 function stableHash(value) {
   let hash = 2166136261;
   const text = String(value || '');
@@ -1342,23 +1331,6 @@ function stableHash(value) {
 
 function titleSortKey(movie) {
   return String(movie?.title || '').toLowerCase();
-}
-
-function candidateRelevanceScore(item) {
-  const title = normaliseTagName(typeof item === 'string' ? item : item.title);
-  const tier = Number(typeof item === 'string' ? 2 : item.tier ?? 2);
-  let score = (3 - tier) * 100;
-  Object.entries(state.tagWeights || {}).forEach(([tag, weight]) => {
-    if (Number(weight) <= 0) return;
-    const tokens = canonicalTagFeatures(tag).tokens || [];
-    if (tokens.some(token => token.length > 3 && title.includes(token))) score += Number(weight) * 12;
-  });
-  if (/\b(20[0-2]\d|19[8-9]\d)\b/.test(String(typeof item === 'string' ? item : item.title))) score += 8;
-  return score;
-}
-
-function sortCandidateTitles(items) {
-  return [...items].sort((a,b)=>candidateRelevanceScore(b)-candidateRelevanceScore(a)||String(typeof a === 'string' ? a : a.title).localeCompare(String(typeof b === 'string' ? b : b.title)));
 }
 
 function movieTime(movie) {
@@ -1378,40 +1350,6 @@ function sortMovies(rows, fallback='title-asc') {
   if (effective === 'year-asc') return sorted.sort((a,b)=>Number(a.year||9999)-Number(b.year||9999)||titleSortKey(a).localeCompare(titleSortKey(b)));
   if (effective === 'updated-desc') return sorted.sort((a,b)=>movieTime(b)-movieTime(a)||titleSortKey(a).localeCompare(titleSortKey(b)));
   return sorted.sort((a,b)=>titleSortKey(a).localeCompare(titleSortKey(b)));
-}
-
-function orderedUniqueItems(lanes) {
-  const out = [];
-  const seen = new Set();
-  (lanes || []).forEach(lane => {
-    (lane || []).forEach(item => {
-      const title = typeof item === 'string' ? item : item.title;
-      const key = normaliseTitleKey(title);
-      if (!key || seen.has(key) || TITLE_BLOCKLIST.has(key) || obviousNonMovieTitle(title)) return;
-      seen.add(key);
-      out.push(item);
-    });
-  });
-  return out;
-}
-
-function roundRobinUnique(lanes, preserveOrder=false) {
-  const out = [];
-  const seen = new Set();
-  const queues = lanes.map(l => preserveOrder ? [...(l || [])] : shuffled(l || []));
-  let added = true;
-  while (added) {
-    added = false;
-    for (const q of queues) {
-      const item = q.shift();
-      if (!item) continue;
-      const title = typeof item === 'string' ? item : item.title;
-      const key = normaliseTitleKey(title);
-      if (!key || seen.has(key) || TITLE_BLOCKLIST.has(key) || obviousNonMovieTitle(title)) continue;
-      seen.add(key); out.push(item); added = true;
-    }
-  }
-  return out;
 }
 
 async function fetchWikiPageLinks(title, limit=500) {
@@ -1476,24 +1414,6 @@ async function fetchNavigationLaneTitles(mode, limitPerPage=180) {
   return newestTitleFirst([...new Set(titles)]);
 }
 
-async function candidateTitlesForMode(mode, pageDepth=4) {
-  const laneItems = [];
-  for (const lane of collectionLanesForMode(mode)) {
-    const yearIndexedTitles = await fetchYearIndexedTitles(lane.key, pageDepth);
-    const curatedTitles = curatedTitlesForMode(lane.key);
-    const navigationTitles = await fetchNavigationLaneTitles(lane.key, 220);
-    const categoryTitles = pageDepth >= 12 ? await fetchWikiSourceTitles(lane.key, Math.max(2, pageDepth - 10)) : [];
-    const titles = orderedUniqueItems([
-      yearIndexedTitles.map(title => ({title, lane, tier:0})),
-      curatedTitles,
-      navigationTitles.map(title => ({title, lane, tier:2})),
-      categoryTitles.map(title => ({title, lane, tier:3}))
-    ]);
-    laneItems.push({ lane, titles });
-  }
-  return roundRobinUnique(weightedLaneLists(laneItems), true);
-}
-
 async function fetchYearCategoryIndex(laneKey) {
   const source = WIKI_YEAR_INDEX_SOURCES[laneKey];
   if (!source) return [];
@@ -1522,23 +1442,97 @@ async function fetchYearCategoryIndex(laneKey) {
   return yearCategoryIndexCache[laneKey];
 }
 
-async function fetchYearIndexedTitles(laneKey, yearDepth=6) {
-  const lane = COLLECTION_LANES.find(item => item.key === laneKey);
-  if (!lane) return [];
-  const maxYears = Math.min(Math.max(2, yearDepth), 12);
-  const categories = (await fetchYearCategoryIndex(laneKey)).slice(0, maxYears);
+function ensureDiscoveryCursor() {
+  if (!state.discoveryCursor || typeof state.discoveryCursor !== 'object') state.discoveryCursor = {};
+  COLLECTION_LANES.forEach(lane => {
+    const current = state.discoveryCursor[lane.key] || {};
+    state.discoveryCursor[lane.key] = {
+      categoryIndex: Math.max(0, Number(current.categoryIndex) || 0),
+      offset: Math.max(0, Number(current.offset) || 0),
+      cycles: Math.max(0, Number(current.cycles) || 0)
+    };
+  });
+}
+
+function clearYearMemberCacheForCategories(categories=[]) {
+  categories.forEach(category => { delete yearCategoryMembersCache[category]; });
+}
+
+async function fetchYearCategoryMembers(category) {
+  if (!category) return [];
+  if (yearCategoryMembersCache[category]) return yearCategoryMembersCache[category];
   const titles = [];
-  for (const category of categories) {
-    if (fetchAbortRequested) break;
-    try {
-      const url = `https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=${encodeURIComponent(category)}&cmlimit=120&cmnamespace=0&format=json&origin=*`;
+  let cmcontinue = '';
+  try {
+    do {
+      const cont = cmcontinue ? `&cmcontinue=${encodeURIComponent(cmcontinue)}` : '';
+      const url = `https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=${encodeURIComponent(category)}&cmlimit=500&cmnamespace=0&cmsort=sortkey&format=json&origin=*${cont}`;
       const data = await wikiApiJson(url);
       (data.query?.categorymembers || []).forEach(item => {
         if (!obviousNonMovieTitle(item.title)) titles.push(item.title);
       });
-    } catch(e) {}
+      cmcontinue = data.continue?.cmcontinue || '';
+    } while (cmcontinue && !fetchAbortRequested);
+  } catch(e) {}
+  yearCategoryMembersCache[category] = [...new Set(titles)];
+  return yearCategoryMembersCache[category];
+}
+
+function discoveryCandidateAllowed(title, lane, existing, seenThisRun) {
+  const clean = normaliseTitleKey(title);
+  if (!clean || TITLE_BLOCKLIST.has(clean) || obviousNonMovieTitle(title)) return false;
+  if (existing.has(clean) || hiddenTitleMatches(title) || seenThisRun.has(clean)) return false;
+  if (state.rejectedWikiTitles[rejectKey(title, lane.key)]) return false;
+  return true;
+}
+
+async function nextLaneDiscoveryCandidates(lane, limit, existing, seenThisRun) {
+  ensureDiscoveryCursor();
+  const categories = await fetchYearCategoryIndex(lane.key);
+  if (!categories.length) return [];
+  const cursor = state.discoveryCursor[lane.key];
+  const out = [];
+  let scannedCategories = 0;
+  let scannedTitles = 0;
+  while (out.length < limit && !fetchAbortRequested && scannedCategories < 24 && scannedTitles < 900) {
+    if (cursor.categoryIndex >= categories.length) {
+      cursor.categoryIndex = 0;
+      cursor.offset = 0;
+      cursor.cycles += 1;
+      delete yearCategoryIndexCache[lane.key];
+      clearYearMemberCacheForCategories(categories);
+      break;
+    }
+    const category = categories[cursor.categoryIndex];
+    const members = await fetchYearCategoryMembers(category);
+    if (!members.length || cursor.offset >= members.length) {
+      cursor.categoryIndex += 1;
+      cursor.offset = 0;
+      scannedCategories += 1;
+      continue;
+    }
+    const title = members[cursor.offset];
+    cursor.offset += 1;
+    scannedTitles += 1;
+    if (discoveryCandidateAllowed(title, lane, existing, seenThisRun)) {
+      seenThisRun.add(normaliseTitleKey(title));
+      out.push({title, lane, tier:0, sourceCategory:category});
+    }
   }
-  return [...new Set(titles)];
+  return out;
+}
+
+async function nextDiscoveryCandidates(mode, limit, seenThisRun=new Set()) {
+  ensureDiscoveryCursor();
+  const lanes = collectionLanesForMode(mode);
+  const existing = new Set(Object.values(state.movies).map(m => normaliseTitleKey(m.title)));
+  const laneLimit = Math.max(1, Math.ceil(limit / Math.max(1, lanes.length)));
+  const out = [];
+  for (const lane of lanes) {
+    if (fetchAbortRequested) break;
+    out.push(...await nextLaneDiscoveryCandidates(lane, laneLimit, existing, seenThisRun));
+  }
+  return out.slice(0, limit);
 }
 
 
@@ -1585,22 +1579,12 @@ async function expandPool(manual=true) {
   let added = 0;
   let attempts = 0;
   const attemptBudget = manual ? FETCH_MANUAL_ATTEMPT_BUDGET : FETCH_AUTO_ATTEMPT_BUDGET;
-  let pageDepth = manual ? 8 : 5;
   const seenThisRun = new Set();
 
   while (!fetchAbortRequested) {
-    const allTitles = await candidateTitlesForMode(mode, pageDepth);
-    const existing = new Set(Object.values(state.movies).map(m => normaliseTitleKey(m.title)));
-    const toFetch = sortCandidateTitles(allTitles.filter(item => {
-      const title = typeof item === 'string' ? item : item.title;
-      const lane = typeof item === 'string' ? null : item.lane;
-      const clean = normaliseTitleKey(title);
-      const keyMode = lane?.key || mode;
-      return clean && !TITLE_BLOCKLIST.has(clean) && !existing.has(clean) && !hiddenTitleMatches(title) && !seenThisRun.has(clean) && !state.rejectedWikiTitles[rejectKey(title, keyMode)] && !obviousNonMovieTitle(title);
-    }));
+    const toFetch = await nextDiscoveryCandidates(mode, Math.max(24, Math.min(120, attemptBudget - attempts)), seenThisRun);
 
     if (!toFetch.length) {
-      if (needsMoreStrongRecommendations() && pageDepth < 80 && attempts < attemptBudget) { pageDepth += 8; continue; }
       break;
     }
 
@@ -1659,7 +1643,6 @@ async function expandPool(manual=true) {
     }
 
     if (!needsMoreStrongRecommendations() && !manual) break;
-    if (pageDepth < 80) pageDepth += 8; else break;
   }
 
   if (manual || chasingStrong || added) hideFetchProgress();
@@ -3591,6 +3574,8 @@ async function resetAllData() {
   delete state.canonicalTagStats;
   state.rejectedWikiTitles = {};
   state.rejectedRefresh = { additionsSinceRefresh:0, lastRunAt:0, totalRuns:0 };
+  state.discoveryCursor = {};
+  ensureDiscoveryCursor();
   state.poolFetched = false;
   autoFetchPaused = true;
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
@@ -3667,6 +3652,7 @@ function ensureSyncMetadata({touchDataset=false}={}) {
 
 function exportCinelensData() {
   ensureSyncMetadata();
+  ensureDiscoveryCursor();
   return {
     meta: state.meta,
     movies: state.movies,
@@ -3675,8 +3661,49 @@ function exportCinelensData() {
     deletedMovieRecords: state.deletedMovieRecords,
     tagStats: state.tagStats,
     rejectedWikiTitles: state.rejectedWikiTitles,
-    rejectedRefresh: state.rejectedRefresh
+    rejectedRefresh: state.rejectedRefresh,
+    discoveryCursor: state.discoveryCursor
   };
+}
+
+function normaliseDiscoveryCursor(cursor={}) {
+  const clean = {};
+  Object.entries(cursor || {}).forEach(([key, value]) => {
+    clean[key] = {
+      categoryIndex: Math.max(0, Number(value?.categoryIndex) || 0),
+      offset: Math.max(0, Number(value?.offset) || 0),
+      cycles: Math.max(0, Number(value?.cycles) || 0)
+    };
+  });
+  return clean;
+}
+
+function compareDiscoveryCursor(a={}, b={}) {
+  const ac = Number(a.cycles) || 0;
+  const bc = Number(b.cycles) || 0;
+  if (ac !== bc) return ac - bc;
+  const ai = Number(a.categoryIndex) || 0;
+  const bi = Number(b.categoryIndex) || 0;
+  if (ai !== bi) return ai - bi;
+  return (Number(a.offset) || 0) - (Number(b.offset) || 0);
+}
+
+function mergeDiscoveryCursor(local={}, remote={}) {
+  const merged = {};
+  let localChanged = false;
+  let remoteChanged = false;
+  new Set([...Object.keys(local || {}), ...Object.keys(remote || {})]).forEach(key => {
+    const a = local?.[key] || {};
+    const b = remote?.[key] || {};
+    if (compareDiscoveryCursor(a, b) >= 0) {
+      merged[key] = a;
+      if (compareDiscoveryCursor(a, b) > 0) remoteChanged = true;
+    } else {
+      merged[key] = b;
+      localChanged = true;
+    }
+  });
+  return {merged:normaliseDiscoveryCursor(merged), localChanged, remoteChanged};
 }
 
 function normaliseIncomingData(d={}) {
@@ -3691,7 +3718,8 @@ function normaliseIncomingData(d={}) {
     deletedMovieRecords: d.deletedMovieRecords || {},
     tagStats,
     rejectedWikiTitles: d.rejectedWikiTitles || {},
-    rejectedRefresh: d.rejectedRefresh || {}
+    rejectedRefresh: d.rejectedRefresh || {},
+    discoveryCursor: normaliseDiscoveryCursor(d.discoveryCursor || {})
   };
 }
 
@@ -3740,6 +3768,7 @@ function mergeRemoteData(remoteRaw={}) {
   const movieMerge = mergeRecordMap(localMovies, remoteMovies);
   const hiddenMerge = mergeRecordMap(state.hiddenTitles || {}, remote.hiddenTitles || {}, {preferHidden:true});
   const rejectedMerge = mergeRecordMap(state.rejectedWikiTitles || {}, remote.rejectedWikiTitles || {});
+  const discoveryMerge = mergeDiscoveryCursor(state.discoveryCursor || {}, remote.discoveryCursor || {});
   state.movies = movieMerge.merged;
   state.hiddenTitles = hiddenMerge.merged;
   Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
@@ -3747,8 +3776,10 @@ function mergeRemoteData(remoteRaw={}) {
   const collapsedMovies = collapseDuplicateMovies(state.movies);
   const collapsedHidden = collapseDuplicateMovies(state.hiddenTitles);
   state.rejectedWikiTitles = rejectedMerge.merged;
-  localChanged = localChanged || tombstoneMerge.localChanged || movieMerge.localChanged || hiddenMerge.localChanged || rejectedMerge.localChanged;
-  remoteChanged = remoteChanged || tombstoneMerge.remoteChanged || movieMerge.remoteChanged || hiddenMerge.remoteChanged || rejectedMerge.remoteChanged || collapsedMovies || collapsedHidden;
+  state.discoveryCursor = discoveryMerge.merged;
+  ensureDiscoveryCursor();
+  localChanged = localChanged || tombstoneMerge.localChanged || movieMerge.localChanged || hiddenMerge.localChanged || rejectedMerge.localChanged || discoveryMerge.localChanged;
+  remoteChanged = remoteChanged || tombstoneMerge.remoteChanged || movieMerge.remoteChanged || hiddenMerge.remoteChanged || rejectedMerge.remoteChanged || discoveryMerge.remoteChanged || collapsedMovies || collapsedHidden;
 
   if (remoteSettingsStamp > localSettingsStamp) {
     state.settings = {...state.settings, ...remote.settings};
@@ -3810,6 +3841,8 @@ function loadLocalState() {
       if (s.meta) state.meta={...state.meta,...s.meta};
       if (s.rejectedWikiTitles) state.rejectedWikiTitles=s.rejectedWikiTitles;
       if (s.rejectedRefresh) state.rejectedRefresh={...state.rejectedRefresh,...s.rejectedRefresh};
+      if (s.discoveryCursor) state.discoveryCursor=normaliseDiscoveryCursor(s.discoveryCursor);
+      ensureDiscoveryCursor();
       ensureRejectedRefreshState(!s.rejectedRefresh);
       if (s.drive) {
         state.drive.connected=false;
@@ -3832,6 +3865,7 @@ function loadLocalState() {
       Object.values(state.hiddenTitles || {}).forEach(normaliseStoredTitleRecord);
     }
   } catch(e) {}
+  ensureDiscoveryCursor();
   Object.values(state.movies).forEach(normaliseStoredTitleRecord);
   if (collapseDuplicateMovies(state.movies)) saveLocalState();
 }
