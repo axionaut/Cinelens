@@ -7,6 +7,19 @@ const WIKI_SOURCES = {
   englishMovies: ['Category:English-language_films'],
   hindiMovies: ['Category:Hindi-language_films']
 };
+const WIKI_YEAR_INDEX_SOURCES = {
+  englishMovies: 'Category:English-language_films_by_year',
+  hindiMovies: 'Category:Hindi-language_films_by_year',
+  englishShows: [
+    'Category:American_television_series_debuts_by_year',
+    'Category:British_television_series_debuts_by_year',
+    'Category:Canadian_television_series_debuts_by_year',
+    'Category:Australian_television_series_debuts_by_year',
+    'Category:New_Zealand_television_series_debuts_by_year',
+    'Category:Irish_television_series_debuts_by_year'
+  ],
+  hindiShows: 'Category:Indian_television_series_debuts_by_year'
+};
 const WIKI_LIST_SOURCES = {
   showsIndex: 'Lists of television programs',
   englishShows: ['List of television programs: A','List of television programs: B','List of television programs: C','List of British television programmes','List of Netflix original programming','List of Amazon Prime Video original programming'],
@@ -211,6 +224,7 @@ let driveTokenRefreshTimer = null;
 let settingsSyncTimer = null;
 let poolVisibleLimit = 80;
 let hiddenVisibleLimit = 80;
+const yearCategoryIndexCache = {};
 let state = {
   movies: {},
   tagWeights: {},
@@ -1366,10 +1380,25 @@ function sortMovies(rows, fallback='title-asc') {
   return sorted.sort((a,b)=>titleSortKey(a).localeCompare(titleSortKey(b)));
 }
 
-function roundRobinUnique(lanes) {
+function orderedUniqueItems(lanes) {
   const out = [];
   const seen = new Set();
-  const queues = lanes.map(l => shuffled(l || []));
+  (lanes || []).forEach(lane => {
+    (lane || []).forEach(item => {
+      const title = typeof item === 'string' ? item : item.title;
+      const key = normaliseTitleKey(title);
+      if (!key || seen.has(key) || TITLE_BLOCKLIST.has(key) || obviousNonMovieTitle(title)) return;
+      seen.add(key);
+      out.push(item);
+    });
+  });
+  return out;
+}
+
+function roundRobinUnique(lanes, preserveOrder=false) {
+  const out = [];
+  const seen = new Set();
+  const queues = lanes.map(l => preserveOrder ? [...(l || [])] : shuffled(l || []));
   let added = true;
   while (added) {
     added = false;
@@ -1450,17 +1479,66 @@ async function fetchNavigationLaneTitles(mode, limitPerPage=180) {
 async function candidateTitlesForMode(mode, pageDepth=4) {
   const laneItems = [];
   for (const lane of collectionLanesForMode(mode)) {
+    const yearIndexedTitles = await fetchYearIndexedTitles(lane.key, pageDepth);
     const curatedTitles = curatedTitlesForMode(lane.key);
     const navigationTitles = await fetchNavigationLaneTitles(lane.key, 220);
     const categoryTitles = pageDepth >= 12 ? await fetchWikiSourceTitles(lane.key, Math.max(2, pageDepth - 10)) : [];
-    const titles = roundRobinUnique([
+    const titles = orderedUniqueItems([
+      yearIndexedTitles.map(title => ({title, lane, tier:0})),
       curatedTitles,
-      navigationTitles.map(title => ({title, lane, tier:1})),
-      categoryTitles.map(title => ({title, lane, tier:2}))
+      navigationTitles.map(title => ({title, lane, tier:2})),
+      categoryTitles.map(title => ({title, lane, tier:3}))
     ]);
     laneItems.push({ lane, titles });
   }
-  return roundRobinUnique(weightedLaneLists(laneItems));
+  return roundRobinUnique(weightedLaneLists(laneItems), true);
+}
+
+async function fetchYearCategoryIndex(laneKey) {
+  const source = WIKI_YEAR_INDEX_SOURCES[laneKey];
+  if (!source) return [];
+  if (yearCategoryIndexCache[laneKey]) return yearCategoryIndexCache[laneKey];
+  const roots = Array.isArray(source) ? source : [source];
+  const categories = [];
+  for (const [rootIndex, root] of roots.entries()) {
+    let cmcontinue = '';
+    try {
+      do {
+        const cont = cmcontinue ? `&cmcontinue=${encodeURIComponent(cmcontinue)}` : '';
+        const url = `https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=${encodeURIComponent(root)}&cmlimit=500&cmnamespace=14&format=json&origin=*${cont}`;
+        const data = await wikiApiJson(url);
+        (data.query?.categorymembers || []).forEach(item => {
+          const title = item.title || '';
+          const year = Number((title.match(/\b(19\d{2}|20\d{2})\b/) || [])[1] || 0);
+          if (year) categories.push({title, year, rootIndex});
+        });
+        cmcontinue = data.continue?.cmcontinue || '';
+      } while (cmcontinue && !fetchAbortRequested);
+    } catch(e) {}
+  }
+  yearCategoryIndexCache[laneKey] = categories
+    .sort((a,b)=>b.year-a.year||a.rootIndex-b.rootIndex||a.title.localeCompare(b.title))
+    .map(item=>item.title);
+  return yearCategoryIndexCache[laneKey];
+}
+
+async function fetchYearIndexedTitles(laneKey, yearDepth=6) {
+  const lane = COLLECTION_LANES.find(item => item.key === laneKey);
+  if (!lane) return [];
+  const maxYears = Math.min(Math.max(2, yearDepth), 12);
+  const categories = (await fetchYearCategoryIndex(laneKey)).slice(0, maxYears);
+  const titles = [];
+  for (const category of categories) {
+    if (fetchAbortRequested) break;
+    try {
+      const url = `https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=${encodeURIComponent(category)}&cmlimit=120&cmnamespace=0&format=json&origin=*`;
+      const data = await wikiApiJson(url);
+      (data.query?.categorymembers || []).forEach(item => {
+        if (!obviousNonMovieTitle(item.title)) titles.push(item.title);
+      });
+    } catch(e) {}
+  }
+  return [...new Set(titles)];
 }
 
 
