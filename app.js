@@ -326,7 +326,7 @@ function canonicalTagFeatures(tag) {
 }
 
 function rawScoringTags(movie) {
-  const base = movie?.descriptorTags && movie.descriptorTags.length ? movie.descriptorTags : (movie?.coreTags && movie.coreTags.length ? movie.coreTags : (movie?.plotTags && movie.plotTags.length ? movie.plotTags : recommendationTags(movie?.tags || [])));
+  const base = movie?.tags && movie.tags.length ? movie.tags : (movie?.coreTags && movie.coreTags.length ? movie.coreTags : (movie?.plotTags && movie.plotTags.length ? movie.plotTags : (movie?.descriptorTags || [])));
   return [...new Set((base || []).filter(t => rawTagAllowed(movie, t)).filter(t => !isMetaTag(t)).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)))];
 }
 
@@ -531,6 +531,18 @@ function wikiPageIdFromMovie(movie) {
 
 function wikiUrlFromTitle(title) {
   return `https://en.wikipedia.org/wiki/${encodeURIComponent(String(title || '').replace(/ /g, '_'))}`;
+}
+
+function attrSafe(value) {
+  return String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function wikiUrlForMovie(movie) {
+  if (!movie) return '';
+  if (movie.wikiUrl) return movie.wikiUrl;
+  const title = movie.wikiTitle || movie.pageTitle;
+  if (title) return wikiUrlFromTitle(title);
+  return '';
 }
 
 function canonicalTitle(s) {
@@ -884,9 +896,80 @@ function mergeUserState(target, source) {
   return target;
 }
 
+function normaliseFetchedWikiMovie(movie, previous=null) {
+  if (!movie) return null;
+  const next = { ...movie };
+  next.source = 'wikipedia';
+  next.wikiVerified = true;
+  next.needsManualUrl = false;
+  next.retagStatus = 'verified';
+  next.retagMessage = '';
+  next.wikiPageId = next.wikiPageId || previous?.wikiPageId || wikiPageIdFromMovie(next) || wikiPageIdFromMovie(previous);
+  next.wikiTitle = next.wikiTitle || next.pageTitle || previous?.wikiTitle || previous?.pageTitle || next.title;
+  next.pageTitle = next.pageTitle || next.wikiTitle;
+  next.wikiUrl = next.wikiUrl || wikiUrlForMovie(next) || wikiUrlForMovie(previous);
+  next.tags = cleanTagArray(next.tags || next.coreTags || next.plotTags || next.descriptorTags || [], next, false);
+  next.coreTags = cleanTagArray(next.coreTags && next.coreTags.length ? next.coreTags : next.tags, next, false);
+  next.plotTags = cleanTagArray(next.plotTags && next.plotTags.length ? next.plotTags : next.tags, next, false);
+  next.descriptorTags = cleanTagArray(next.descriptorTags && next.descriptorTags.length ? next.descriptorTags : next.tags, next, false);
+  next.tagged = !!(next.tags.length || next.coreTags.length || next.plotTags.length || next.descriptorTags.length);
+  return next;
+}
+
+function normaliseStoredTitleRecord(movie) {
+  if (!movie) return movie;
+  if (!movie.wikiPageId && String(movie.id || '').startsWith('wiki_')) {
+    movie.wikiPageId = String(movie.id).replace(/^wiki_/, '');
+  }
+  if (!movie.wikiUrl && (movie.wikiTitle || movie.pageTitle)) movie.wikiUrl = wikiUrlFromTitle(movie.wikiTitle || movie.pageTitle);
+  if (!movie.wikiTitle && movie.pageTitle) movie.wikiTitle = movie.pageTitle;
+  if (!movie.pageTitle && movie.wikiTitle) movie.pageTitle = movie.wikiTitle;
+
+  const isWikiRecord = movie.source === 'wikipedia' || !!movie.storyText || !!movie.wikiPageId || !!movie.wikiUrl;
+  if (isWikiRecord && movie.storyText) {
+    movie.source = 'wikipedia';
+    movie.wikiVerified = true;
+    movie.tags = cleanTagArray(movie.tags || movie.coreTags || movie.plotTags || movie.descriptorTags || [], movie, false);
+    movie.coreTags = cleanTagArray(movie.coreTags && movie.coreTags.length ? movie.coreTags : movie.tags, movie, false);
+    movie.plotTags = cleanTagArray(movie.plotTags && movie.plotTags.length ? movie.plotTags : movie.tags, movie, false);
+    movie.descriptorTags = cleanTagArray(movie.descriptorTags && movie.descriptorTags.length ? movie.descriptorTags : movie.tags, movie, false);
+    movie.tagged = !!(movie.tags.length || movie.coreTags.length || movie.plotTags.length || movie.descriptorTags.length);
+    if (movie.tagged || movie.wikiUrl || movie.wikiPageId) {
+      movie.needsManualUrl = false;
+      if (movie.retagStatus === 'failed' || movie.retagStatus === 'needs-url') {
+        movie.retagStatus = 'verified';
+        movie.retagMessage = '';
+      }
+    }
+  } else if (isWikiRecord) {
+    movie.source = 'wikipedia';
+    movie.tags = cleanTagArray(movie.tags || movie.coreTags || movie.plotTags || movie.descriptorTags || [], movie, false);
+    movie.coreTags = cleanTagArray(movie.coreTags && movie.coreTags.length ? movie.coreTags : movie.tags, movie, false);
+    movie.plotTags = cleanTagArray(movie.plotTags || [], movie, false);
+    movie.descriptorTags = cleanTagArray(movie.descriptorTags || [], movie, false);
+    movie.tagged = !!(movie.tags.length || movie.coreTags.length || movie.plotTags.length || movie.descriptorTags.length);
+    movie.needsManualUrl = true;
+    if (!movie.retagStatus || movie.retagStatus === 'verified') movie.retagStatus = 'needs-refresh';
+    if (!movie.retagMessage) movie.retagMessage = 'needs Wikipedia refresh';
+  } else if (!isWikiRecord) {
+    movie.source = 'legacy';
+    movie.tags = [];
+    movie.coreTags = [];
+    movie.plotTags = [];
+    movie.descriptorTags = [];
+    movie.rawDescriptors = [];
+    movie.tagged = false;
+    movie.needsManualUrl = true;
+    movie.retagStatus = 'needs-url';
+    movie.retagMessage = 'needs Wikipedia URL';
+  }
+  return movie;
+}
+
 function upsertMoviePreservingUserState(fresh, existing=null) {
   const previous = existing || state.movies?.[fresh?.id] || findExistingMovieByIdentity(fresh);
-  const next = previous ? mergeUserState({ ...fresh }, previous) : fresh;
+  const normalised = normaliseFetchedWikiMovie(fresh, previous);
+  const next = previous ? mergeUserState(normalised, previous) : normalised;
   if (!next) return null;
   touchRecord(next);
   if (previous?.id && previous.id !== next.id) {
@@ -1571,7 +1654,7 @@ async function addManualTitle() {
   const restoreAbortFlag = !poolExpansionInProgress && fetchAbortRequested;
   if (restoreAbortFlag) fetchAbortRequested = false;
   try {
-    movie = await fetchWikiMovie(wikiTitle, mode, diagnostics);
+    movie = await refreshTitleFromWikipedia(existing, {url:rawUrl, mode, diagnostics, acceptDifferentTitle:true});
   } catch(e) {
     const reason = e.message || 'Wikipedia request failed';
     recordRejectedTitle(wikiTitle, mode, reason, 'manual-url');
@@ -1595,7 +1678,7 @@ async function addManualTitle() {
   if (isMovieHidden(movie)) { showToast(`"${movie.title}" is hidden. Restore it from the Hidden tab.`, ''); return; }
   existing = existing || state.movies[movie.id] || findExistingMovieByIdentity(movie);
   if (existing) {
-    const repaired = upsertMoviePreservingUserState({ ...movie, retagStatus:'verified', retagMessage:'manual URL verified' }, existing);
+    const repaired = applyFreshWikiMovie(existing.id, movie, existing);
     runHousekeeping(false);
     if (input) input.value = '';
     saveLocalState(); syncDrive(); render();
@@ -1604,7 +1687,7 @@ async function addManualTitle() {
   }
   if (state.movies[movie.id]) { showToast(`Already in pool: "${state.movies[movie.id].title}"`, ''); return; }
 
-  upsertMoviePreservingUserState(movie);
+  movie = upsertMoviePreservingUserState(movie);
   runHousekeeping(false);
   if (input) input.value = '';
   saveLocalState(); syncDrive(); render();
@@ -2393,14 +2476,24 @@ function updateVisibleSections() {
   document.querySelectorAll('.control-deck').forEach(el => el.style.display = '');
 
   if (activeTab === 'pool') {
-    ['poolSep','poolHeader','poolGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
+    showAuditSection(['poolSep','poolHeader','poolGrid']);
   }
   if (activeTab === 'hidden') {
-    ['hiddenSep','hiddenHeader','hiddenGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
+    showAuditSection(['hiddenSep','hiddenHeader','hiddenGrid']);
   }
   if (activeTab === 'rejected') {
-    ['rejectedSep','rejectedHeader','rejectedGrid'].forEach(id => { const el=document.getElementById(id); if(el) el.style.display=''; });
+    showAuditSection(['rejectedSep','rejectedHeader','rejectedGrid']);
   }
+}
+
+function showAuditSection(ids) {
+  ids.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (el.classList.contains('movies-grid')) el.style.display = 'grid';
+    else if (el.classList.contains('section-header')) el.style.display = 'flex';
+    else el.style.display = 'block';
+  });
 }
 
 function setSectionVisibility(selector, visible) {
@@ -2542,7 +2635,7 @@ function buildCard(movie, opts={}) {
   const matchPct = rank ? Math.round((Number(matchScore ?? tasteFit) || 0) * 100) : 0;
   const safeId = movie.id.replace(/'/g,"\\'");
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';
-  const wikiUrl = movie.wikiUrl || (movie.wikiTitle || movie.pageTitle ? wikiUrlFromTitle(movie.wikiTitle || movie.pageTitle) : '');
+  const wikiUrl = wikiUrlForMovie(movie);
   const titleHtml = wikiUrl
     ? `<a class="card-title-link" href="${wikiUrl}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${movie.title}</a>`
     : movie.title;
@@ -2568,7 +2661,7 @@ function buildCard(movie, opts={}) {
       ${renderStars(safeId, movie.rating || 0)}
       ${renderGenres(movie, matchedGenres)}
       ${poolView && movie.retagMessage ? `<div class="pool-card-note">${movie.retagMessage}</div>`:''}
-      ${movie.retagStatus === 'failed' || movie.needsManualUrl ? renderWikiRepairRow(safeId, movie.retagMessage) : ''}
+      ${movie.retagStatus === 'failed' || movie.needsManualUrl ? renderWikiRepairRow(safeId, movie) : ''}
       <div class="card-tags" id="tags-${movie.id}">${renderTagInsightChips(movie, safeId, true, matchedTags, contextTag)}</div>
       <div class="card-actions">
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
@@ -2606,9 +2699,12 @@ function renderGenres(movie, matchedGenres=null) {
   return `<div class="genre-row"><span class="genre-label">Genres</span>${genres.map(genre => `<span class="genre-chip${matched.has?.(genre) ? ' matched' : ''}">${genre}</span>`).join('')}</div>`;
 }
 
-function renderWikiRepairRow(movieId, message='') {
+function renderWikiRepairRow(movieId, movieOrMessage='') {
+  const movie = typeof movieOrMessage === 'string' ? state.movies[movieId] : movieOrMessage;
+  const message = typeof movieOrMessage === 'string' ? movieOrMessage : (movieOrMessage?.retagMessage || '');
+  const storedUrl = wikiUrlForMovie(movie);
   return `<div class="wiki-repair-row">
-    <input id="wiki-url-${movieId}" class="wiki-repair-input" type="text" placeholder="paste Wikipedia URL" onclick="event.stopPropagation()" onkeydown="handleWikiRepairKey(event,'${movieId}')">
+    <input id="wiki-url-${movieId}" class="wiki-repair-input" type="text" value="${attrSafe(storedUrl)}" placeholder="${storedUrl ? 'stored Wikipedia URL' : 'paste Wikipedia URL'}" onclick="event.stopPropagation()" onkeydown="handleWikiRepairKey(event,'${movieId}')">
     <button class="card-act retag" onclick="repairMovieFromUrl('${movieId}',event)">repair</button>
     ${message ? `<span>${message}</span>` : ''}
   </div>`;
@@ -2623,24 +2719,23 @@ async function repairMovieFromUrl(id, event) {
   const movie = state.movies[id];
   if (!movie) return;
   const input = document.getElementById(`wiki-url-${id}`);
-  const rawUrl = (input?.value || '').trim();
+  const rawUrl = (input?.value || '').trim() || wikiUrlForMovie(movie);
   const wikiTitle = wikipediaTitleFromUrl(rawUrl);
-  if (!wikiTitle) {
-    showToast('Paste a valid Wikipedia URL on the card.', 'error');
+  if (!wikiTitle && !wikiPageIdFromMovie(movie) && !(movie.wikiTitle || movie.pageTitle)) {
+    showToast('No stored Wikipedia page. Paste a valid Wikipedia URL on the card.', 'error');
     return;
   }
 
-  showFetchProgress('Repairing from Wikipedia URL...', 15, wikiTitle);
+  showFetchProgress('Repairing from Wikipedia...', 15, wikiTitle || movie.wikiTitle || movie.pageTitle || movie.title);
   try {
     const mode = movie.format ? 'shows' : 'movies';
-    let fresh = await fetchWikiMovie(wikiTitle, mode);
-    if (!fresh) fresh = await fetchWikiMovie(wikiTitle, 'all');
+    const fresh = await refreshTitleFromWikipedia(movie, {url:rawUrl, mode, acceptDifferentTitle:!!wikiTitle});
     hideFetchProgress();
     if (!fresh) {
       movie.retagStatus = 'failed';
-      movie.retagMessage = 'URL did not pass CineLens rules';
+      movie.retagMessage = rawUrl ? 'stored URL did not pass CineLens rules' : 'needs correct Wikipedia URL';
       saveLocalState(); render();
-      showToast(`Could not repair "${movie.title}" from that URL.`, 'error');
+      showToast(`Could not repair "${movie.title}" from its stored Wikipedia page.`, 'error');
       return;
     }
     const updated = applyFreshWikiMovie(id, fresh, movie);
@@ -2920,26 +3015,23 @@ function skipMovie(id, e) { toggleWatchlist(id, e); }
 
 function applyFreshWikiMovie(oldId, fresh, previous={}) {
   const stamp = nowStamp();
+  const normalisedFresh = normaliseFetchedWikiMovie(fresh, previous);
   const preserved = {
     rating: Number(previous.rating || 0),
     watchlist: !!previous.watchlist,
     skipped: !!previous.skipped,
     userNotes: previous.userNotes || '',
-    suppressedTags: previous.suppressedTags || previous.suppressedTags || [],
-    thumbnailUrl: fresh.thumbnailUrl || previous.thumbnailUrl || '',
-    // Explicitly preserve wiki metadata if fresh doesn't have it
-    wikiPageId: fresh.wikiPageId || previous.wikiPageId,
-    wikiTitle: fresh.wikiTitle || previous.wikiTitle,
-    pageTitle: fresh.pageTitle || previous.pageTitle,
-    wikiUrl: fresh.wikiUrl || previous.wikiUrl
+    suppressedTags: previous.suppressedTags || [],
+    suppressedRawTags: previous.suppressedRawTags || [],
+    thumbnailUrl: normalisedFresh.thumbnailUrl || previous.thumbnailUrl || ''
   };
   const next = {
-    ...fresh,
+    ...normalisedFresh,
     ...preserved,
-    descriptorTags: fresh.descriptorTags || fresh.coreTags || [],
-    rawDescriptors: fresh.rawDescriptors || [],
-    retagStatus: 'verified',
-    retagMessage: ''
+    wikiPageId: normalisedFresh.wikiPageId || previous.wikiPageId,
+    wikiTitle: normalisedFresh.wikiTitle || previous.wikiTitle,
+    pageTitle: normalisedFresh.pageTitle || previous.pageTitle,
+    wikiUrl: normalisedFresh.wikiUrl || previous.wikiUrl
   };
   touchRecord(next, stamp);
   if (oldId && oldId !== next.id) {
@@ -2970,27 +3062,68 @@ function refreshMovieTags(movie, opts={}) {
   return movie;
 }
 
-async function findFreshWikiForMovie(movie) {
-  const mode = movie.format ? 'shows' : 'movies';
-  
-  // Ensure wikiPageId is reconstructed if missing
-  if (!movie.wikiPageId && String(movie.id || '').startsWith('wiki_')) {
-    movie.wikiPageId = String(movie.id).replace(/^wiki_/, '');
+function wikiModesFor(movie=null, preferred='all') {
+  const primary = preferred && preferred !== 'all' ? preferred : (movie?.format ? 'shows' : 'movies');
+  return [...new Set([primary, 'all'].filter(Boolean))];
+}
+
+async function fetchWikiTitleAcrossModes(title, modes, diagnostics=null) {
+  if (!title) return null;
+  for (const mode of modes) {
+    try {
+      const fresh = await fetchWikiMovie(title, mode, diagnostics);
+      if (fresh) return fresh;
+    } catch(e) {}
   }
-  
-  const pageId = wikiPageIdFromMovie(movie);
-  
-  // Try pageId-based fetch first (fastest if successful)
-  if (pageId) {
+  return null;
+}
+
+async function fetchWikiPageIdAcrossModes(pageId, modes) {
+  if (!pageId) return null;
+  for (const mode of modes) {
     try {
       const fresh = await fetchWikiMovieByPageId(pageId, mode);
       if (fresh) return fresh;
     } catch(e) {}
-    // Add a small delay before trying title candidates to avoid rate limiting
-    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+  return null;
+}
+
+function freshMatchesTitleRecord(fresh, movie, title='') {
+  if (!fresh || !movie) return !!fresh;
+  if (sameMovieIdentity(fresh, movie)) return true;
+  if (sameCanonicalTitle(fresh.title, movie.title)) return true;
+  if (sameCanonicalTitle(fresh.pageTitle, movie.pageTitle || movie.wikiTitle || movie.title)) return true;
+  if (title && sameCanonicalTitle(fresh.pageTitle, title)) return true;
+  return false;
+}
+
+async function refreshTitleFromWikipedia(movie=null, opts={}) {
+  const rawUrl = (opts.url || '').trim();
+  const urlTitle = wikipediaTitleFromUrl(rawUrl) || wikipediaTitleFromUrl(wikiUrlForMovie(movie));
+  const modes = wikiModesFor(movie, opts.mode || 'all');
+  const acceptDifferentTitle = !!opts.acceptDifferentTitle || !movie;
+  const diagnostics = opts.diagnostics || null;
+
+  if (rawUrl && !urlTitle && !movie) {
+    throw new Error('Use a valid Wikipedia page URL');
   }
 
-  // Build comprehensive candidate list, with best guesses first
+  if (movie) {
+    if (!movie.wikiPageId && String(movie.id || '').startsWith('wiki_')) {
+      movie.wikiPageId = String(movie.id).replace(/^wiki_/, '');
+    }
+    const byPageId = await fetchWikiPageIdAcrossModes(wikiPageIdFromMovie(movie), modes);
+    if (byPageId && (acceptDifferentTitle || freshMatchesTitleRecord(byPageId, movie))) return byPageId;
+  }
+
+  if (urlTitle) {
+    const fresh = await fetchWikiTitleAcrossModes(urlTitle, modes, diagnostics);
+    if (fresh && (acceptDifferentTitle || freshMatchesTitleRecord(fresh, movie, urlTitle))) return fresh;
+  }
+
+  if (!movie) return null;
+
   const candidates = [
     movie.wikiTitle,
     movie.pageTitle,
@@ -2999,37 +3132,32 @@ async function findFreshWikiForMovie(movie) {
     movie.year ? `${movie.title} (${movie.year} film)` : '',
     movie.year ? `${movie.title} (${movie.year} TV series)` : '',
     movie.format ? `${movie.title} television series` : `${movie.title} film`,
-    // Additional candidates for robustness
-    movie.director && movie.year ? `${movie.title} (${movie.year}) ${movie.director}` : '',
     movie.language === 'Hindi' && movie.country === 'India' ? `${movie.title} (Hindi film)` : '',
-    movie.language === 'Hindi' && movie.country === 'India' && movie.format ? `${movie.title} (Hindi TV series)` : '',
+    movie.language === 'Hindi' && movie.country === 'India' && movie.format ? `${movie.title} (Hindi TV series)` : ''
   ].filter(Boolean);
 
-  // Try each title candidate with a small delay between attempts
   for (const title of [...new Set(candidates)]) {
-    try {
-      const fresh = await fetchWikiMovie(title, mode);
-      if (fresh && (sameCanonicalTitle(fresh.title, movie.title) || sameCanonicalTitle(fresh.pageTitle, movie.pageTitle || movie.title))) {
-        return fresh;
-      }
-    } catch(e) {}
-    // Stagger requests to avoid rate limiting
-    await new Promise(resolve => setTimeout(resolve, 200));
+    const fresh = await fetchWikiTitleAcrossModes(title, modes);
+    if (fresh && freshMatchesTitleRecord(fresh, movie, title)) return fresh;
   }
 
-  // Final fallback: try Wikipedia search
   try {
     const searchTitles = await fetchWikiSearchTitles(`${movie.title} ${movie.year || ''} ${movie.format ? 'television series' : 'film'}`);
     for (const title of searchTitles) {
-      try {
-        const fresh = await fetchWikiMovie(title, mode);
-        if (fresh && sameCanonicalTitle(fresh.title, movie.title)) return fresh;
-      } catch(e) {}
-      await new Promise(resolve => setTimeout(resolve, 200));
+      const fresh = await fetchWikiTitleAcrossModes(title, modes);
+      if (fresh && freshMatchesTitleRecord(fresh, movie, title)) return fresh;
     }
   } catch(e) {}
-  
+
   return null;
+}
+
+async function findFreshWikiForMovie(movie) {
+  try {
+    return await refreshTitleFromWikipedia(movie);
+  } catch(e) {
+    return null;
+  }
 }
 
 async function retagMovie(id, e) {
@@ -3049,7 +3177,7 @@ async function retagMovie(id, e) {
 
   showFetchProgress('Re-tagging from Wikipedia plot...', 20, m.wikiTitle || m.pageTitle || m.title);
   try {
-    const fresh = await findFreshWikiForMovie(m);
+    const fresh = await refreshTitleFromWikipedia(m);
     hideFetchProgress();
     if (!fresh) {
       m.retagStatus = 'failed';
@@ -3446,6 +3574,8 @@ function mergeRemoteData(remoteRaw={}) {
   const rejectedMerge = mergeRecordMap(state.rejectedWikiTitles || {}, remote.rejectedWikiTitles || {});
   state.movies = movieMerge.merged;
   state.hiddenTitles = hiddenMerge.merged;
+  Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
+  Object.values(state.hiddenTitles || {}).forEach(normaliseStoredTitleRecord);
   const collapsedMovies = collapseDuplicateMovies(state.movies);
   const collapsedHidden = collapseDuplicateMovies(state.hiddenTitles);
   state.rejectedWikiTitles = rejectedMerge.merged;
@@ -3529,20 +3659,11 @@ function loadLocalState() {
       const titleSearch=document.getElementById('titleSearch');
       if (titleSearch) titleSearch.value=state.settings.titleSearch||'';
       
-      // Ensure wikiPageId is reconstructed for all Wikipedia movies
-      Object.values(state.movies || {}).forEach(m => {
-        if (m.source === 'wikipedia' && !m.wikiPageId && String(m.id || '').startsWith('wiki_')) {
-          m.wikiPageId = String(m.id).replace(/^wiki_/, '');
-        }
-      });
+      Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
+      Object.values(state.hiddenTitles || {}).forEach(normaliseStoredTitleRecord);
     }
   } catch(e) {}
-  Object.values(state.movies).forEach(m => {
-    m.tags = cleanTagArray(m.tags || [], m, false);
-    m.coreTags = cleanTagArray(m.coreTags && m.coreTags.length ? m.coreTags : recommendationTags(m.tags), m, false);
-    m.plotTags = cleanTagArray(m.plotTags || [], m, false);
-    m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length);
-  });
+  Object.values(state.movies).forEach(normaliseStoredTitleRecord);
   if (collapseDuplicateMovies(state.movies)) saveLocalState();
 }
 
