@@ -114,14 +114,13 @@
     </select>
     <button class="tb-filter-btn" id="shuffleAgainBtn" onclick="shuffleAgain()" hidden>Shuffle again</button>
     <label>Search</label>
-    <input class="title-search-input" id="titleSearch" type="search" placeholder="search title" oninput="updateTitleSearch(this.value)">
+    <input class="title-search-input" id="titleSearch" type="search" placeholder="search local + Wikipedia" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)">
+    <button class="tb-filter-btn" id="unifiedSearchBtn" onclick="searchWikipediaFromUnifiedInput()">search wiki</button>
     <button class="tb-filter-btn tag-delete-mode" id="tagDeleteModeBtn" onclick="toggleTagDeleteMode()">Tag clicks: explore</button>
   </div>
+  <div class="wiki-search-results" id="wikiSearchResults" hidden></div>
 
   <div class="platform-bar manual-add-row">
-    <span class="platform-label">Add Wikipedia URL</span>
-    <input class="manual-title-input" id="manualTitle" type="text" placeholder="paste Wikipedia movie/show URL" onkeydown="handleManualTitleKey(event)">
-    <button class="platform-btn" onclick="addManualTitle()" id="manualAddBtn">fetch from URL</button>
     <button class="platform-btn" id="tagUntaggedBtn" onclick="tagAllUntagged()" style="display:none">AI tag titles</button>
     <button class="platform-btn danger" onclick="resetAllData()">Reset All</button>
   </div>

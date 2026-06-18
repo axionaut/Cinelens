@@ -230,6 +230,8 @@ let driveTokenRefreshTimer = null;
 let settingsSyncTimer = null;
 let poolVisibleLimit = 80;
 let hiddenVisibleLimit = 80;
+let wikiSearchResults = [];
+let wikiSearchQuery = '';
 const yearCategoryIndexCache = {};
 const yearCategoryMembersCache = {};
 let state = {
@@ -863,9 +865,9 @@ function migrateLegacyPoolItems() {
     m.descriptorTags = [];
     m.rawDescriptors = [];
     m.tagged = false;
-    m.needsManualUrl = true;
-    m.retagStatus = 'needs-url';
-    m.retagMessage = 'needs Wikipedia URL';
+    m.needsManualUrl = false;
+    m.retagStatus = 'needs-refresh';
+    m.retagMessage = 'automatic Wikipedia refresh pending';
   });
 }
 
@@ -890,9 +892,9 @@ function rebuildDescriptorBrain() {
     } else if (m.source !== 'wikipedia') {
       m.source = 'legacy';
       clearGeneratedTags(m);
-      m.needsManualUrl = true;
-      m.retagStatus = 'needs-url';
-      m.retagMessage = 'needs Wikipedia URL';
+      m.needsManualUrl = false;
+      m.retagStatus = 'needs-refresh';
+      m.retagMessage = 'automatic Wikipedia refresh pending';
     }
     const after = JSON.stringify({tags:m.tags||[], coreTags:m.coreTags||[], plotTags:m.plotTags||[], descriptorTags:m.descriptorTags||[], tagged:m.tagged});
     if (before !== after) changed++;
@@ -1130,9 +1132,9 @@ function normaliseStoredTitleRecord(movie) {
     movie.descriptorTags = [];
     movie.rawDescriptors = [];
     movie.tagged = false;
-    movie.needsManualUrl = true;
-    movie.retagStatus = 'needs-url';
-    movie.retagMessage = 'needs Wikipedia URL';
+    movie.needsManualUrl = false;
+    movie.retagStatus = 'needs-refresh';
+    movie.retagMessage = 'automatic Wikipedia refresh pending';
   }
   return movie;
 }
@@ -1222,7 +1224,8 @@ function hasAllowedLanguageEvidence(cats, leadText) {
   return {
     english: /\bcategory:\d{4} english-language films\b|\bcategory:english-language (?:films|television shows|web series|netflix original programming|amazon prime video original programming)\b/i.test(catText)
       || /\benglish-language (?:film|television series|tv series|web series|miniseries)\b/i.test(leadText)
-      || /\b(?:american|british) (?:film|television|tv|web|streaming television)\b/i.test(leadText),
+      || /\b(?:american|british|canadian|australian|new zealand|irish)\b.{0,80}\b(?:film|television series|tv series|web series|miniseries|streaming television series)\b/i.test(leadText)
+      || /\bcategory:(?:american|british|canadian|australian|new zealand|irish) (?:.* )?(?:films|television series|web series)\b/i.test(catText),
     hindi: /\bcategory:\d{4} hindi-language films\b|\bcategory:hindi-language (?:films|television shows|web series)\b/i.test(catText)
       || /\bhindi-language (?:film|television series|tv series|web series|miniseries)\b/i.test(leadText)
       || /\bhindi (?:film|television series|tv series|web series|miniseries)\b/i.test(leadText)
@@ -1760,10 +1763,6 @@ async function expandPool(manual=true) {
 }
 
 
-function handleManualTitleKey(e) {
-  if (e.key === 'Enter') addManualTitle();
-}
-
 function wikipediaTitleFromUrl(value) {
   const raw = (value || '').trim();
   if (!raw) return '';
@@ -1784,61 +1783,98 @@ function wikipediaTitleFromUrl(value) {
   return '';
 }
 
-async function addManualTitle() {
-  const input = document.getElementById('manualTitle');
-  const btn = document.getElementById('manualAddBtn');
-  const rawUrl = (input?.value || '').trim();
-  if (!rawUrl) { showToast('Paste a Wikipedia URL first','error'); return; }
+function handleUnifiedSearchKey(event) {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  searchWikipediaFromUnifiedInput();
+}
 
-  const wikiTitle = wikipediaTitleFromUrl(rawUrl);
-  if (!wikiTitle) { showToast('Use a valid Wikipedia page URL','error'); return; }
+function renderWikiSearchResults() {
+  const box = document.getElementById('wikiSearchResults');
+  if (!box) return;
+  if (!wikiSearchResults.length) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = `<span class="wiki-search-label">Wikipedia</span>${wikiSearchResults.map(title => {
+    const encoded = encodeURIComponent(title);
+    return `<button class="wiki-search-result" onclick="fetchUnifiedWikiResult(decodeURIComponent('${encoded}'))">${attrSafe(title)}</button>`;
+  }).join('')}`;
+}
 
-  const mode = expansionMode();
-  let existing = Object.values(state.movies).find(m => sameCanonicalTitle(m.title, wikiTitle) || sameCanonicalTitle(m.wikiTitle, wikiTitle) || sameCanonicalTitle(m.pageTitle, wikiTitle));
-  if (hiddenTitleMatches(wikiTitle)) { showToast(`"${wikiTitle}" is hidden. Restore it from the Hidden tab.`, ''); return; }
-
-  if (btn) { btn.disabled = true; btn.textContent = 'fetching...'; }
-  showFetchProgress('Fetching Wikipedia URL...', 8, wikiTitle);
-
-  let movie = null;
-  const diagnostics = {};
-  const restoreAbortFlag = !poolExpansionInProgress && fetchAbortRequested;
-  if (restoreAbortFlag) fetchAbortRequested = false;
+async function searchWikipediaFromUnifiedInput() {
+  const input = document.getElementById('titleSearch');
+  const btn = document.getElementById('unifiedSearchBtn');
+  const query = String(input?.value || '').trim();
+  if (!query) {
+    wikiSearchResults = [];
+    wikiSearchQuery = '';
+    renderWikiSearchResults();
+    return;
+  }
+  const urlTitle = wikipediaTitleFromUrl(query);
+  if (urlTitle) {
+    await fetchUnifiedWikiResult(urlTitle, query);
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = 'searching...'; }
   try {
-    movie = await refreshTitleFromWikipedia(existing, {url:rawUrl, mode, diagnostics, acceptDifferentTitle:true});
-  } catch(e) {
-    const reason = e.message || 'Wikipedia request failed';
-    showToast(`Could not process "${wikiTitle}": ${reason}`, 'error');
-    return;
+    wikiSearchQuery = query;
+    wikiSearchResults = (await fetchWikiSearchTitles(query))
+      .filter(title => !obviousNonMovieTitle(title))
+      .slice(0, 8);
+    renderWikiSearchResults();
+    if (!wikiSearchResults.length) showToast(`No Wikipedia title found for "${query}"`, '');
   } finally {
-    if (restoreAbortFlag) fetchAbortRequested = true;
+    if (btn) { btn.disabled = false; btn.textContent = 'search wiki'; }
+  }
+}
+
+async function fetchUnifiedWikiResult(title, rawUrl='') {
+  const btn = document.getElementById('unifiedSearchBtn');
+  const mode = expansionMode();
+  let existing = Object.values(state.movies || {}).find(movie =>
+    sameCanonicalTitle(movie.title, title)
+    || sameCanonicalTitle(movie.wikiTitle, title)
+    || sameCanonicalTitle(movie.pageTitle, title)
+  );
+  if (hiddenTitleMatches(title) || wrongPickMatches(title)) {
+    showToast(`"${title}" is blocked from the pool.`, '');
+    return;
+  }
+  if (btn) { btn.disabled = true; btn.textContent = 'fetching...'; }
+  showFetchProgress('Fetching from Wikipedia...', 12, title);
+  try {
+    const diagnostics = {};
+    const movie = rawUrl
+      ? await refreshTitleFromWikipedia(existing, {url:rawUrl, mode, diagnostics, acceptDifferentTitle:true})
+      : await fetchWikiTitleAcrossModes(title, mode === 'all' ? ['all'] : [mode, 'all'], diagnostics);
+    if (!movie) throw new Error(diagnostics.reason || 'Wikipedia page is not a usable movie or show');
+    if (isMovieHidden(movie)) throw new Error('Title is hidden or blocked');
+    existing = existing || state.movies[movie.id] || findExistingMovieByIdentity(movie);
+    const stored = existing
+      ? applyFreshWikiMovie(existing.id, movie, existing)
+      : upsertMoviePreservingUserState(movie);
+    wikiSearchResults = [];
+    wikiSearchQuery = '';
+    renderWikiSearchResults();
+    const input = document.getElementById('titleSearch');
+    if (input) input.value = stored.title;
+    state.settings.titleSearch = stored.title;
+    rebuildTagBrain();
+    computeTagWeights();
+    saveLocalState();
+    syncDrive();
+    render();
+    showToast(existing ? `Refreshed "${stored.title}"` : `Added "${stored.title}"`, 'success');
+  } catch(e) {
+    showToast(`Could not fetch "${title}": ${e.message || e}`, 'error');
+  } finally {
     hideFetchProgress();
-    if (btn) { btn.disabled = false; btn.textContent = 'fetch from URL'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'search wiki'; }
   }
-
-  if (!movie) {
-    const reason = diagnostics.reason || 'Wikipedia URL could not be processed';
-    showToast(`Could not process "${wikiTitle}": ${reason}`, 'error');
-    return;
-  }
-  if (isMovieHidden(movie)) { showToast(`"${movie.title}" is hidden. Restore it from the Hidden tab.`, ''); return; }
-  existing = existing || state.movies[movie.id] || findExistingMovieByIdentity(movie);
-  if (existing) {
-    const repaired = applyFreshWikiMovie(existing.id, movie, existing);
-    runHousekeeping(false);
-    if (input) input.value = '';
-    saveLocalState(); syncDrive(); render();
-    showToast(`Repaired "${repaired?.title || movie.title}" from Wikipedia URL`, 'success');
-    return;
-  }
-  if (state.movies[movie.id]) { showToast(`Already in pool: "${state.movies[movie.id].title}"`, ''); return; }
-
-  movie = upsertMoviePreservingUserState(movie);
-  runHousekeeping(false);
-  if (input) input.value = '';
-  saveLocalState(); syncDrive(); render();
-  showToast(`Added "${movie.title}"`, 'success');
-  showManualRatingPrompt(movie);
 }
 
 function showManualRatingPrompt(movie) {
@@ -2325,9 +2361,28 @@ const SEED_TAGS = {
 };
 
 function aiTagCandidates() {
-  return [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})]
-    .filter(movie => movie.source === 'wikipedia' && movie.storyText && !hasCurrentAiTags(movie))
+  return [
+    ...Object.values(state.movies || {}),
+    ...Object.values(state.hiddenTitles || {}).filter(movie => movie.storyText)
+  ]
+    .filter(movie => movie.title && !hasCurrentAiTags(movie))
     .sort((a,b)=>Number(b.rating || 0)-Number(a.rating || 0)||String(a.title || '').localeCompare(String(b.title || '')));
+}
+
+async function enrichLegacyTitleForAi(movie) {
+  if (!movie || hasCurrentAiTags(movie)) return movie;
+  if (movie.storyText) return movie;
+  try {
+    const fresh = await refreshTitleFromWikipedia(movie, {ai:false});
+    if (!fresh) throw new Error('Wikipedia title could not be resolved');
+    return applyFreshWikiMovie(movie.id, fresh, movie);
+  } catch(e) {
+    movie.needsManualUrl = false;
+    movie.retagStatus = 'needs-refresh';
+    movie.retagMessage = 'automatic Wikipedia refresh pending';
+    touchRecord(movie);
+    return null;
+  }
 }
 
 function updateAiTagButton() {
@@ -2351,12 +2406,24 @@ async function tagAllUntagged() {
   let tagged = 0;
   let failed = 0;
   try {
-    for (let index = 0; index < queue.length; index += AI_TAG_BATCH_SIZE) {
+    let index = 0;
+    while (index < queue.length) {
       if (fetchAbortRequested) break;
-      const batch = queue.slice(index, index + AI_TAG_BATCH_SIZE);
+      const batch = [];
+      while (index < queue.length && batch.length < AI_TAG_BATCH_SIZE && !fetchAbortRequested) {
+        const candidate = queue[index++];
+        showFetchProgress(
+          `Resolving title data · ${index}/${queue.length}`,
+          Math.round(index / queue.length * 100),
+          candidate.title
+        );
+        const enriched = await enrichLegacyTitleForAi(candidate);
+        if (enriched?.storyText && !hasCurrentAiTags(enriched)) batch.push(enriched);
+      }
+      if (!batch.length) continue;
       showFetchProgress(
-        `Building AI tags · ${Math.min(index + batch.length, queue.length)}/${queue.length}`,
-        Math.round(Math.min(index + batch.length, queue.length) / queue.length * 100),
+        `Building AI tags · ${index}/${queue.length}`,
+        Math.round(index / queue.length * 100),
         batch.map(movie => movie.title).join(' · ')
       );
       const result = await requestAiTags(batch);
@@ -2472,6 +2539,10 @@ function shuffleAgain() {
 
 function updateTitleSearch(value) {
   state.settings.titleSearch = String(value || '').trim();
+  if (!state.settings.titleSearch || state.settings.titleSearch !== wikiSearchQuery) {
+    wikiSearchResults = [];
+    renderWikiSearchResults();
+  }
   recVisibleLimit = Math.max(parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
   poolVisibleLimit = 80;
   hiddenVisibleLimit = 80;
@@ -2815,7 +2886,6 @@ function buildCard(movie, opts={}) {
       ${renderStars(safeId, movie.rating || 0)}
       ${renderGenres(movie, matchedGenres)}
       ${poolView && movie.retagMessage ? `<div class="pool-card-note">${movie.retagMessage}</div>`:''}
-      ${movie.retagStatus === 'failed' || movie.needsManualUrl ? renderWikiRepairRow(safeId, movie) : ''}
       <div class="card-tags" id="tags-${movie.id}">${renderTagInsightChips(movie, safeId, true, matchedTags, contextTag)}</div>
       <div class="card-actions">
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
@@ -2838,8 +2908,6 @@ function buildCard(movie, opts={}) {
       tag.removeAttribute('title');
       tag.classList.remove('removable');
     });
-    const repair = card.querySelector('.wiki-repair-row');
-    if (repair) repair.remove();
     const actions = card.querySelector('.card-actions');
     if (actions) actions.innerHTML = `<button class="card-act retag" onclick="restoreHiddenMovie('${safeId}',event)">restore</button><button class="card-act del" onclick="forgetHiddenMovie('${safeId}',event)">forget</button>`;
   }
@@ -2851,58 +2919,6 @@ function renderGenres(movie, matchedGenres=null) {
   if (!genres.length) return '';
   const matched = matchedGenres || new Set();
   return `<div class="genre-row"><span class="genre-label">Genres</span>${genres.map(genre => `<span class="genre-chip${matched.has?.(genre) ? ' matched' : ''}">${genre}</span>`).join('')}</div>`;
-}
-
-function renderWikiRepairRow(movieId, movieOrMessage='') {
-  const movie = typeof movieOrMessage === 'string' ? state.movies[movieId] : movieOrMessage;
-  const message = typeof movieOrMessage === 'string' ? movieOrMessage : (movieOrMessage?.retagMessage || '');
-  const storedUrl = wikiUrlForMovie(movie);
-  return `<div class="wiki-repair-row">
-    <input id="wiki-url-${movieId}" class="wiki-repair-input" type="text" value="${attrSafe(storedUrl)}" placeholder="${storedUrl ? 'stored Wikipedia URL' : 'paste Wikipedia URL'}" onclick="event.stopPropagation()" onkeydown="handleWikiRepairKey(event,'${movieId}')">
-    <button class="card-act retag" onclick="repairMovieFromUrl('${movieId}',event)">repair</button>
-    ${message ? `<span>${message}</span>` : ''}
-  </div>`;
-}
-
-function handleWikiRepairKey(event, id) {
-  if (event.key === 'Enter') repairMovieFromUrl(id, event);
-}
-
-async function repairMovieFromUrl(id, event) {
-  if (event) event.stopPropagation();
-  const movie = state.movies[id];
-  if (!movie) return;
-  const input = document.getElementById(`wiki-url-${id}`);
-  const rawUrl = (input?.value || '').trim() || wikiUrlForMovie(movie);
-  const wikiTitle = wikipediaTitleFromUrl(rawUrl);
-  if (!wikiTitle && !wikiPageIdFromMovie(movie) && !(movie.wikiTitle || movie.pageTitle)) {
-    showToast('No stored Wikipedia page. Paste a valid Wikipedia URL on the card.', 'error');
-    return;
-  }
-
-  showFetchProgress('Repairing from Wikipedia...', 15, wikiTitle || movie.wikiTitle || movie.pageTitle || movie.title);
-  try {
-    const mode = movie.format ? 'shows' : 'movies';
-    const fresh = await refreshTitleFromWikipedia(movie, {url:rawUrl, mode, acceptDifferentTitle:!!wikiTitle});
-    hideFetchProgress();
-    if (!fresh) {
-      movie.retagStatus = 'failed';
-      movie.retagMessage = rawUrl ? 'stored URL did not pass CineLens rules' : 'needs correct Wikipedia URL';
-      saveLocalState(); render();
-      showToast(`Could not repair "${movie.title}" from its stored Wikipedia page.`, 'error');
-      return;
-    }
-    const updated = applyFreshWikiMovie(id, fresh, movie);
-    runHousekeeping(false);
-    saveLocalState(); syncDrive(); render();
-    showToast(`Repaired "${updated.title}"`, 'success');
-  } catch(err) {
-    hideFetchProgress();
-    movie.retagStatus = 'failed';
-    movie.retagMessage = err.message || 'repair failed';
-    saveLocalState(); render();
-    showToast(`Repair failed for "${movie.title}"`, 'error');
-  }
 }
 
 function renderTagChips(tags, matchedTags, expanded) {
@@ -3091,7 +3107,7 @@ function scoreMovies() {
 // ─────────────────────────────────────────────
 // RATING
 // ─────────────────────────────────────────────
-function rateMovie(id, rating) {
+async function rateMovie(id, rating) {
   const movie = state.movies[id];
   if (!movie) return;
   const nextRating = Number(movie.rating || 0) === Number(rating) ? 0 : Number(rating);
@@ -3101,6 +3117,12 @@ function rateMovie(id, rating) {
   collapseDuplicateMovies(state.movies);
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
+  if (nextRating > 0) {
+    await retagFromStoredData(id, {
+      progressLabel:'Refreshing AI tags after rating...',
+      successToast:false
+    });
+  }
   showToast(nextRating ? `"${movie.title}" → ${nextRating}/5` : `Removed rating from "${movie.title}"`, nextRating ? 'success' : '');
 }
 
@@ -3221,22 +3243,22 @@ function wikiModesFor(movie=null, preferred='all') {
   return [...new Set([primary, 'all'].filter(Boolean))];
 }
 
-async function fetchWikiTitleAcrossModes(title, modes, diagnostics=null) {
+async function fetchWikiTitleAcrossModes(title, modes, diagnostics=null, opts={}) {
   if (!title) return null;
   for (const mode of modes) {
     try {
-      const fresh = await fetchWikiMovie(title, mode, diagnostics);
+      const fresh = await fetchWikiMovie(title, mode, diagnostics, opts);
       if (fresh) return fresh;
     } catch(e) {}
   }
   return null;
 }
 
-async function fetchWikiPageIdAcrossModes(pageId, modes) {
+async function fetchWikiPageIdAcrossModes(pageId, modes, opts={}) {
   if (!pageId) return null;
   for (const mode of modes) {
     try {
-      const fresh = await fetchWikiMovieByPageId(pageId, mode);
+      const fresh = await fetchWikiMovieByPageId(pageId, mode, opts);
       if (fresh) return fresh;
     } catch(e) {}
   }
@@ -3267,12 +3289,12 @@ async function refreshTitleFromWikipedia(movie=null, opts={}) {
     if (!movie.wikiPageId && String(movie.id || '').startsWith('wiki_')) {
       movie.wikiPageId = String(movie.id).replace(/^wiki_/, '');
     }
-    const byPageId = await fetchWikiPageIdAcrossModes(wikiPageIdFromMovie(movie), modes);
+    const byPageId = await fetchWikiPageIdAcrossModes(wikiPageIdFromMovie(movie), modes, {ai:opts.ai !== false});
     if (byPageId && (acceptDifferentTitle || freshMatchesTitleRecord(byPageId, movie))) return byPageId;
   }
 
   if (urlTitle) {
-    const fresh = await fetchWikiTitleAcrossModes(urlTitle, modes, diagnostics);
+    const fresh = await fetchWikiTitleAcrossModes(urlTitle, modes, diagnostics, {ai:opts.ai !== false});
     if (fresh && (acceptDifferentTitle || freshMatchesTitleRecord(fresh, movie, urlTitle))) return fresh;
   }
 
@@ -3291,14 +3313,14 @@ async function refreshTitleFromWikipedia(movie=null, opts={}) {
   ].filter(Boolean);
 
   for (const title of [...new Set(candidates)]) {
-    const fresh = await fetchWikiTitleAcrossModes(title, modes);
+    const fresh = await fetchWikiTitleAcrossModes(title, modes, null, {ai:opts.ai !== false});
     if (fresh && freshMatchesTitleRecord(fresh, movie, title)) return fresh;
   }
 
   try {
     const searchTitles = await fetchWikiSearchTitles(`${movie.title} ${movie.year || ''} ${movie.format ? 'television series' : 'film'}`);
     for (const title of searchTitles) {
-      const fresh = await fetchWikiTitleAcrossModes(title, modes);
+      const fresh = await fetchWikiTitleAcrossModes(title, modes, null, {ai:opts.ai !== false});
       if (fresh && freshMatchesTitleRecord(fresh, movie, title)) return fresh;
     }
   } catch(e) {}
@@ -3314,11 +3336,51 @@ async function findFreshWikiForMovie(movie) {
   }
 }
 
+async function retagFromStoredData(id, opts={}) {
+  const movie = state.movies[id];
+  if (!movie) return null;
+  const beforeTags = new Set(scoringTags(movie));
+  showFetchProgress(opts.progressLabel || 'Refreshing AI tags...', 20, movie.wikiTitle || movie.pageTitle || movie.title);
+  try {
+    let updated = movie;
+    if (movie.storyText) {
+      await applyAiTags(movie, {force:true});
+    } else {
+      const fresh = await refreshTitleFromWikipedia(movie);
+      if (!fresh) throw new Error('Stored Wikipedia page could not be refreshed');
+      updated = applyFreshWikiMovie(id, fresh, movie);
+    }
+    updated.needsManualUrl = false;
+    updated.retagStatus = 'verified';
+    updated.retagMessage = '';
+    rebuildTagBrain();
+    computeTagWeights();
+    saveLocalState();
+    syncDrive();
+    render();
+    if (opts.successToast !== false) {
+      const addedTags = scoringTags(updated).filter(tag => !beforeTags.has(tag));
+      showToast(addedTags.length ? `Re-tagged "${updated.title}" · +${addedTags.length} tags` : `Re-tagged "${updated.title}" · tags refreshed`, 'success');
+    }
+    return updated;
+  } catch(err) {
+    const current = state.movies[id] || movie;
+    current.needsManualUrl = false;
+    current.retagStatus = 'needs-ai-tags';
+    current.retagMessage = 'AI retag pending';
+    saveLocalState();
+    render();
+    if (opts.errorToast !== false) showToast(`Could not refresh AI tags for "${current.title}".`, 'error');
+    return null;
+  } finally {
+    hideFetchProgress();
+  }
+}
+
 async function retagMovie(id, e) {
   if (e) e.stopPropagation();
   const m = state.movies[id];
   if (!m) return;
-  const beforeTags = new Set(scoringTags(m));
 
   if (poolExpansionInProgress || autoExpandTimer) {
     stopFetching({silent:true});
@@ -3329,31 +3391,7 @@ async function retagMovie(id, e) {
     }
   }
 
-  showFetchProgress('Re-tagging from Wikipedia plot...', 20, m.wikiTitle || m.pageTitle || m.title);
-  try {
-    const fresh = await refreshTitleFromWikipedia(m);
-    hideFetchProgress();
-    if (!fresh) {
-      m.retagStatus = 'failed';
-      m.retagMessage = 'needs correct Wikipedia URL';
-      saveLocalState(); render();
-      showToast(`Could not re-tag "${m.title}" automatically. Add its Wikipedia URL on the card.`, 'error');
-      return;
-    }
-    const updated = applyFreshWikiMovie(id, fresh, m);
-    rebuildTagBrain();
-    computeTagWeights();
-    saveLocalState(); syncDrive(); render();
-    const afterTags = scoringTags(updated);
-    const addedTags = afterTags.filter(tag => !beforeTags.has(tag));
-    showToast(addedTags.length ? `Re-tagged "${updated.title}" · +${addedTags.length} tags` : `Re-tagged "${updated.title}" · tags refreshed`, 'success');
-  } catch(err) {
-    hideFetchProgress();
-    m.retagStatus = 'failed';
-    m.retagMessage = 'retag failed';
-    saveLocalState(); render();
-    showToast(`Could not re-tag "${m.title}"`, 'error');
-  }
+  return await retagFromStoredData(id);
 }
 function toggleTags(id, e) {
   if (e) e.stopPropagation();
