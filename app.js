@@ -20,6 +20,14 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ],
   hindiShows: 'Category:Indian_television_series_debuts_by_year'
 };
+const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
+const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v2';
+const AI_TAG_MIN_CONFIDENCE = 0.55;
+const AI_TAG_MIN_COUNT = 10;
+const AI_TAG_MAX_COUNT = 20;
+const AI_TAG_MIGRATION_VERSION = 1;
+const AI_TAG_BATCH_SIZE = 20;
+const AI_REQUEST_DELAY_MS = 12000;
 const WIKI_LIST_SOURCES = {
   showsIndex: 'Lists of television programs',
   englishShows: ['List of television programs: A','List of television programs: B','List of television programs: C','List of British television programmes','List of Netflix original programming','List of Amazon Prime Video original programming'],
@@ -203,9 +211,6 @@ let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const CARD_REFRESH_BATCH_SIZE = 20;
-const REJECTED_REFRESH_ADD_INTERVAL = 500;
-const REJECTED_REFRESH_BATCH_SIZE = 25;
-const REJECTED_REFRESH_MAX_ATTEMPTS = 3;
 const WIKI_PARSER_VERSION = 3;
 const REC_INFINITE_PAGE_SIZE = 20;
 const STRONG_REC_TARGET = 10;
@@ -217,6 +222,7 @@ const DRIVE_TOKEN_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
 let recVisibleLimit = 10;
 let currentWikiAbortController = null;
 let currentSleepCancel = null;
+let lastAiRequestAt = 0;
 let autoFetchPaused = false;
 let autoExpandTimer = null;
 let startupDriveRestoreDone = false;
@@ -233,10 +239,9 @@ let state = {
   settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{} },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
+  wrongPicks: {},
   deletedMovieRecords: {},
   tagStats: { candidates:0, tags:0, rebuiltAt:'' },
-  rejectedWikiTitles: {},
-  rejectedRefresh: { additionsSinceRefresh:0, lastRunAt:0, totalRuns:0 },
   discoveryCursor: {},
   meta: { updatedAt:'' },
   poolFetched: false
@@ -701,6 +706,151 @@ function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats(), opt
   };
 }
 
+function aiStoryHash(storyText='') {
+  return String(stableHash(`${AI_TAG_PROMPT_VERSION}:${String(storyText || '').trim()}`));
+}
+
+function hasCurrentAiTags(movie) {
+  return !!(
+    movie?.aiTagging?.status === 'verified' &&
+    movie.aiTagging.promptVersion === AI_TAG_PROMPT_VERSION &&
+    movie.aiTagging.storyHash === aiStoryHash(movie.storyText) &&
+    Array.isArray(movie.tags) &&
+    movie.tags.length
+  );
+}
+
+function clearGeneratedTags(movie) {
+  if (!movie) return;
+  movie.tags = [];
+  movie.coreTags = [];
+  movie.plotTags = [];
+  movie.descriptorTags = [];
+  movie.rawDescriptors = [];
+  movie.aiTagEvidence = {};
+  movie.aiTagging = null;
+  movie.tagged = false;
+  movie.suppressedTags = [];
+  movie.suppressedRawTags = [];
+  if (movie.source === 'wikipedia' && movie.storyText) {
+    movie.retagStatus = 'needs-ai-tags';
+    movie.retagMessage = 'AI tags pending';
+  }
+}
+
+function purgeLegacyTagsForAi() {
+  if (Number(state.meta?.aiTagMigrationVersion || 0) >= AI_TAG_MIGRATION_VERSION) return false;
+  const stamp = new Date().toISOString();
+  Object.values(state.movies || {}).forEach(movie => { clearGeneratedTags(movie); touchRecord(movie, stamp); });
+  Object.values(state.hiddenTitles || {}).forEach(movie => { clearGeneratedTags(movie); touchRecord(movie, stamp); });
+  state.tagWeights = {};
+  state.genreWeights = {};
+  state.tagStats = { candidates:0, tags:0, rebuiltAt:'' };
+  state.settings.tagPreferences = {};
+  state.meta = state.meta || {};
+  state.meta.aiTagMigrationVersion = AI_TAG_MIGRATION_VERSION;
+  state.meta.aiTagMigrationAt = new Date().toISOString();
+  return true;
+}
+
+function cleanAiTagResults(result, movie) {
+  const genres = new Set((movieGenres(movie) || []).map(normaliseTagName));
+  const evidence = {};
+  const tags = [];
+  (result?.tags || []).forEach(item => {
+    const tag = normaliseTagName(item?.tag);
+    const confidence = Number(item?.confidence);
+    const support = String(item?.evidence || '').trim().slice(0, 240);
+    if (!tag || confidence < AI_TAG_MIN_CONFIDENCE || !support || genres.has(tag) || isMetaTag(tag)) return;
+    const cleaned = cleanTagArray([tag], movie, false)[0];
+    if (!cleaned || tags.includes(cleaned)) return;
+    tags.push(cleaned);
+    evidence[cleaned] = { confidence, evidence:support };
+  });
+  return {tags:tags.slice(0, AI_TAG_MAX_COUNT), evidence};
+}
+
+function applyAiTagResult(movie, result, model='') {
+  const cleaned = cleanAiTagResults(result, movie);
+  if (cleaned.tags.length < AI_TAG_MIN_COUNT) throw new Error(`AI returned too few usable tags for ${movie.title}`);
+  movie.tags = cleaned.tags;
+  movie.coreTags = [...cleaned.tags];
+  movie.plotTags = [...cleaned.tags];
+  movie.descriptorTags = [...cleaned.tags];
+  movie.rawDescriptors = [];
+  movie.tagged = true;
+  movie.aiTagEvidence = cleaned.evidence;
+  movie.aiTagging = {
+    status:'verified',
+    model:String(model || ''),
+    promptVersion:AI_TAG_PROMPT_VERSION,
+    storyHash:aiStoryHash(movie.storyText),
+    taggedAt:new Date().toISOString()
+  };
+  movie.retagStatus = 'verified';
+  movie.retagMessage = '';
+  touchRecord(movie);
+  return movie;
+}
+
+async function requestAiTags(movies) {
+  const items = (movies || []).filter(movie => movie?.storyText).slice(0, AI_TAG_BATCH_SIZE);
+  if (!items.length) return {tagged:0, failed:0};
+  const wait = Math.max(0, AI_REQUEST_DELAY_MS - (Date.now() - lastAiRequestAt));
+  if (wait) await abortableSleep(wait);
+  if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
+  lastAiRequestAt = Date.now();
+  const response = await fetch(AI_TAGGER_URL, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body:JSON.stringify({
+      items:items.map(movie => ({
+        id:movie.id,
+        title:movie.title,
+        year:movie.year,
+        format:movie.format ? 'show' : 'movie',
+        language:movie.language,
+        genres:movieGenres(movie),
+        storyText:movie.storyText
+      }))
+    })
+  });
+  if (!response.ok) throw new Error(`AI tagger HTTP ${response.status}`);
+  const payload = await response.json();
+  if (!payload.ok) throw new Error(payload.error || 'AI tagging failed');
+  const byId = new Map((payload.results || []).map(result => [String(result.id), result]));
+  let tagged = 0;
+  let failed = 0;
+  items.forEach(movie => {
+    try {
+      const result = byId.get(String(movie.id));
+      if (!result) throw new Error('AI returned no result');
+      applyAiTagResult(movie, result, payload.model);
+      tagged++;
+    } catch(e) {
+      movie.aiTagging = {
+        status:'failed',
+        promptVersion:AI_TAG_PROMPT_VERSION,
+        storyHash:aiStoryHash(movie.storyText),
+        error:String(e?.message || e),
+        attemptedAt:new Date().toISOString()
+      };
+      movie.retagStatus = 'needs-ai-tags';
+      movie.retagMessage = 'AI tags pending';
+      failed++;
+    }
+  });
+  return {tagged, failed};
+}
+
+async function applyAiTags(movie, opts={}) {
+  if (!movie?.storyText) return movie;
+  if (!opts.force && hasCurrentAiTags(movie)) return movie;
+  await requestAiTags([movie]);
+  if (!hasCurrentAiTags(movie)) throw new Error(movie.aiTagging?.error || 'AI returned no usable tags');
+  return movie;
+}
+
 function meaningfulTagCount(movie) { return rawScoringTags(movie).length; }
 
 function migrateLegacyPoolItems() {
@@ -721,31 +871,25 @@ function migrateLegacyPoolItems() {
 
 function rebuildDescriptorBrain() {
   let changed = 0;
-  const stats = descriptorCorpusStats();
-  Object.values(state.movies || {}).forEach(m => {
+  [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(m => {
     const before = JSON.stringify({tags:m.tags||[], coreTags:m.coreTags||[], plotTags:m.plotTags||[], descriptorTags:m.descriptorTags||[], tagged:m.tagged});
-    if (m.source === 'wikipedia' && m.storyText) {
-      const built = buildStoryTagSet(m.storyText, m, stats);
-      m.rawDescriptors = built.rawDescriptors;
-      m.descriptorTags = built.descriptorTags;
-      m.coreTags = built.coreTags;
-      m.plotTags = built.plotTags;
-      m.tags = built.tags;
-      m.tagged = built.tagged;
+    if (hasCurrentAiTags(m)) {
+      m.tags = cleanTagArray(m.tags || [], m, false);
+      m.coreTags = [...m.tags];
+      m.plotTags = [...m.tags];
+      m.descriptorTags = [...m.tags];
+      m.rawDescriptors = [];
+      m.tagged = m.tags.length > 0;
       m.needsManualUrl = false;
-      // Explicitly preserve and reconstruct wiki metadata
       if (!m.wikiUrl && (m.wikiTitle || m.pageTitle)) m.wikiUrl = wikiUrlFromTitle(m.wikiTitle || m.pageTitle);
       if (!m.wikiPageId && String(m.id || '').startsWith('wiki_')) m.wikiPageId = String(m.id).replace(/^wiki_/, '');
       if (!m.wikiTitle && m.pageTitle) m.wikiTitle = m.pageTitle;
       if (!m.pageTitle && m.wikiTitle) m.pageTitle = m.wikiTitle;
+    } else if (m.source === 'wikipedia' && m.storyText) {
+      clearGeneratedTags(m);
     } else if (m.source !== 'wikipedia') {
       m.source = 'legacy';
-      m.tags = [];
-      m.coreTags = [];
-      m.plotTags = [];
-      m.descriptorTags = [];
-      m.rawDescriptors = [];
-      m.tagged = false;
+      clearGeneratedTags(m);
       m.needsManualUrl = true;
       m.retagStatus = 'needs-url';
       m.retagMessage = 'needs Wikipedia URL';
@@ -758,10 +902,12 @@ function rebuildDescriptorBrain() {
 
 function cleanContaminatedTags(silent=true) {
   migrateLegacyPoolItems();
-  const changed = rebuildDescriptorBrain() + rebuildTagBrain();
+  const purged = purgeLegacyTagsForAi();
+  const changed = rebuildDescriptorBrain() + rebuildTagBrain() + (purged ? 1 : 0);
   computeTagWeights();
   if (changed) saveLocalState();
-  if (changed && !silent) showToast(`Cleaned descriptor data on ${changed} titles`, 'success');
+  if (purged) syncDrive();
+  if (changed && !silent) showToast(purged ? 'Cleared legacy tags. AI rebuild ready.' : `Cleaned tag data on ${changed} titles`, 'success');
   return changed;
 }
 
@@ -787,6 +933,13 @@ function runStartupMaintenance() {
 // ─────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
   loadLocalState();
+  const purgedTags = purgeLegacyTagsForAi();
+  const migratedWrongPicks = migrateVisibleWrongPicks();
+  if (purgedTags || migratedWrongPicks) {
+    rebuildTagBrain();
+    computeTagWeights();
+    saveLocalState();
+  }
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   render();
   runStartupMaintenance();
@@ -1166,116 +1319,6 @@ async function wikiApiJson(url) {
   }
 }
 
-function ensureRejectedRefreshState(markExistingDue=false) {
-  state.rejectedRefresh = {
-    additionsSinceRefresh: 0,
-    lastRunAt: 0,
-    totalRuns: 0,
-    ...(state.rejectedRefresh || {})
-  };
-  if (markExistingDue && Object.keys(state.rejectedWikiTitles || {}).length) {
-    state.rejectedRefresh.additionsSinceRefresh = Math.max(
-      REJECTED_REFRESH_ADD_INTERVAL,
-      Number(state.rejectedRefresh.additionsSinceRefresh || 0)
-    );
-  }
-  return state.rejectedRefresh;
-}
-
-function recordRejectedTitle(title, mode, reason='not usable', source='wikipedia', opts={}) {
-  if (!title) return;
-  const key = rejectKey(title, mode || 'all');
-  const existing = state.rejectedWikiTitles[key] || {};
-  const parserChanged = Number(existing.parserVersion || 0) < WIKI_PARSER_VERSION;
-  const retryCount = opts.retry
-    ? (parserChanged ? 1 : Number(existing.retryCount || 0) + 1)
-    : Number(existing.retryCount || 0);
-  const now = new Date().toISOString();
-  state.rejectedWikiTitles[key] = {
-    ...existing,
-    title,
-    mode: mode || 'all',
-    reason,
-    source,
-    at: existing.at || now,
-    updatedAt: now,
-    retryCount,
-    lastRetriedAt: opts.retry ? now : (existing.lastRetriedAt || ''),
-    parserVersion: WIKI_PARSER_VERSION
-  };
-}
-
-function rejectedEntries() {
-  return Object.entries(state.rejectedWikiTitles || {}).map(([key, val]) => {
-    if (val && typeof val === 'object') return { key, ...val };
-    const parts = key.split(':');
-    return { key, mode: parts[0] || 'all', title: parts.slice(1).join(':') || key, reason: 'rejected earlier', source: 'legacy', at: '' };
-  }).sort((a,b)=>(b.at||'').localeCompare(a.at||''));
-}
-
-function rejectedRefreshEligible(item) {
-  if (!item || hiddenTitleMatches(item.title)) return false;
-  if (Object.values(state.movies || {}).some(movie => normaliseTitleKey(movie.title) === normaliseTitleKey(item.title))) return false;
-  return Number(item.parserVersion || 0) < WIKI_PARSER_VERSION
-    || Number(item.retryCount || 0) < REJECTED_REFRESH_MAX_ATTEMPTS;
-}
-
-function notePoolAddition() {
-  const refresh = ensureRejectedRefreshState();
-  refresh.additionsSinceRefresh = Number(refresh.additionsSinceRefresh || 0) + 1;
-  return refresh.additionsSinceRefresh >= REJECTED_REFRESH_ADD_INTERVAL;
-}
-
-async function refreshRejectedLane(force=false) {
-  const refresh = ensureRejectedRefreshState();
-  if (!force && Number(refresh.additionsSinceRefresh || 0) < REJECTED_REFRESH_ADD_INTERVAL) {
-    return { attempted:0, recovered:0, completed:false };
-  }
-  Object.entries(state.rejectedWikiTitles || {}).forEach(([key, item]) => {
-    if (hiddenTitleMatches(item?.title)) delete state.rejectedWikiTitles[key];
-  });
-  const entries = rejectedEntries()
-    .filter(rejectedRefreshEligible)
-    .sort((a,b)=>(a.lastRetriedAt||a.at||'').localeCompare(b.lastRetriedAt||b.at||''))
-    .slice(0, REJECTED_REFRESH_BATCH_SIZE);
-  let attempted = 0;
-  let recovered = 0;
-  let interrupted = false;
-  for (const item of entries) {
-    if (fetchAbortRequested) { interrupted = true; break; }
-    attempted++;
-    showFetchProgress(`Refreshing rejected titles · ${attempted}/${entries.length}`, Math.round(attempted / Math.max(1, entries.length) * 100), item.title || '');
-    const mode = item.mode || 'all';
-    const diagnostics = {};
-    try {
-      const movie = await fetchWikiMovie(item.title, mode, diagnostics);
-      if (movie && isMovieHidden(movie)) {
-        delete state.rejectedWikiTitles[item.key];
-      } else if (movie && state.movies[movie.id]) {
-        delete state.rejectedWikiTitles[item.key];
-      } else if (movie && (movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, mode)) {
-        const existingMovie = findExistingMovieByIdentity(movie);
-        upsertMoviePreservingUserState(movie, existingMovie);
-        delete state.rejectedWikiTitles[item.key];
-        if (!existingMovie) recovered++;
-      } else {
-        recordRejectedTitle(item.title, mode, diagnostics.reason || 'still not a usable Hindi/English movie or show', item.source || 'rejected-refresh', { retry:true });
-      }
-    } catch(err) {
-      if (fetchAbortRequested || err.name === 'AbortError') { interrupted = true; break; }
-      recordRejectedTitle(item.title, mode, err.message || 'rejected refresh failed', item.source || 'rejected-refresh', { retry:true });
-    }
-  }
-  if (!interrupted) {
-    refresh.additionsSinceRefresh = Math.max(0, Number(refresh.additionsSinceRefresh || 0) - REJECTED_REFRESH_ADD_INTERVAL);
-    refresh.lastRunAt = Date.now();
-    refresh.totalRuns = Number(refresh.totalRuns || 0) + 1;
-  }
-  if (recovered) rebuildTagBrain();
-  saveLocalState();
-  return { attempted, recovered, completed:!interrupted };
-}
-
 function hiddenTitleMatches(value) {
   const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
   if (!key) return false;
@@ -1283,8 +1326,37 @@ function hiddenTitleMatches(value) {
     .some(title => normaliseTitleKey(title) === key));
 }
 
+function wrongPickMatches(value) {
+  const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
+  if (!key) return false;
+  return Object.values(state.wrongPicks || {}).some(item => [item.title, item.wikiTitle, item.pageTitle]
+    .some(title => normaliseTitleKey(title) === key));
+}
+
+function migrateVisibleWrongPicks() {
+  state.wrongPicks = state.wrongPicks || {};
+  let changed = false;
+  Object.entries(state.hiddenTitles || {}).forEach(([id, movie]) => {
+    if (!movie?.wrongPick) return;
+    const key = normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title) || id;
+    state.wrongPicks[key] = {
+      id,
+      title:movie.title || '',
+      wikiTitle:movie.wikiTitle || '',
+      pageTitle:movie.pageTitle || '',
+      wikiPageId:movie.wikiPageId || wikiPageIdFromMovie(movie),
+      at:movie.hiddenAt || nowStamp(),
+      updatedAt:movie._updatedAt || movie.hiddenAt || nowStamp()
+    };
+    delete state.hiddenTitles[id];
+    changed = true;
+  });
+  return changed;
+}
+
 function isMovieHidden(movie) {
   if (!movie) return false;
+  if (wrongPickMatches(movie)) return true;
   if (movie.id && state.hiddenTitles?.[movie.id]) return true;
   return [movie.title, movie.wikiTitle, movie.pageTitle].some(title => hiddenTitleMatches(title));
 }
@@ -1448,6 +1520,7 @@ function ensureDiscoveryCursor() {
     const current = state.discoveryCursor[lane.key] || {};
     state.discoveryCursor[lane.key] = {
       categoryIndex: Math.max(0, Number(current.categoryIndex) || 0),
+      categoryTitle: String(current.categoryTitle || ''),
       offset: Math.max(0, Number(current.offset) || 0),
       cycles: Math.max(0, Number(current.cycles) || 0)
     };
@@ -1481,8 +1554,7 @@ async function fetchYearCategoryMembers(category) {
 function discoveryCandidateAllowed(title, lane, existing, seenThisRun) {
   const clean = normaliseTitleKey(title);
   if (!clean || TITLE_BLOCKLIST.has(clean) || obviousNonMovieTitle(title)) return false;
-  if (existing.has(clean) || hiddenTitleMatches(title) || seenThisRun.has(clean)) return false;
-  if (state.rejectedWikiTitles[rejectKey(title, lane.key)]) return false;
+  if (existing.has(clean) || hiddenTitleMatches(title) || wrongPickMatches(title) || seenThisRun.has(clean)) return false;
   return true;
 }
 
@@ -1491,12 +1563,17 @@ async function nextLaneDiscoveryCandidates(lane, limit, existing, seenThisRun) {
   const categories = await fetchYearCategoryIndex(lane.key);
   if (!categories.length) return [];
   const cursor = state.discoveryCursor[lane.key];
+  if (cursor.categoryTitle) {
+    const savedIndex = categories.indexOf(cursor.categoryTitle);
+    if (savedIndex >= 0) cursor.categoryIndex = savedIndex;
+  }
   const out = [];
   let scannedCategories = 0;
   let scannedTitles = 0;
   while (out.length < limit && !fetchAbortRequested && scannedCategories < 24 && scannedTitles < 900) {
     if (cursor.categoryIndex >= categories.length) {
       cursor.categoryIndex = 0;
+      cursor.categoryTitle = '';
       cursor.offset = 0;
       cursor.cycles += 1;
       delete yearCategoryIndexCache[lane.key];
@@ -1504,9 +1581,11 @@ async function nextLaneDiscoveryCandidates(lane, limit, existing, seenThisRun) {
       break;
     }
     const category = categories[cursor.categoryIndex];
+    cursor.categoryTitle = category;
     const members = await fetchYearCategoryMembers(category);
     if (!members.length || cursor.offset >= members.length) {
       cursor.categoryIndex += 1;
+      cursor.categoryTitle = categories[cursor.categoryIndex] || '';
       cursor.offset = 0;
       scannedCategories += 1;
       continue;
@@ -1532,7 +1611,7 @@ async function nextDiscoveryCandidates(mode, limit, seenThisRun=new Set()) {
     if (fetchAbortRequested) break;
     out.push(...await nextLaneDiscoveryCandidates(lane, laneLimit, existing, seenThisRun));
   }
-  return out.slice(0, limit);
+  return out;
 }
 
 
@@ -1580,22 +1659,53 @@ async function expandPool(manual=true) {
   let attempts = 0;
   const attemptBudget = manual ? FETCH_MANUAL_ATTEMPT_BUDGET : FETCH_AUTO_ATTEMPT_BUDGET;
   const seenThisRun = new Set();
+  const pendingAiMovies = [];
+  let aiFailure = '';
+
+  const flushPendingAiMovies = async () => {
+    if (!pendingAiMovies.length || fetchAbortRequested) return;
+    const batch = pendingAiMovies.splice(0, AI_TAG_BATCH_SIZE);
+    try {
+      showFetchProgress(`AI tagging ${batch.length} titles...`, Math.min(96, attempts % 100), batch.map(item => item.movie.title).join(' · '));
+      await requestAiTags(batch.map(item => item.movie));
+      batch.forEach(({movie}) => {
+        if (!hasCurrentAiTags(movie) || isMovieHidden(movie)) return;
+        const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
+        upsertMoviePreservingUserState(movie, existingMovie);
+        if (!existingMovie) added++;
+      });
+      rebuildTagBrain();
+      computeTagWeights();
+      saveLocalState();
+      updateStats();
+      fetchStatus = recommendationFetchStatus();
+    } catch(e) {
+      aiFailure = String(e?.message || e);
+      fetchAbortRequested = true;
+    }
+  };
 
   while (!fetchAbortRequested) {
-    const toFetch = await nextDiscoveryCandidates(mode, Math.max(24, Math.min(120, attemptBudget - attempts)), seenThisRun);
+    const cursorBeforeBatch = JSON.parse(JSON.stringify(state.discoveryCursor || {}));
+    const toFetch = await nextDiscoveryCandidates(mode, Math.max(4, Math.min(8, attemptBudget - attempts)), seenThisRun);
 
     if (!toFetch.length) {
       break;
     }
+    saveLocalState({preserveUpdatedAt:true});
+    let processedCandidates = 0;
 
     for (let i = 0; i < toFetch.length; i++) {
       if (fetchAbortRequested) break;
-      if (attempts >= attemptBudget || added >= FETCH_MAX_ADDED_PER_RUN) { fetchAbortRequested = true; break; }
+      if (attempts >= attemptBudget || added >= FETCH_MAX_ADDED_PER_RUN) {
+        await flushPendingAiMovies();
+        fetchAbortRequested = true;
+        break;
+      }
       const candidate = toFetch[i];
       const title = typeof candidate === 'string' ? candidate : candidate.title;
       const lane = typeof candidate === 'string' ? null : candidate.lane;
       const fetchMode = lane?.mode || mode;
-      const keyMode = lane?.key || mode;
       seenThisRun.add(normaliseTitleKey(title));
       attempts++;
       if (manual || chasingPerfect || needsMorePerfectRecommendations()) {
@@ -1608,40 +1718,30 @@ async function expandPool(manual=true) {
         );
       }
       try {
-        const movie = await fetchWikiMovie(title, fetchMode);
+        const movie = await fetchWikiMovie(title, fetchMode, null, {ai:false});
         if (movie && isMovieHidden(movie)) {
-          // Keep explicitly hidden titles out of both the pool and rejected list.
+          // Keep hidden and internally blocked titles out of the pool.
         } else if (movie) {
           if ((movie.language === 'English' || movie.language === 'Hindi') && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
-            const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
-            if (existingMovie) {
-              upsertMoviePreservingUserState(movie, existingMovie);
-            } else {
-              upsertMoviePreservingUserState(movie);
-              added++;
-            }
-            if (added % CARD_REFRESH_BATCH_SIZE === 0) {
-              rebuildTagBrain();
-              computeTagWeights();
-              saveLocalState();
-              updateStats();
-            }
-            if (added % 5 === 0) fetchStatus = recommendationFetchStatus();
+            pendingAiMovies.push({movie, lane});
+            if (pendingAiMovies.length >= AI_TAG_BATCH_SIZE) await flushPendingAiMovies();
             if (!needsMoreStrongRecommendations() && !manual) { fetchAbortRequested = true; break; }
-          } else {
-            recordRejectedTitle(title, keyMode, 'language/year/type mismatch');
           }
-        } else {
-          recordRejectedTitle(title, keyMode, 'not a usable Hindi/English movie or show');
         }
       } catch(e) {
         if (fetchAbortRequested || e.name === 'AbortError') break;
-        recordRejectedTitle(title, keyMode, e.message || 'fetch failed');
       }
       if (fetchAbortRequested) break;
+      processedCandidates++;
       if (attempts % 20 === 0) await abortableSleep(WIKI_BATCH_PAUSE_MS);
     }
 
+    if (fetchAbortRequested && processedCandidates < toFetch.length) {
+      state.discoveryCursor = cursorBeforeBatch;
+      ensureDiscoveryCursor();
+      saveLocalState({preserveUpdatedAt:true});
+    }
+    if (!fetchAbortRequested) await flushPendingAiMovies();
     if (!needsMoreStrongRecommendations() && !manual) break;
   }
 
@@ -1654,7 +1754,8 @@ async function expandPool(manual=true) {
   rebuildTagBrain();
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
-  if (stopped && manual) showToast(`Stopped. Added ${added} titles.`, added?'success':'');
+  if (aiFailure) showToast(aiFailure.includes('Daily CineLens tagging limit reached') ? `Daily free AI limit reached. Added ${added}; resume later.` : `AI tagging stopped: ${aiFailure}`, 'error');
+  else if (stopped && manual) showToast(`Stopped. Added ${added} titles.`, added?'success':'');
   else if (manual || added) showToast(`Added ${added} new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} to pool.`, added?'success':'');
 }
 
@@ -1707,9 +1808,6 @@ async function addManualTitle() {
     movie = await refreshTitleFromWikipedia(existing, {url:rawUrl, mode, diagnostics, acceptDifferentTitle:true});
   } catch(e) {
     const reason = e.message || 'Wikipedia request failed';
-    recordRejectedTitle(wikiTitle, mode, reason, 'manual-url');
-    saveLocalState();
-    render();
     showToast(`Could not process "${wikiTitle}": ${reason}`, 'error');
     return;
   } finally {
@@ -1720,8 +1818,6 @@ async function addManualTitle() {
 
   if (!movie) {
     const reason = diagnostics.reason || 'Wikipedia URL could not be processed';
-    recordRejectedTitle(wikiTitle, mode, reason, 'manual-url');
-    saveLocalState(); render();
     showToast(`Could not process "${wikiTitle}": ${reason}`, 'error');
     return;
   }
@@ -1772,18 +1868,22 @@ function ratePendingManualMovie(rating) {
   rateMovie(id, rating);
 }
 
-async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null) {
+async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) {
   const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&format=json&origin=*`;
   const data = await wikiApiJson(url);
-  return parseWikiMovieResponse(data, wikiTitle, mode, diagnostics);
+  const movie = parseWikiMovieResponse(data, wikiTitle, mode, diagnostics);
+  if (movie && opts.ai !== false) await applyAiTags(movie);
+  return movie;
 }
 
-async function fetchWikiMovieByPageId(pageId, mode='all') {
+async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
   const clean = String(pageId || '').replace(/^wiki_/, '');
   if (!clean) return null;
   const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&format=json&origin=*`;
   const data = await wikiApiJson(url);
-  return parseWikiMovieResponse(data, clean, mode);
+  const movie = parseWikiMovieResponse(data, clean, mode);
+  if (movie && opts.ai !== false) await applyAiTags(movie);
+  return movie;
 }
 
 function rejectWikiParse(diagnostics, reason) {
@@ -1846,14 +1946,12 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
 
   if (!year || !title || !wikiPageId) return rejectWikiParse(diagnostics, 'missing release year, title or Wikipedia page ID');
 
-  const tagMeta = { source: 'wikipedia', storyText, leadText, language, country, year, format: format||null, director };
-  const builtTags = buildStoryTagSet(storyText, tagMeta);
   const genres = deriveGenres(leadText, cats);
   return {
     id, title, year, director, language, country, format: format||null,
     genres, categoryText: cats.join(' '),
-    tags: builtTags.tags, coreTags: builtTags.coreTags, plotTags: builtTags.plotTags, descriptorTags: builtTags.descriptorTags, rawDescriptors: builtTags.rawDescriptors,
-    tagged: builtTags.tagged, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, thumbnailUrl, storyText, leadText, wikiVerified: true, retagStatus: 'verified', retagMessage: ''
+    tags: [], coreTags: [], plotTags: [], descriptorTags: [], rawDescriptors: [],
+    tagged: false, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, thumbnailUrl, storyText, leadText, wikiVerified: true, retagStatus: 'needs-ai-tags', retagMessage: 'AI tags pending'
   };
 }
 
@@ -1883,7 +1981,11 @@ function extractNarrativeSection(extract) {
 function extractInlineNarrative(text) {
   const compact = String(text || '').replace(/\s+/g, ' ').trim();
   const sentences = compact.match(/[^.!?]+[.!?]+/g) || [];
-  const start = sentences.findIndex(sentence => /^\s*In the (?:film|series|show),/i.test(sentence));
+  const start = sentences.findIndex(sentence =>
+    /^\s*In the (?:film|series|show),/i.test(sentence)
+    || /\b(?:film|series|show|story|narrative|premise|synopsis)\s+(?:follows?|revolves?|cent(?:er|re)s?|focuses?|chronicles?|depicts?)\b/i.test(sentence)
+    || /\b(?:follows?|revolves around|cent(?:er|re)s on|focuses on|chronicles)\s+(?:the life|the story|a |an |two |three |four |several )/i.test(sentence)
+  );
   if (start < 0) return '';
   const out = [];
   for (let i = start; i < sentences.length && out.length < 8; i++) {
@@ -2222,36 +2324,63 @@ const SEED_TAGS = {
   'tv015':['mystery-thriller','english-language','usa','2020s','series','prestige-tv','corporate-dystopia','identity-crisis','slow-burn','visually-striking','ensemble-cast'],
 };
 
-function tagMovie(movie) {
-  if (!movie) return;
-  if (movie.source === 'wikipedia' && movie.storyText) {
-    const built = buildStoryTagSet(movie.storyText, movie);
-    movie.rawDescriptors = built.rawDescriptors;
-    movie.descriptorTags = built.descriptorTags;
-    movie.coreTags = built.coreTags;
-    movie.plotTags = built.plotTags;
-    movie.tags = built.tags;
-    movie.tagged = built.tagged;
-  } else {
-    movie.source = movie.source || 'legacy';
-    movie.tags = [];
-    movie.coreTags = [];
-    movie.plotTags = [];
-    movie.descriptorTags = [];
-    movie.tagged = false;
-    movie.needsManualUrl = true;
-    movie.retagStatus = 'needs-url';
-    movie.retagMessage = 'needs Wikipedia URL';
-  }
+function aiTagCandidates() {
+  return [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})]
+    .filter(movie => movie.source === 'wikipedia' && movie.storyText && !hasCurrentAiTags(movie))
+    .sort((a,b)=>Number(b.rating || 0)-Number(a.rating || 0)||String(a.title || '').localeCompare(String(b.title || '')));
 }
 
-function tagAllUntagged() {
-  const untagged = Object.values(state.movies).filter(m => m.rating > 0 && !m.tagged);
-  if (!untagged.length) { showToast('Nothing to tag',''); return; }
-  untagged.forEach(m => tagMovie(m));
-  runHousekeeping(false);
-  saveLocalState(); syncDrive(); render();
-  showToast(`Tagged ${untagged.length} movies`, 'success');
+function updateAiTagButton() {
+  const btn = document.getElementById('tagUntaggedBtn');
+  if (!btn) return;
+  const remaining = aiTagCandidates().length;
+  btn.style.display = remaining ? 'inline-flex' : 'none';
+  btn.textContent = remaining ? `AI tag ${remaining} titles` : 'AI tags complete';
+}
+
+async function tagAllUntagged() {
+  if (poolExpansionInProgress) {
+    showToast('Stop pool expansion before rebuilding tags.', 'error');
+    return;
+  }
+  const queue = aiTagCandidates();
+  if (!queue.length) { showToast('All eligible titles have AI tags',''); return; }
+  fetchAbortRequested = false;
+  const btn = document.getElementById('tagUntaggedBtn');
+  if (btn) btn.disabled = true;
+  let tagged = 0;
+  let failed = 0;
+  try {
+    for (let index = 0; index < queue.length; index += AI_TAG_BATCH_SIZE) {
+      if (fetchAbortRequested) break;
+      const batch = queue.slice(index, index + AI_TAG_BATCH_SIZE);
+      showFetchProgress(
+        `Building AI tags · ${Math.min(index + batch.length, queue.length)}/${queue.length}`,
+        Math.round(Math.min(index + batch.length, queue.length) / queue.length * 100),
+        batch.map(movie => movie.title).join(' · ')
+      );
+      const result = await requestAiTags(batch);
+      tagged += result.tagged;
+      failed += result.failed;
+      rebuildTagBrain();
+      computeTagWeights();
+      saveLocalState();
+      render();
+      await nextPaint();
+    }
+    syncDrive();
+    showToast(`AI tagged ${tagged} titles${failed ? ` · ${failed} need retry` : ''}`, tagged ? 'success' : '');
+  } catch(e) {
+    saveLocalState();
+    syncDrive();
+    const message = String(e?.message || e);
+    showToast(message.includes('Daily CineLens tagging limit reached') ? `Daily free AI limit reached · tagged ${tagged}. Resume tomorrow.` : `AI tagging stopped: ${message}`, 'error');
+  } finally {
+    fetchAbortRequested = false;
+    hideFetchProgress();
+    if (btn) btn.disabled = false;
+    updateAiTagButton();
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -2268,7 +2397,7 @@ function setTab(tab, btn) {
 }
 function isShow(m) { return !!m.format; }
 function matchesTab(m) {
-  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return true;
+  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return true;
   if (activeTab === 'show') return isShow(m);
   if (activeTab === 'movie') return !isShow(m);
   return true;
@@ -2279,6 +2408,7 @@ function matchesTab(m) {
 // ─────────────────────────────────────────────
 function render() {
   updateStats();
+  updateAiTagButton();
   updateVisibleSections();
   updateControlDeck();
   if (activeTab === 'rated') renderRatedGrid();
@@ -2286,7 +2416,6 @@ function render() {
   else if (activeTab === 'tags') renderTagBrain();
   else if (activeTab === 'pool') renderPoolGrid();
   else if (activeTab === 'hidden') renderHiddenGrid();
-  else if (activeTab === 'rejected') renderRejectedGrid();
   else renderRecs();
   maybeAutoExpandPool();
 }
@@ -2441,7 +2570,7 @@ function needsMorePerfectRecommendations() {
 }
 
 function maybeAutoExpandPool() {
-  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'tags' || autoFetchPaused) return;
+  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rated' || activeTab === 'tags' || autoFetchPaused) return;
   const available = discoveryPool().length;
   const needsStrong = needsMoreStrongRecommendations();
   const gap = needsStrong ? 15000 : 120000;
@@ -2462,7 +2591,7 @@ function scheduleAutoExpand(delay=600) {
 }
 
 function renderRecs() {
-  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rejected' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return;
+  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return;
   const grid = document.getElementById('recsGrid');
   if (titleSearchActive()) {
     renderGlobalTitleSearch(grid);
@@ -2530,12 +2659,7 @@ function renderRatedGrid() {
   const grid = document.getElementById('ratedGrid');
   if (!grid) return;
   const rated = sortMovies(Object.values(state.movies || {}).filter(m => Number(m.rating || 0) > 0).filter(matchesGlobalFilters), 'rating-desc');
-  const untaggedCount = rated.filter(m => !m.tagged && m.source === 'wikipedia').length;
-  const btn = document.getElementById('tagUntaggedBtn');
-  if (btn) {
-    btn.style.display = untaggedCount > 0 ? 'inline-flex' : 'none';
-    if (untaggedCount > 0) btn.textContent = `Tag ${untaggedCount} Untagged`;
-  }
+  updateAiTagButton();
   const count = document.getElementById('ratedCount');
   if (count) count.textContent = rated.length ? `${rated.length} titles` : 'none yet';
   grid.innerHTML = '';
@@ -2571,9 +2695,6 @@ function updateVisibleSections() {
   }
   if (activeTab === 'hidden') {
     showAuditSection(['hiddenSep','hiddenHeader','hiddenGrid']);
-  }
-  if (activeTab === 'rejected') {
-    showAuditSection(['rejectedSep','rejectedHeader','rejectedGrid']);
   }
 }
 
@@ -2631,78 +2752,6 @@ function showMorePoolTitles() {
 function showMoreHiddenTitles() {
   hiddenVisibleLimit += 80;
   renderHiddenGrid();
-}
-
-function renderRejectedGrid() {
-  const grid = document.getElementById('rejectedGrid');
-  if (!grid) return;
-  const rows = sortMovies(rejectedEntries().filter(matchesTitleSearch), 'updated-desc');
-  document.getElementById('rejectedCount').textContent = rows.length ? `${rows.length} rejected` : 'nothing rejected';
-  if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>Nothing Rejected Yet</h3></div>`; return; }
-  grid.innerHTML = rows.map(r => {
-    const title = (r.title || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    const reason = (r.reason || '').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    const key = r.key.replace(/'/g,"\\'");
-    const retries = Number(r.retryCount || 0);
-    const retryText = retries ? `retried ${retries}/${REJECTED_REFRESH_MAX_ATTEMPTS}` : 'manual retry available';
-    return `<div class="audit-row">
-      <div class="audit-title">${title}</div>
-      <div class="audit-muted">—</div>
-      <div>${r.mode||'all'}</div>
-      <div class="audit-muted">${r.source||'wiki'}</div>
-      <div class="audit-muted">${reason} · ${retryText}</div>
-      <div class="audit-muted">${r.at ? new Date(r.at).toLocaleString() : ''}</div>
-      <div class="audit-actions"><button class="card-act" onclick="retryRejectedTitle('${key}',event)">retry</button><button class="card-act del" onclick="forgetRejectedTitle('${key}',event)">✕</button></div>
-    </div>`;
-  }).join('');
-}
-
-async function retryRejectedTitle(key, e) {
-  if (e) e.stopPropagation();
-  const item = rejectedEntries().find(x => x.key === key);
-  if (!item) return;
-  const mode = item.mode || 'all';
-  showFetchProgress('Retrying rejected title...', 12, item.title || '');
-  try {
-    const movie = await fetchWikiMovie(item.title, mode);
-    hideFetchProgress();
-    if (!movie) {
-      recordRejectedTitle(item.title, mode, 'still not a usable Hindi/English movie or show', item.source || 'retry', { retry:true });
-      saveLocalState(); render();
-      showToast(`Still rejected: "${item.title}"`, 'error');
-      return;
-    }
-    if (state.movies[movie.id]) {
-      delete state.rejectedWikiTitles[key];
-      saveLocalState();
-      showToast(`Already in pool: "${state.movies[movie.id].title}"`, '');
-      render();
-      return;
-    }
-    if (isMovieHidden(movie)) {
-      delete state.rejectedWikiTitles[key];
-      saveLocalState();
-      showToast(`Still hidden: "${movie.title}"`, '');
-      render();
-      return;
-    }
-    delete state.rejectedWikiTitles[key];
-    state.movies[movie.id] = movie;
-    runHousekeeping(false);
-    saveLocalState(); syncDrive(); render();
-    showToast(`Added "${movie.title}" from rejected`, 'success');
-  } catch(err) {
-    hideFetchProgress();
-    recordRejectedTitle(item.title, mode, err.message || 'retry failed', item.source || 'retry', { retry:true });
-    saveLocalState(); render();
-    showToast(`Retry failed: "${item.title}"`, 'error');
-  }
-}
-
-function forgetRejectedTitle(key, e) {
-  if (e) e.stopPropagation();
-  delete state.rejectedWikiTitles[key];
-  saveLocalState(); render();
 }
 
 function renderRateGrid() { renderRecs(); }
@@ -3045,17 +3094,14 @@ function scoreMovies() {
 function rateMovie(id, rating) {
   const movie = state.movies[id];
   if (!movie) return;
-  movie.rating = rating;
-  movie.watchlist = false;
-  if (!movie.tagged) {
-    tagMovie(movie);
-    rebuildTagBrain();
-  }
+  const nextRating = Number(movie.rating || 0) === Number(rating) ? 0 : Number(rating);
+  movie.rating = nextRating;
+  if (nextRating > 0) movie.watchlist = false;
   touchRecord(movie);
   collapseDuplicateMovies(state.movies);
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
-  showToast(`"${movie.title}" → ${rating}/5`, 'success');
+  showToast(nextRating ? `"${movie.title}" → ${nextRating}/5` : `Removed rating from "${movie.title}"`, nextRating ? 'success' : '');
 }
 
 // ─────────────────────────────────────────────
@@ -3076,12 +3122,21 @@ function deleteMovie(id, e) {
 function markWrongPick(id, e) {
   if (e) e.stopPropagation();
   const m = state.movies[id];
-  if (!m || !confirm(`Mark "${m.title}" as a wrong pick? It will be hidden and skipped in future fetches.`)) return;
+  if (!m || !confirm(`Mark "${m.title}" as a wrong pick? It will be removed and skipped in future fetches.`)) return;
   const stamp = nowStamp();
-  state.hiddenTitles[id] = touchRecord({ ...m, hiddenAt: stamp, wrongPick: true, retagStatus:'wrong-pick', retagMessage:'marked wrong pick' }, stamp);
+  state.wrongPicks = state.wrongPicks || {};
+  const key = normaliseTitleKey(m.wikiTitle || m.pageTitle || m.title) || id;
+  state.wrongPicks[key] = {
+    id,
+    title:m.title || '',
+    wikiTitle:m.wikiTitle || '',
+    pageTitle:m.pageTitle || '',
+    wikiPageId:m.wikiPageId || wikiPageIdFromMovie(m),
+    at:stamp,
+    updatedAt:stamp
+  };
   state.deletedMovieRecords = state.deletedMovieRecords || {};
   state.deletedMovieRecords[id] = { id, reason:'wrong-pick', at:stamp, updatedAt:stamp };
-  recordRejectedTitle(m.wikiTitle || m.pageTitle || m.title, m.format ? 'shows' : 'movies', 'wrong pick marked by user', 'wrong-pick');
   delete state.movies[id];
   rebuildTagBrain();
   computeTagWeights();
@@ -3156,19 +3211,7 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
 
 function refreshMovieTags(movie, opts={}) {
   if (!movie?.storyText) return movie;
-  const built = buildStoryTagSet(movie.storyText, movie, descriptorCorpusStats(), {
-    includeContext: !!opts.includeContext,
-    maxTags: opts.maxTags || MAX_STORY_TAGS,
-    evidenceLimit: opts.evidenceLimit || 18,
-    descriptorLimit: opts.descriptorLimit || 36,
-    descriptorSlice: opts.descriptorSlice || 30
-  });
-  movie.rawDescriptors = built.rawDescriptors;
-  movie.descriptorTags = built.descriptorTags;
-  movie.coreTags = built.coreTags;
-  movie.plotTags = built.plotTags;
-  movie.tags = built.tags;
-  movie.tagged = built.tagged;
+  if (!hasCurrentAiTags(movie)) clearGeneratedTags(movie);
   touchRecord(movie);
   return movie;
 }
@@ -3298,7 +3341,6 @@ async function retagMovie(id, e) {
       return;
     }
     const updated = applyFreshWikiMovie(id, fresh, m);
-    refreshMovieTags(updated, {includeContext:true, maxTags:40});
     rebuildTagBrain();
     computeTagWeights();
     saveLocalState(); syncDrive(); render();
@@ -3330,22 +3372,16 @@ function toggleTags(id, e) {
 // HOUSEKEEPING (local dedup)
 // ─────────────────────────────────────────────
 function runHousekeeping(manual=true, deferCanonical=false) {
-  const descriptorStats = descriptorCorpusStats();
   Object.values(state.movies).forEach(m => {
     m.genres = movieGenres(m);
-    const existing = cleanTagArray(m.tags || [], null, false);
-    if (m.source === 'wikipedia' && m.storyText) {
-      const built = buildStoryTagSet(m.storyText, m, descriptorStats);
-      m.rawDescriptors = built.rawDescriptors;
-      m.descriptorTags = built.descriptorTags;
-      m.tags = built.tags;
-      m.coreTags = built.coreTags;
-      m.plotTags = built.plotTags;
+    if (hasCurrentAiTags(m)) {
+      m.tags = cleanTagArray(m.tags || [], m, false);
+      m.coreTags = [...m.tags];
+      m.plotTags = [...m.tags];
+      m.descriptorTags = [...m.tags];
+      m.rawDescriptors = [];
     } else {
-      m.tags = cleanTagArray(existing, m, false);
-      m.coreTags = cleanTagArray(recommendationTags(m.tags), m, false);
-      m.plotTags = [];
-      m.descriptorTags = [];
+      clearGeneratedTags(m);
     }
     m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length || (m.descriptorTags && m.descriptorTags.length));
   });
@@ -3562,18 +3598,17 @@ function updateMinYear(val) {
 }
 
 async function resetAllData() {
-  if (!confirm('Reset CineLens? This clears ratings, watchlist, pool, hidden titles, rejected titles and tag brain.')) return;
+  if (!confirm('Reset CineLens? This clears ratings, watchlist, pool, hidden titles, wrong picks and tag data.')) return;
   stopFetching({silent:true});
   state.movies = {};
       state.tagWeights = {};
       state.genreWeights = {};
   state.hiddenTitles = {};
+  state.wrongPicks = {};
   state.deletedMovieRecords = {};
   state.tagStats = { candidates:0, tags:0, rebuiltAt:'' };
   state.settings.tagPreferences = {};
   delete state.canonicalTagStats;
-  state.rejectedWikiTitles = {};
-  state.rejectedRefresh = { additionsSinceRefresh:0, lastRunAt:0, totalRuns:0 };
   state.discoveryCursor = {};
   ensureDiscoveryCursor();
   state.poolFetched = false;
@@ -3600,7 +3635,7 @@ function touchRecord(record, stamp=nowStamp()) {
 
 function recordTimestamp(record) {
   if (!record || typeof record !== 'object') return 0;
-  return Date.parse(record._updatedAt || record.updatedAt || record.hiddenAt || record.rejectedAt || record.at || '') || 0;
+  return Date.parse(record._updatedAt || record.updatedAt || record.hiddenAt || record.at || '') || 0;
 }
 
 function dataTimestamp(data) {
@@ -3641,7 +3676,7 @@ function ensureSyncMetadata({touchDataset=false}={}) {
   Object.values(state.deletedMovieRecords || {}).forEach(record => {
     if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
   });
-  Object.values(state.rejectedWikiTitles || {}).forEach(record => {
+  Object.values(state.wrongPicks || {}).forEach(record => {
     if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
   });
   if (!state.meta) state.meta = {};
@@ -3658,10 +3693,9 @@ function exportCinelensData() {
     movies: state.movies,
     settings: state.settings,
     hiddenTitles: state.hiddenTitles,
+    wrongPicks: state.wrongPicks,
     deletedMovieRecords: state.deletedMovieRecords,
     tagStats: state.tagStats,
-    rejectedWikiTitles: state.rejectedWikiTitles,
-    rejectedRefresh: state.rejectedRefresh,
     discoveryCursor: state.discoveryCursor
   };
 }
@@ -3671,6 +3705,7 @@ function normaliseDiscoveryCursor(cursor={}) {
   Object.entries(cursor || {}).forEach(([key, value]) => {
     clean[key] = {
       categoryIndex: Math.max(0, Number(value?.categoryIndex) || 0),
+      categoryTitle: String(value?.categoryTitle || ''),
       offset: Math.max(0, Number(value?.offset) || 0),
       cycles: Math.max(0, Number(value?.cycles) || 0)
     };
@@ -3715,10 +3750,9 @@ function normaliseIncomingData(d={}) {
     movies: d.movies || {},
     settings,
     hiddenTitles: d.hiddenTitles || {},
+    wrongPicks: d.wrongPicks || {},
     deletedMovieRecords: d.deletedMovieRecords || {},
     tagStats,
-    rejectedWikiTitles: d.rejectedWikiTitles || {},
-    rejectedRefresh: d.rejectedRefresh || {},
     discoveryCursor: normaliseDiscoveryCursor(d.discoveryCursor || {})
   };
 }
@@ -3767,19 +3801,27 @@ function mergeRemoteData(remoteRaw={}) {
 
   const movieMerge = mergeRecordMap(localMovies, remoteMovies);
   const hiddenMerge = mergeRecordMap(state.hiddenTitles || {}, remote.hiddenTitles || {}, {preferHidden:true});
-  const rejectedMerge = mergeRecordMap(state.rejectedWikiTitles || {}, remote.rejectedWikiTitles || {});
+  const wrongPickMerge = mergeRecordMap(state.wrongPicks || {}, remote.wrongPicks || {});
   const discoveryMerge = mergeDiscoveryCursor(state.discoveryCursor || {}, remote.discoveryCursor || {});
   state.movies = movieMerge.merged;
   state.hiddenTitles = hiddenMerge.merged;
+  state.wrongPicks = wrongPickMerge.merged;
+  const migratedWrongPicks = migrateVisibleWrongPicks();
+  Object.entries(state.movies || {}).forEach(([id, movie]) => {
+    if (wrongPickMatches(movie)) {
+      delete state.movies[id];
+      localChanged = true;
+      remoteChanged = true;
+    }
+  });
   Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
   Object.values(state.hiddenTitles || {}).forEach(normaliseStoredTitleRecord);
   const collapsedMovies = collapseDuplicateMovies(state.movies);
   const collapsedHidden = collapseDuplicateMovies(state.hiddenTitles);
-  state.rejectedWikiTitles = rejectedMerge.merged;
   state.discoveryCursor = discoveryMerge.merged;
   ensureDiscoveryCursor();
-  localChanged = localChanged || tombstoneMerge.localChanged || movieMerge.localChanged || hiddenMerge.localChanged || rejectedMerge.localChanged || discoveryMerge.localChanged;
-  remoteChanged = remoteChanged || tombstoneMerge.remoteChanged || movieMerge.remoteChanged || hiddenMerge.remoteChanged || rejectedMerge.remoteChanged || discoveryMerge.remoteChanged || collapsedMovies || collapsedHidden;
+  localChanged = localChanged || tombstoneMerge.localChanged || movieMerge.localChanged || hiddenMerge.localChanged || wrongPickMerge.localChanged || discoveryMerge.localChanged || migratedWrongPicks;
+  remoteChanged = remoteChanged || tombstoneMerge.remoteChanged || movieMerge.remoteChanged || hiddenMerge.remoteChanged || wrongPickMerge.remoteChanged || discoveryMerge.remoteChanged || collapsedMovies || collapsedHidden || migratedWrongPicks;
 
   if (remoteSettingsStamp > localSettingsStamp) {
     state.settings = {...state.settings, ...remote.settings};
@@ -3794,17 +3836,13 @@ function mergeRemoteData(remoteRaw={}) {
 
   if (remoteStamp > localStamp) {
     state.tagStats = remote.tagStats || state.tagStats;
-    state.rejectedRefresh = {...state.rejectedRefresh, ...remote.rejectedRefresh};
     state.meta = {...state.meta, ...remote.meta};
     localChanged = true;
   } else if (localStamp > remoteStamp) {
     remoteChanged = true;
-  } else {
-    state.rejectedRefresh = {...state.rejectedRefresh, ...remote.rejectedRefresh};
   }
 
   delete state.canonicalTagStats;
-  ensureRejectedRefreshState(!remoteRaw.rejectedRefresh);
   ensureSyncMetadata();
   return {localChanged, remoteChanged};
 }
@@ -3834,16 +3872,14 @@ function loadLocalState() {
       if (s.settings) state.settings={...state.settings,...s.settings};
       state.settings.tagPreferences = state.settings.tagPreferences || {};
       if (s.hiddenTitles) state.hiddenTitles=s.hiddenTitles;
+      if (s.wrongPicks) state.wrongPicks=s.wrongPicks;
       if (s.deletedMovieRecords) state.deletedMovieRecords=s.deletedMovieRecords;
       if (s.tagStats) state.tagStats=s.tagStats;
       else if (s.canonicalTagStats) state.tagStats={candidates:s.canonicalTagStats.raw||0,tags:s.canonicalTagStats.canonical||0,rebuiltAt:s.canonicalTagStats.rebuiltAt||''};
       delete state.canonicalTagStats;
       if (s.meta) state.meta={...state.meta,...s.meta};
-      if (s.rejectedWikiTitles) state.rejectedWikiTitles=s.rejectedWikiTitles;
-      if (s.rejectedRefresh) state.rejectedRefresh={...state.rejectedRefresh,...s.rejectedRefresh};
       if (s.discoveryCursor) state.discoveryCursor=normaliseDiscoveryCursor(s.discoveryCursor);
       ensureDiscoveryCursor();
-      ensureRejectedRefreshState(!s.rejectedRefresh);
       if (s.drive) {
         state.drive.connected=false;
         state.drive.enabled=!!s.drive.enabled || !!s.drive.fileId;
