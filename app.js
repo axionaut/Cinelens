@@ -21,7 +21,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   hindiShows: 'Category:Indian_television_series_debuts_by_year'
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v2';
+const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
 const AI_TAG_MAX_COUNT = 20;
@@ -486,14 +486,18 @@ function rebuildTagBrain() {
     });
     const fallback = rawScoringTags(movie).map(tag => labelFor.get(tag) || canonicalTagFeatures(tag).phrase).filter(Boolean);
     const normalizedTags = cleanTagArray([...new Set(learned.length ? learned : fallback)].filter(tag => tagAllowed(movie, tag)), movie, false);
-    movie.tags = normalizedTags;
-    movie.coreTags = normalizedTags;
-    movie.plotTags = normalizedTags;
-    movie.descriptorTags = normalizedTags;
-    movie.tagged = normalizedTags.length > 0;
+    const originalTags = cleanTagArray(rawScoringTags(movie).filter(tag => tagAllowed(movie, tag)), movie, false);
+    const optimizedTags = originalTags.length >= AI_TAG_MIN_COUNT && normalizedTags.length < AI_TAG_MIN_COUNT
+      ? originalTags
+      : normalizedTags;
+    movie.tags = optimizedTags;
+    movie.coreTags = optimizedTags;
+    movie.plotTags = optimizedTags;
+    movie.descriptorTags = optimizedTags;
+    movie.tagged = optimizedTags.length > 0;
     delete movie.canonicalTags;
     delete movie.canonicalTagVersion;
-    if (before !== JSON.stringify(normalizedTags)) {
+    if (before !== JSON.stringify(optimizedTags)) {
       changed++;
       touchRecord(movie, now);
     }
@@ -721,7 +725,7 @@ function hasCurrentAiTags(movie) {
     movie.aiTagging.promptVersion === AI_TAG_PROMPT_VERSION &&
     movie.aiTagging.storyHash === aiStoryHash(movie.storyText) &&
     Array.isArray(movie.tags) &&
-    movie.tags.length
+    movie.tags.length >= AI_TAG_MIN_COUNT
   );
 }
 
@@ -801,9 +805,13 @@ function applyAiTagAliases(aliases={}) {
   [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(movie => {
     const before = JSON.stringify(movie.tags || []);
     ['tags','coreTags','plotTags','descriptorTags'].forEach(key => {
-      movie[key] = [...new Set((movie[key] || [])
+      const original = [...new Set((movie[key] || []).map(normaliseTagName).filter(Boolean))];
+      const optimized = [...new Set(original
         .map(tag => aliasMap.get(normaliseTagName(tag)) || normaliseTagName(tag))
         .filter(tag => tag && tagAllowed(movie, tag)))];
+      movie[key] = original.length >= AI_TAG_MIN_COUNT && optimized.length < AI_TAG_MIN_COUNT
+        ? original.filter(tag => tagAllowed(movie, tag))
+        : optimized;
     });
     if (before !== JSON.stringify(movie.tags || [])) {
       changed++;
@@ -860,6 +868,8 @@ async function requestAiTags(movies, opts={}) {
       })),
       optimizeVocabulary:true,
       tagVocabulary:aiTagVocabulary(),
+      minimumTags:AI_TAG_MIN_COUNT,
+      maximumTags:AI_TAG_MAX_COUNT,
       retryReason:opts.retryReason || ''
     })
   });
@@ -905,7 +915,7 @@ async function requestAiTags(movies, opts={}) {
 async function applyAiTags(movie, opts={}) {
   if (!movie?.storyText) return movie;
   if (!opts.force && hasCurrentAiTags(movie)) return movie;
-  await requestAiTags(completeAiBatch([movie]));
+  await requestAiTags([movie]);
   if (!hasCurrentAiTags(movie)) throw new Error(movie.aiTagging?.error || 'AI returned no usable tags');
   return movie;
 }
@@ -1544,7 +1554,7 @@ async function fetchShowSourceTitles(laneKey='englishShows') {
   return newestTitleFirst([...new Set(titles)]);
 }
 
-async function fetchWikiSearchTitles(query) {
+async function fetchWikiSearchTitles(query, opts={}) {
   const q = (query || '').trim();
   if (!q) return [];
   try {
@@ -1552,6 +1562,7 @@ async function fetchWikiSearchTitles(query) {
     const data = await wikiApiJson(url);
     return (data.query?.search || []).map(item => item.title);
   } catch(e) {
+    if (opts.throwOnError) throw e;
     return [];
   }
 }
@@ -1907,18 +1918,27 @@ async function searchWikipediaFromUnifiedInput() {
   }
   if (btn) { btn.disabled = true; btn.textContent = 'searching...'; }
   try {
+    fetchAbortRequested = false;
     wikiSearchQuery = query;
-    wikiSearchResults = (await fetchWikiSearchTitles(query))
+    const diagnostics = {};
+    const exactMovie = await fetchWikiTitleAcrossModes(query, ['all'], diagnostics, {ai:false});
+    if (exactMovie) {
+      await fetchUnifiedWikiResult(exactMovie.wikiTitle || exactMovie.pageTitle || query, '', {preloaded:exactMovie});
+      return;
+    }
+    wikiSearchResults = (await fetchWikiSearchTitles(query, {throwOnError:true}))
       .filter(title => !obviousNonMovieTitle(title))
       .slice(0, 8);
     renderWikiSearchResults();
-    if (!wikiSearchResults.length) showToast(`No Wikipedia title found for "${query}"`, '');
+    if (!wikiSearchResults.length) showToast(`Wikipedia returned no matching title for "${query}".`, '');
+  } catch(e) {
+    showToast(`Wikipedia search failed: ${e.message || e}`, 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'search wiki'; }
   }
 }
 
-async function fetchUnifiedWikiResult(title, rawUrl='') {
+async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
   const btn = document.getElementById('unifiedSearchBtn');
   const mode = expansionMode();
   let existing = Object.values(state.movies || {}).find(movie =>
@@ -1938,15 +1958,24 @@ async function fetchUnifiedWikiResult(title, rawUrl='') {
   showFetchProgress('Fetching from Wikipedia...', 12, title);
   try {
     const diagnostics = {};
-    const movie = rawUrl
+    const movie = opts.preloaded || (rawUrl
       ? await refreshTitleFromWikipedia(existing, {url:rawUrl, mode, diagnostics, acceptDifferentTitle:true})
-      : await fetchWikiTitleAcrossModes(title, mode === 'all' ? ['all'] : [mode, 'all'], diagnostics);
+      : await fetchWikiTitleAcrossModes(title, mode === 'all' ? ['all'] : [mode, 'all'], diagnostics));
     if (!movie) throw new Error(diagnostics.reason || 'Wikipedia page is not a usable movie or show');
     if (isMovieHidden(movie)) throw new Error('Title is hidden or blocked');
     existing = existing || state.movies[movie.id] || findExistingMovieByIdentity(movie);
     const stored = existing
       ? applyFreshWikiMovie(existing.id, movie, existing)
       : upsertMoviePreservingUserState(movie);
+    if (!hasCurrentAiTags(stored)) {
+      try {
+        await applyAiTags(stored, {force:true});
+      } catch(e) {
+        stored.retagStatus = 'needs-ai-tags';
+        stored.retagMessage = `AI returned fewer than ${AI_TAG_MIN_COUNT} usable tags`;
+        touchRecord(stored);
+      }
+    }
     wikiSearchResults = [];
     wikiSearchQuery = '';
     renderWikiSearchResults();
@@ -1959,8 +1988,10 @@ async function fetchUnifiedWikiResult(title, rawUrl='') {
     syncDrive();
     render();
     showToast(existing ? `Refreshed "${stored.title}"` : `Added "${stored.title}"`, 'success');
+    return true;
   } catch(e) {
     showToast(`Could not fetch "${title}": ${e.message || e}`, 'error');
+    return false;
   } finally {
     hideFetchProgress();
     if (btn) { btn.disabled = false; btn.textContent = 'search wiki'; }
@@ -3462,12 +3493,13 @@ async function retagFromStoredData(id, opts={}) {
     return updated;
   } catch(err) {
     const current = state.movies[id] || movie;
+    const reason = String(err?.message || current.aiTagging?.error || 'AI retag failed');
     current.needsManualUrl = false;
     current.retagStatus = 'needs-ai-tags';
-    current.retagMessage = 'AI retag pending';
+    current.retagMessage = reason.includes('too few usable tags') ? `AI returned fewer than ${AI_TAG_MIN_COUNT} usable tags` : 'AI retag pending';
     saveLocalState();
     render();
-    if (opts.errorToast !== false) showToast(`Could not refresh AI tags for "${current.title}".`, 'error');
+    if (opts.errorToast !== false) showToast(`Could not re-tag "${current.title}": ${reason}`, 'error');
     return null;
   } finally {
     hideFetchProgress();
