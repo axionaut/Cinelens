@@ -27,7 +27,7 @@ const AI_TAG_MIN_COUNT = 10;
 const AI_TAG_MAX_COUNT = 20;
 const AI_TAG_MIGRATION_VERSION = 1;
 const AI_TAG_BATCH_SIZE = 20;
-const AI_TAG_RETRY_LIMIT = 1;
+const AI_TAG_RETRY_LIMIT = 3;
 const AI_VOCABULARY_SAMPLE_SIZE = 240;
 const AI_REQUEST_DELAY_MS = 12000;
 const WIKI_LIST_SOURCES = {
@@ -821,8 +821,7 @@ function applyAiTagAliases(aliases={}) {
   return changed;
 }
 
-function applyAiTagResult(movie, result, model='') {
-  const cleaned = cleanAiTagResults(result, movie);
+function commitAiTagSet(movie, cleaned, model='') {
   if (cleaned.tags.length < AI_TAG_MIN_COUNT) throw new Error(`AI returned too few usable tags for ${movie.title}`);
   movie.tags = cleaned.tags;
   movie.coreTags = [...cleaned.tags];
@@ -844,9 +843,19 @@ function applyAiTagResult(movie, result, model='') {
   return movie;
 }
 
+function applyAiTagResult(movie, result, model='') {
+  return commitAiTagSet(movie, cleanAiTagResults(result, movie), model);
+}
+
+function mergeAiTagPartials(previous={tags:[], evidence:{}}, next={tags:[], evidence:{}}) {
+  const tags = [...new Set([...(previous.tags || []), ...(next.tags || [])])].slice(0, AI_TAG_MAX_COUNT);
+  return {tags, evidence:{...(previous.evidence || {}), ...(next.evidence || {})}};
+}
+
 async function requestAiTags(movies, opts={}) {
   const items = (movies || []).filter(movie => movie?.storyText).slice(0, AI_TAG_BATCH_SIZE);
   if (!items.length) return {tagged:0, failed:0};
+  const partials = opts.partials || {};
   const wait = Math.max(0, AI_REQUEST_DELAY_MS - (Date.now() - lastAiRequestAt));
   if (wait) await abortableSleep(wait);
   if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
@@ -855,18 +864,29 @@ async function requestAiTags(movies, opts={}) {
     method:'POST',
     headers:{'Content-Type':'text/plain;charset=utf-8'},
     body:JSON.stringify({
-      items:items.map((movie, index) => ({
-        id:movie.id,
-        title:movie.title,
-        year:movie.year,
-        format:movie.format ? 'show' : 'movie',
-        language:movie.language,
-        genres:movieGenres(movie),
-        storyText:movie.storyText,
-        excludedTags:[...new Set([...(movie.suppressedTags || []), ...(movie.suppressedRawTags || [])])],
-        preferredTagVocabulary:index === 0 ? aiTagVocabulary().map(item => item.tag) : undefined
-      })),
+      items:items.map((movie, index) => {
+        const partial = partials[String(movie.id)] || {tags:[]};
+        const existingTags = partial.tags || [];
+        const missingTags = Math.max(0, AI_TAG_MIN_COUNT - existingTags.length);
+        const continuationInstruction = existingTags.length
+          ? `\n\nCINELENS TAG CONTINUATION: ${existingTags.length} grounded tags are already accepted: ${existingTags.join(', ')}. Generate at least ${missingTags} additional distinct story tags. Do not repeat, rename, or paraphrase the accepted tags.`
+          : '';
+        return {
+          id:movie.id,
+          title:movie.title,
+          year:movie.year,
+          format:movie.format ? 'show' : 'movie',
+          language:movie.language,
+          genres:movieGenres(movie),
+          storyText:`${movie.storyText}${continuationInstruction}`,
+          existingTags,
+          minimumAdditionalTags:missingTags,
+          excludedTags:[...new Set([...(movie.suppressedTags || []), ...(movie.suppressedRawTags || []), ...existingTags])],
+          preferredTagVocabulary:index === 0 ? aiTagVocabulary().map(item => item.tag) : undefined
+        };
+      }),
       optimizeVocabulary:true,
+      continueTagging:Object.keys(partials).length > 0,
       tagVocabulary:aiTagVocabulary(),
       minimumTags:AI_TAG_MIN_COUNT,
       maximumTags:AI_TAG_MAX_COUNT,
@@ -881,30 +901,45 @@ async function requestAiTags(movies, opts={}) {
   let tagged = 0;
   let failed = 0;
   const retryItems = [];
+  const retryPartials = {};
   items.forEach(movie => {
     try {
       const result = byId.get(String(movie.id));
       if (!result) throw new Error('AI returned no result');
-      applyAiTagResult(movie, result, payload.model);
-      tagged++;
+      const previous = partials[String(movie.id)] || {tags:[], evidence:{}};
+      const merged = mergeAiTagPartials(previous, cleanAiTagResults(result, movie));
+      if (merged.tags.length >= AI_TAG_MIN_COUNT) {
+        commitAiTagSet(movie, merged, payload.model);
+        tagged++;
+      } else {
+        retryItems.push(movie);
+        retryPartials[String(movie.id)] = merged;
+        throw new Error(`AI has built ${merged.tags.length}/${AI_TAG_MIN_COUNT} usable tags`);
+      }
     } catch(e) {
-      retryItems.push(movie);
+      if (!retryItems.includes(movie)) {
+        retryItems.push(movie);
+        retryPartials[String(movie.id)] = partials[String(movie.id)] || {tags:[], evidence:{}};
+      }
+      const partialCount = retryPartials[String(movie.id)]?.tags?.length || 0;
       movie.aiTagging = {
-        status:'failed',
+        status:'building',
         promptVersion:AI_TAG_PROMPT_VERSION,
         storyHash:aiStoryHash(movie.storyText),
         error:String(e?.message || e),
+        partialCount,
         attemptedAt:new Date().toISOString()
       };
       movie.retagStatus = 'needs-ai-tags';
-      movie.retagMessage = 'AI tags pending';
+      movie.retagMessage = `AI building tags ${partialCount}/${AI_TAG_MIN_COUNT}`;
       failed++;
     }
   });
   if (retryItems.length && Number(opts.retry || 0) < AI_TAG_RETRY_LIMIT) {
     const retryResult = await requestAiTags(retryItems, {
       retry:Number(opts.retry || 0) + 1,
-      retryReason:`Previous response produced fewer than ${AI_TAG_MIN_COUNT} usable tags. Return 12-20 distinct, story-grounded tags and avoid excluded tags.`
+      partials:retryPartials,
+      retryReason:`Continue the existing tag sets. Add at least the requested minimumAdditionalTags for each title. Return only new, distinct, story-grounded tags; do not repeat existingTags or excludedTags.`
     });
     tagged += retryResult.tagged;
     failed = Math.max(0, failed - retryResult.tagged);
