@@ -27,6 +27,8 @@ const AI_TAG_MIN_COUNT = 10;
 const AI_TAG_MAX_COUNT = 20;
 const AI_TAG_MIGRATION_VERSION = 1;
 const AI_TAG_BATCH_SIZE = 20;
+const AI_TAG_RETRY_LIMIT = 1;
+const AI_VOCABULARY_SAMPLE_SIZE = 240;
 const AI_REQUEST_DELAY_MS = 12000;
 const WIKI_LIST_SOURCES = {
   showsIndex: 'Lists of television programs',
@@ -243,6 +245,7 @@ let state = {
   hiddenTitles: {},
   wrongPicks: {},
   deletedMovieRecords: {},
+  tagAliases: {},
   tagStats: { candidates:0, tags:0, rebuiltAt:'' },
   discoveryCursor: {},
   meta: { updatedAt:'' },
@@ -724,6 +727,8 @@ function hasCurrentAiTags(movie) {
 
 function clearGeneratedTags(movie) {
   if (!movie) return;
+  const suppressedTags = [...new Set((movie.suppressedTags || []).map(normaliseTagName).filter(Boolean))];
+  const suppressedRawTags = [...new Set((movie.suppressedRawTags || []).map(normaliseTagName).filter(Boolean))];
   movie.tags = [];
   movie.coreTags = [];
   movie.plotTags = [];
@@ -732,8 +737,8 @@ function clearGeneratedTags(movie) {
   movie.aiTagEvidence = {};
   movie.aiTagging = null;
   movie.tagged = false;
-  movie.suppressedTags = [];
-  movie.suppressedRawTags = [];
+  movie.suppressedTags = suppressedTags;
+  movie.suppressedRawTags = suppressedRawTags;
   if (movie.source === 'wikipedia' && movie.storyText) {
     movie.retagStatus = 'needs-ai-tags';
     movie.retagMessage = 'AI tags pending';
@@ -760,16 +765,52 @@ function cleanAiTagResults(result, movie) {
   const evidence = {};
   const tags = [];
   (result?.tags || []).forEach(item => {
-    const tag = normaliseTagName(item?.tag);
+    const rawTag = normaliseTagName(item?.tag);
+    const tag = normaliseTagName(state.tagAliases?.[rawTag] || rawTag);
     const confidence = Number(item?.confidence);
     const support = String(item?.evidence || '').trim().slice(0, 240);
-    if (!tag || confidence < AI_TAG_MIN_CONFIDENCE || !support || genres.has(tag) || isMetaTag(tag)) return;
+    if (!tag || confidence < AI_TAG_MIN_CONFIDENCE || !support || genres.has(tag) || isMetaTag(tag) || !tagAllowed(movie, tag) || !rawTagAllowed(movie, tag)) return;
     const cleaned = cleanTagArray([tag], movie, false)[0];
     if (!cleaned || tags.includes(cleaned)) return;
     tags.push(cleaned);
     evidence[cleaned] = { confidence, evidence:support };
   });
   return {tags:tags.slice(0, AI_TAG_MAX_COUNT), evidence};
+}
+
+function aiTagVocabulary() {
+  const frequency = new Map();
+  [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(movie => {
+    rawScoringTags(movie).forEach(tag => frequency.set(tag, (frequency.get(tag) || 0) + 1));
+  });
+  return [...frequency.entries()]
+    .sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, AI_VOCABULARY_SAMPLE_SIZE)
+    .map(([tag, count]) => ({tag, count}));
+}
+
+function applyAiTagAliases(aliases={}) {
+  const entries = Object.entries(aliases || {})
+    .map(([from, to]) => [normaliseTagName(from), normaliseTagName(to)])
+    .filter(([from, to]) => from && to && from !== to);
+  if (!entries.length) return 0;
+  const aliasMap = new Map(entries);
+  state.tagAliases = {...(state.tagAliases || {})};
+  entries.forEach(([from, to]) => { state.tagAliases[from] = to; });
+  let changed = 0;
+  [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(movie => {
+    const before = JSON.stringify(movie.tags || []);
+    ['tags','coreTags','plotTags','descriptorTags'].forEach(key => {
+      movie[key] = [...new Set((movie[key] || [])
+        .map(tag => aliasMap.get(normaliseTagName(tag)) || normaliseTagName(tag))
+        .filter(tag => tag && tagAllowed(movie, tag)))];
+    });
+    if (before !== JSON.stringify(movie.tags || [])) {
+      changed++;
+      touchRecord(movie);
+    }
+  });
+  return changed;
 }
 
 function applyAiTagResult(movie, result, model='') {
@@ -795,7 +836,7 @@ function applyAiTagResult(movie, result, model='') {
   return movie;
 }
 
-async function requestAiTags(movies) {
+async function requestAiTags(movies, opts={}) {
   const items = (movies || []).filter(movie => movie?.storyText).slice(0, AI_TAG_BATCH_SIZE);
   if (!items.length) return {tagged:0, failed:0};
   const wait = Math.max(0, AI_REQUEST_DELAY_MS - (Date.now() - lastAiRequestAt));
@@ -813,16 +854,22 @@ async function requestAiTags(movies) {
         format:movie.format ? 'show' : 'movie',
         language:movie.language,
         genres:movieGenres(movie),
-        storyText:movie.storyText
-      }))
+        storyText:movie.storyText,
+        excludedTags:[...new Set([...(movie.suppressedTags || []), ...(movie.suppressedRawTags || [])])]
+      })),
+      optimizeVocabulary:true,
+      tagVocabulary:aiTagVocabulary(),
+      retryReason:opts.retryReason || ''
     })
   });
   if (!response.ok) throw new Error(`AI tagger HTTP ${response.status}`);
   const payload = await response.json();
   if (!payload.ok) throw new Error(payload.error || 'AI tagging failed');
+  applyAiTagAliases(payload.tagAliases || payload.aliases || {});
   const byId = new Map((payload.results || []).map(result => [String(result.id), result]));
   let tagged = 0;
   let failed = 0;
+  const retryItems = [];
   items.forEach(movie => {
     try {
       const result = byId.get(String(movie.id));
@@ -830,6 +877,7 @@ async function requestAiTags(movies) {
       applyAiTagResult(movie, result, payload.model);
       tagged++;
     } catch(e) {
+      retryItems.push(movie);
       movie.aiTagging = {
         status:'failed',
         promptVersion:AI_TAG_PROMPT_VERSION,
@@ -842,15 +890,36 @@ async function requestAiTags(movies) {
       failed++;
     }
   });
+  if (retryItems.length && Number(opts.retry || 0) < AI_TAG_RETRY_LIMIT) {
+    const retryResult = await requestAiTags(retryItems, {
+      retry:Number(opts.retry || 0) + 1,
+      retryReason:`Previous response produced fewer than ${AI_TAG_MIN_COUNT} usable tags. Return 12-20 distinct, story-grounded tags and avoid excluded tags.`
+    });
+    tagged += retryResult.tagged;
+    failed = Math.max(0, failed - retryResult.tagged);
+  }
   return {tagged, failed};
 }
 
 async function applyAiTags(movie, opts={}) {
   if (!movie?.storyText) return movie;
   if (!opts.force && hasCurrentAiTags(movie)) return movie;
-  await requestAiTags([movie]);
+  await requestAiTags(completeAiBatch([movie]));
   if (!hasCurrentAiTags(movie)) throw new Error(movie.aiTagging?.error || 'AI returned no usable tags');
   return movie;
+}
+
+function completeAiBatch(priorityMovies=[]) {
+  const batch = [];
+  const seen = new Set();
+  const add = movie => {
+    if (!movie?.id || !movie.storyText || seen.has(String(movie.id)) || batch.length >= AI_TAG_BATCH_SIZE) return;
+    seen.add(String(movie.id));
+    batch.push(movie);
+  };
+  priorityMovies.forEach(add);
+  aiTagCandidates().forEach(add);
+  return batch;
 }
 
 function meaningfulTagCount(movie) { return rawScoringTags(movie).length; }
@@ -1336,6 +1405,21 @@ function wrongPickMatches(value) {
     .some(title => normaliseTitleKey(title) === key));
 }
 
+function unblockTitleForManualSearch(value) {
+  const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
+  if (!key) return false;
+  let changed = false;
+  Object.entries(state.wrongPicks || {}).forEach(([recordKey, item]) => {
+    const matches = [item.title, item.wikiTitle, item.pageTitle]
+      .some(title => normaliseTitleKey(title) === key);
+    if (!matches) return;
+    delete state.wrongPicks[recordKey];
+    if (item.id && state.deletedMovieRecords?.[item.id]) delete state.deletedMovieRecords[item.id];
+    changed = true;
+  });
+  return changed;
+}
+
 function migrateVisibleWrongPicks() {
   state.wrongPicks = state.wrongPicks || {};
   let changed = false;
@@ -1667,11 +1751,12 @@ async function expandPool(manual=true) {
 
   const flushPendingAiMovies = async () => {
     if (!pendingAiMovies.length || fetchAbortRequested) return;
-    const batch = pendingAiMovies.splice(0, AI_TAG_BATCH_SIZE);
+    const pendingBatch = pendingAiMovies.splice(0, AI_TAG_BATCH_SIZE);
+    const batch = completeAiBatch(pendingBatch.map(item => item.movie));
     try {
-      showFetchProgress(`AI tagging ${batch.length} titles...`, Math.min(96, attempts % 100), batch.map(item => item.movie.title).join(' · '));
-      await requestAiTags(batch.map(item => item.movie));
-      batch.forEach(({movie}) => {
+      showFetchProgress('AI tagging batch...', Math.min(96, attempts % 100), batch.map(movie => movie.title).join(' · '));
+      await requestAiTags(batch);
+      pendingBatch.forEach(({movie}) => {
         if (!hasCurrentAiTags(movie) || isMovieHidden(movie)) return;
         const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
         upsertMoviePreservingUserState(movie, existingMovie);
@@ -1840,10 +1925,14 @@ async function fetchUnifiedWikiResult(title, rawUrl='') {
     || sameCanonicalTitle(movie.wikiTitle, title)
     || sameCanonicalTitle(movie.pageTitle, title)
   );
-  if (hiddenTitleMatches(title) || wrongPickMatches(title)) {
-    showToast(`"${title}" is blocked from the pool.`, '');
+  const hiddenRecord = Object.values(state.hiddenTitles || {}).find(movie =>
+    [movie.title, movie.wikiTitle, movie.pageTitle].some(value => sameCanonicalTitle(value, title))
+  );
+  if (hiddenRecord) {
+    restoreHiddenMovie(hiddenRecord.id);
     return;
   }
+  unblockTitleForManualSearch(title);
   if (btn) { btn.disabled = true; btn.textContent = 'fetching...'; }
   showFetchProgress('Fetching from Wikipedia...', 12, title);
   try {
@@ -2422,11 +2511,11 @@ async function tagAllUntagged() {
       }
       if (!batch.length) continue;
       showFetchProgress(
-        `Building AI tags · ${index}/${queue.length}`,
+        `AI tagging batch · ${index}/${queue.length}`,
         Math.round(index / queue.length * 100),
         batch.map(movie => movie.title).join(' · ')
       );
-      const result = await requestAiTags(batch);
+      const result = await requestAiTags(completeAiBatch(batch));
       tagged += result.tagged;
       failed += result.failed;
       rebuildTagBrain();
@@ -2890,8 +2979,8 @@ function buildCard(movie, opts={}) {
       <div class="card-actions">
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
         ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
-        ${!hiddenView?`<button class="card-act wrong" onclick="markWrongPick('${safeId}',event)">wrong pick</button>`:''}
-        <button class="card-act del" onclick="deleteMovie('${safeId}',event)">✕</button>
+        ${!hiddenView?`<button class="card-act" onclick="deleteMovie('${safeId}',event)">hide</button>`:''}
+        <button class="card-act del" onclick="removeTitlePermanently('${safeId}',event)">remove</button>
       </div>
       ${contextLabel ? `<div class="tag-status">${contextLabel}</div>` : ''}
     </div>`;
@@ -3110,7 +3199,9 @@ function scoreMovies() {
 async function rateMovie(id, rating) {
   const movie = state.movies[id];
   if (!movie) return;
-  const nextRating = Number(movie.rating || 0) === Number(rating) ? 0 : Number(rating);
+  const currentRating = Number(movie.rating || 0);
+  const clickedRating = Number(rating);
+  const nextRating = currentRating === 1 && clickedRating === 1 ? 0 : clickedRating;
   movie.rating = nextRating;
   if (nextRating > 0) movie.watchlist = false;
   touchRecord(movie);
@@ -3141,10 +3232,10 @@ function deleteMovie(id, e) {
   showToast(`Hidden "${m.title}"`, '');
 }
 
-function markWrongPick(id, e) {
+function removeTitlePermanently(id, e) {
   if (e) e.stopPropagation();
-  const m = state.movies[id];
-  if (!m || !confirm(`Mark "${m.title}" as a wrong pick? It will be removed and skipped in future fetches.`)) return;
+  const m = state.movies[id] || state.hiddenTitles?.[id];
+  if (!m || !confirm(`Remove "${m.title}" from CineLens? It will stay blocked from automatic fetching and tagging, but you can add it again deliberately through search.`)) return;
   const stamp = nowStamp();
   state.wrongPicks = state.wrongPicks || {};
   const key = normaliseTitleKey(m.wikiTitle || m.pageTitle || m.title) || id;
@@ -3158,12 +3249,13 @@ function markWrongPick(id, e) {
     updatedAt:stamp
   };
   state.deletedMovieRecords = state.deletedMovieRecords || {};
-  state.deletedMovieRecords[id] = { id, reason:'wrong-pick', at:stamp, updatedAt:stamp };
+  state.deletedMovieRecords[id] = { id, reason:'removed', at:stamp, updatedAt:stamp };
   delete state.movies[id];
+  delete state.hiddenTitles[id];
   rebuildTagBrain();
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
-  showToast(`Marked wrong pick: "${m.title}"`, 'success');
+  showToast(`Removed "${m.title}"`, 'success');
 }
 
 function restoreHiddenMovie(id, e) {
@@ -3182,12 +3274,8 @@ function restoreHiddenMovie(id, e) {
 function forgetHiddenMovie(id, e) {
   if (e) e.stopPropagation();
   const movie = state.hiddenTitles?.[id];
-  if (!movie || !confirm(`Forget "${movie.title}" permanently? It may be fetched again later.`)) return;
-  delete state.hiddenTitles[id];
-  rebuildTagBrain();
-  computeTagWeights();
-  saveLocalState(); syncDrive(); render();
-  showToast(`Forgot "${movie.title}"`, '');
+  if (!movie) return;
+  removeTitlePermanently(id, e);
 }
 function toggleWatchlist(id, e) {
   if (e) e.stopPropagation();
@@ -3344,11 +3432,19 @@ async function retagFromStoredData(id, opts={}) {
   try {
     let updated = movie;
     if (movie.storyText) {
-      await applyAiTags(movie, {force:true});
+      try {
+        await applyAiTags(movie, {force:true});
+      } catch(firstError) {
+        const fresh = await refreshTitleFromWikipedia(movie, {ai:false});
+        if (!fresh) throw firstError;
+        updated = applyFreshWikiMovie(id, fresh, movie);
+        await applyAiTags(updated, {force:true});
+      }
     } else {
-      const fresh = await refreshTitleFromWikipedia(movie);
+      const fresh = await refreshTitleFromWikipedia(movie, {ai:false});
       if (!fresh) throw new Error('Stored Wikipedia page could not be refreshed');
       updated = applyFreshWikiMovie(id, fresh, movie);
+      await applyAiTags(updated, {force:true});
     }
     updated.needsManualUrl = false;
     updated.retagStatus = 'verified';
@@ -3636,26 +3732,40 @@ function updateMinYear(val) {
 }
 
 async function resetAllData() {
-  if (!confirm('Reset CineLens? This clears ratings, watchlist, pool, hidden titles, wrong picks and tag data.')) return;
+  if (!confirm('Reset CineLens completely? This permanently clears every local and Drive title, rating, tag, hidden item, removal block and discovery position.')) return;
   stopFetching({silent:true});
+  const resetAt = nowStamp();
   state.movies = {};
-      state.tagWeights = {};
-      state.genreWeights = {};
+  state.tagWeights = {};
+  state.genreWeights = {};
   state.hiddenTitles = {};
   state.wrongPicks = {};
   state.deletedMovieRecords = {};
+  state.tagAliases = {};
   state.tagStats = { candidates:0, tags:0, rebuiltAt:'' };
   state.settings.tagPreferences = {};
+  state.settings.titleSearch = '';
   delete state.canonicalTagStats;
   state.discoveryCursor = {};
   ensureDiscoveryCursor();
   state.poolFetched = false;
+  state.meta = {...(state.meta || {}), resetAt, updatedAt:resetAt};
   autoFetchPaused = true;
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   saveLocalState();
   render();
-  if (state.drive.connected || state.drive.accessToken) await syncDrive(false);
-  showToast('CineLens reset. Pool, hidden titles and ratings cleared.', 'success');
+  if ((state.drive.connected || state.drive.accessToken) && state.drive.fileId) {
+    try {
+      setDriveStatus('syncing');
+      await uploadDriveData();
+      setDriveStatus('connected');
+    } catch(e) {
+      setDriveStatus('');
+      showToast('Local data reset. Drive could not be cleared yet; reconnect and press Reset All again.', 'error');
+      return;
+    }
+  }
+  showToast('CineLens reset completely.', 'success');
 }
 
 // ─────────────────────────────────────────────
@@ -3733,6 +3843,7 @@ function exportCinelensData() {
     hiddenTitles: state.hiddenTitles,
     wrongPicks: state.wrongPicks,
     deletedMovieRecords: state.deletedMovieRecords,
+    tagAliases: state.tagAliases,
     tagStats: state.tagStats,
     discoveryCursor: state.discoveryCursor
   };
@@ -3790,6 +3901,7 @@ function normaliseIncomingData(d={}) {
     hiddenTitles: d.hiddenTitles || {},
     wrongPicks: d.wrongPicks || {},
     deletedMovieRecords: d.deletedMovieRecords || {},
+    tagAliases: d.tagAliases || {},
     tagStats,
     discoveryCursor: normaliseDiscoveryCursor(d.discoveryCursor || {})
   };
@@ -3816,6 +3928,24 @@ function mergeRecordMap(local={}, remote={}, {preferHidden=false}={}) {
 
 function mergeRemoteData(remoteRaw={}) {
   const remote = normaliseIncomingData(remoteRaw);
+  const localResetAt = Date.parse(state.meta?.resetAt || '') || 0;
+  const remoteResetAt = Date.parse(remote.meta?.resetAt || '') || 0;
+  if (localResetAt > remoteResetAt) {
+    remote.movies = {};
+    remote.hiddenTitles = {};
+    remote.wrongPicks = {};
+    remote.deletedMovieRecords = {};
+    remote.tagAliases = {};
+    remote.discoveryCursor = {};
+  } else if (remoteResetAt > localResetAt) {
+    state.movies = {};
+    state.hiddenTitles = {};
+    state.wrongPicks = {};
+    state.deletedMovieRecords = {};
+    state.tagAliases = {};
+    state.discoveryCursor = {};
+    state.meta = {...state.meta, resetAt:remote.meta.resetAt};
+  }
   const remoteStamp = dataTimestamp(remote);
   const localStamp = dataTimestamp(state);
   const remoteSettingsStamp = settingsTimestamp(remote);
@@ -3844,6 +3974,7 @@ function mergeRemoteData(remoteRaw={}) {
   state.movies = movieMerge.merged;
   state.hiddenTitles = hiddenMerge.merged;
   state.wrongPicks = wrongPickMerge.merged;
+  state.tagAliases = {...(remote.tagAliases || {}), ...(state.tagAliases || {})};
   const migratedWrongPicks = migrateVisibleWrongPicks();
   Object.entries(state.movies || {}).forEach(([id, movie]) => {
     if (wrongPickMatches(movie)) {
@@ -3912,6 +4043,7 @@ function loadLocalState() {
       if (s.hiddenTitles) state.hiddenTitles=s.hiddenTitles;
       if (s.wrongPicks) state.wrongPicks=s.wrongPicks;
       if (s.deletedMovieRecords) state.deletedMovieRecords=s.deletedMovieRecords;
+      if (s.tagAliases) state.tagAliases=s.tagAliases;
       if (s.tagStats) state.tagStats=s.tagStats;
       else if (s.canonicalTagStats) state.tagStats={candidates:s.canonicalTagStats.raw||0,tags:s.canonicalTagStats.canonical||0,rebuiltAt:s.canonicalTagStats.rebuiltAt||''};
       delete state.canonicalTagStats;
