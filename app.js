@@ -1212,6 +1212,8 @@ function normaliseStoredTitleRecord(movie) {
   if (!movie.wikiUrl && (movie.wikiTitle || movie.pageTitle)) movie.wikiUrl = wikiUrlFromTitle(movie.wikiTitle || movie.pageTitle);
   if (!movie.wikiTitle && movie.pageTitle) movie.wikiTitle = movie.pageTitle;
   if (!movie.pageTitle && movie.wikiTitle) movie.pageTitle = movie.wikiTitle;
+  const correctedFormat = inferPageFormat(movie.wikiTitle || movie.pageTitle || movie.title, movie.leadText || '', String(movie.categoryText || '').split(' category:').filter(Boolean).map(value => value.startsWith('category:') ? value : `category:${value}`));
+  if (correctedFormat.strong) movie.format = correctedFormat.format;
 
   const isWikiRecord = movie.source === 'wikipedia' || !!movie.storyText || !!movie.wikiPageId || !!movie.wikiUrl;
   if (isWikiRecord && movie.storyText) {
@@ -1354,6 +1356,30 @@ function pageMediaEvidence(leadText, cats=[]) {
   const film = /\bcategory:\d{4} .*films\b|\bcategory:.*(?:action|adventure|animated|comedy|crime|drama|fantasy|horror|musical|mystery|romance|science fiction|sports|thriller|war|western|superhero).* films\b/i.test(catText)
     || /\b(?:is an?|was an?) .{0,140}\bfilm\b/i.test(leadText);
   return {film, show};
+}
+
+function inferPageFormat(pageTitle='', leadText='', cats=[], mediaEvidence=null) {
+  const title = String(pageTitle || '').trim();
+  const lead = String(leadText || '').slice(0, 700);
+  const definition = (lead.match(/^[\s\S]*?[.!?](?:\s|$)/) || [lead.slice(0, 320)])[0];
+  const catText = (cats || []).join(' ');
+  const titleFilm = /\((?:\d{4}\s+)?film\)$/i.test(title);
+  const titleShow = /\((?:tv|television|web) series\)$|\(miniseries\)$/i.test(title);
+  if (titleFilm) return {format:null, strong:true, source:'title'};
+  if (titleShow) return {format:/miniseries/i.test(title) ? 'miniseries' : 'series', strong:true, source:'title'};
+
+  const leadFilm = /^\s*.{1,180}\b(?:is|was)\b.{0,180}\bfilm\b/i.test(definition);
+  const leadShow = /^\s*.{1,180}\b(?:is|was)\b.{0,180}\b(?:television series|tv series|web series|miniseries|streaming series)\b/i.test(definition);
+  if (leadFilm && !leadShow) return {format:null, strong:true, source:'lead'};
+  if (leadShow && !leadFilm) return {format:/\bminiseries\b/i.test(definition) ? 'miniseries' : 'series', strong:true, source:'lead'};
+
+  const showCategory = /\bcategory:.*(?:television series debuts|television series endings|television series|tv series|web series|miniseries)\b/i.test(catText);
+  const filmCategory = /\bcategory:\d{4} .*films\b|\bcategory:.* films\b/i.test(catText);
+  if (filmCategory && !showCategory) return {format:null, strong:true, source:'category'};
+  if (showCategory && !filmCategory) return {format:/\bminiseries\b/i.test(catText) ? 'miniseries' : 'series', strong:true, source:'category'};
+
+  const evidence = mediaEvidence || pageMediaEvidence(lead, cats);
+  return {format:evidence.show && !evidence.film ? 'series' : null, strong:false, source:'fallback'};
 }
 
 function isMetaTag(tag) {
@@ -2113,11 +2139,8 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   if (hindiEvidence) language = 'Hindi';
   else if (englishEvidence) language = 'English';
 
-  let format = null;
-  if (cats.some(c => c.includes('television series') || c.includes('tv series') || c.includes('web series'))) format = 'series';
-  if (cats.some(c => c.includes('miniseries'))) format = 'miniseries';
-  if (!format && /\b(television series|tv series|web series|miniseries|streaming television series)\b/i.test(leadText)) format = 'series';
-  if (!format && mediaEvidence.show && !mediaEvidence.film) format = 'series';
+  const formatDecision = inferPageFormat(pageTitle, leadText, cats, mediaEvidence);
+  const format = formatDecision.format;
   if (!format && !mediaEvidence.film) return rejectWikiParse(diagnostics, 'not a movie page');
   if (mode === 'movies' && format) return rejectWikiParse(diagnostics, 'title is a show, not a movie');
   if (mode === 'shows' && !format) return rejectWikiParse(diagnostics, 'title is a movie, not a show');
