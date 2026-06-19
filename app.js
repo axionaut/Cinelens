@@ -847,7 +847,7 @@ async function requestAiTags(movies, opts={}) {
     method:'POST',
     headers:{'Content-Type':'text/plain;charset=utf-8'},
     body:JSON.stringify({
-      items:items.map(movie => ({
+      items:items.map((movie, index) => ({
         id:movie.id,
         title:movie.title,
         year:movie.year,
@@ -855,7 +855,8 @@ async function requestAiTags(movies, opts={}) {
         language:movie.language,
         genres:movieGenres(movie),
         storyText:movie.storyText,
-        excludedTags:[...new Set([...(movie.suppressedTags || []), ...(movie.suppressedRawTags || [])])]
+        excludedTags:[...new Set([...(movie.suppressedTags || []), ...(movie.suppressedRawTags || [])])],
+        preferredTagVocabulary:index === 0 ? aiTagVocabulary().map(item => item.tag) : undefined
       })),
       optimizeVocabulary:true,
       tagVocabulary:aiTagVocabulary(),
