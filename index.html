@@ -31,6 +31,21 @@
   </div>
 </div>
 
+<div class="modal-overlay hidden" id="manualTagModal">
+  <div class="modal tag-picker-modal">
+    <h2>Complete tags</h2>
+    <p id="manualTagHelp">Choose relevant tags from your existing CineLens cloud.</p>
+    <div class="manual-rating-title" id="manualTagTitle"></div>
+    <input id="manualTagSearch" type="search" placeholder="filter existing tags" oninput="renderManualTagChooser()">
+    <div class="manual-tag-count" id="manualTagCount"></div>
+    <div class="manual-tag-grid" id="manualTagGrid"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeManualTagChooser()">cancel</button>
+      <button class="btn btn-primary" id="manualTagSaveBtn" onclick="saveManualTagChoices()">save tags</button>
+    </div>
+  </div>
+</div>
+
 <header>
   <div style="display:flex;align-items:center;gap:14px">
     <div class="logo">CineLens <span>DISCOVERY</span></div>

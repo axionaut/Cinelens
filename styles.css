@@ -121,6 +121,13 @@
   .manual-rating-stars{display:flex;gap:8px;margin:12px 0 18px}
   .manual-rating-stars .star{font-size:28px;color:var(--muted2);cursor:pointer;line-height:1;transition:color .12s,transform .12s}
   .manual-rating-stars .star:hover{color:var(--accent);transform:scale(1.15)}
+  .tag-picker-modal{width:min(760px,94vw)}
+  .manual-tag-count{font-family:'DM Mono',monospace;font-size:11px;color:var(--accent);margin:8px 0}
+  .manual-tag-grid{display:flex;flex-wrap:wrap;gap:6px;max-height:45vh;overflow:auto;padding:10px;background:rgba(255,255,255,.025);border:1px solid var(--border);border-radius:6px}
+  .manual-tag-option{display:inline-flex;align-items:center;gap:5px;padding:5px 8px;border:1px solid var(--border);border-radius:999px;background:var(--tag-bg);color:var(--muted);font-family:'DM Mono',monospace;font-size:10px;cursor:pointer}
+  .manual-tag-option span{opacity:.55}
+  .manual-tag-option.selected{border-color:var(--accent);background:rgba(255,204,51,.12);color:var(--accent)}
+  .manual-tag-empty{font-size:12px;color:var(--muted)}
 
   .drive-status{display:flex;align-items:center;gap:5px;font-size:14px;color:var(--muted);font-family:'DM Mono',monospace}
   .drive-dot{width:6px;height:6px;border-radius:50%;background:var(--muted2)}

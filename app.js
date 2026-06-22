@@ -215,7 +215,7 @@ let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const CARD_REFRESH_BATCH_SIZE = 20;
-const WIKI_PARSER_VERSION = 3;
+const WIKI_PARSER_VERSION = 4;
 const REC_INFINITE_PAGE_SIZE = 20;
 const STRONG_REC_TARGET = 10;
 const STRONG_REC_MIN_OVERLAP = 3;
@@ -259,6 +259,8 @@ let state = {
 };
 
 let pendingManualRatingId = '';
+let manualTagMovieId = '';
+let manualTagSelections = new Set();
 const PERFECT_REC_TARGET = STRONG_REC_TARGET;
 const PERFECT_REC_MIN_RATIO = 0.995;
 const MAX_STORY_TAGS = 34;
@@ -870,6 +872,7 @@ function commitAiTagSet(movie, cleaned, model='') {
   movie.rawDescriptors = [];
   movie.tagged = true;
   movie.aiTagEvidence = cleaned.evidence;
+  delete movie.aiTagPartial;
   movie.aiTagging = {
     status:'verified',
     model:String(model || ''),
@@ -896,7 +899,10 @@ function mergeAiTagPartials(previous={tags:[], evidence:{}}, next={tags:[], evid
 async function requestAiTags(movies, opts={}) {
   const items = (movies || []).filter(movie => movie?.storyText).slice(0, AI_TAG_BATCH_SIZE);
   if (!items.length) return {tagged:0, failed:0};
-  const partials = opts.partials || {};
+  const savedPartials = Object.fromEntries(items
+    .filter(movie => movie.aiTagPartial?.tags?.length)
+    .map(movie => [String(movie.id), movie.aiTagPartial]));
+  const partials = opts.partials || savedPartials;
   const wait = Math.max(0, AI_REQUEST_DELAY_MS - (Date.now() - lastAiRequestAt));
   if (wait) await abortableSleep(wait);
   if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
@@ -912,6 +918,7 @@ async function requestAiTags(movies, opts={}) {
         const continuationInstruction = existingTags.length
           ? `\n\nCINELENS TAG CONTINUATION: ${existingTags.length} grounded tags are already accepted: ${existingTags.join(', ')}. Generate at least ${missingTags} additional distinct story tags. Do not repeat, rename, or paraphrase the accepted tags.`
           : '';
+        const coverageInstruction = `\n\nCINELENS COVERAGE: Return ${AI_TAG_MIN_COUNT}-${AI_TAG_MAX_COUNT} distinct, reusable recommendation tags when the narrative supports them. For a long-running series, cover the central premise, relationships, social dynamics, work or academic setting, recurring interests, character development, romance, friendship and major long-term arcs across the full supplied narrative. Evidence must come from the supplied narrative; do not return fewer tags merely because the page describes several seasons.`;
         return {
           id:movie.id,
           title:movie.title,
@@ -919,7 +926,7 @@ async function requestAiTags(movies, opts={}) {
           format:movie.format ? 'show' : 'movie',
           language:movie.language,
           genres:movieGenres(movie),
-          storyText:`${movie.storyText}${continuationInstruction}`,
+          storyText:`${movie.storyText}${coverageInstruction}${continuationInstruction}`,
           existingTags,
           minimumAdditionalTags:missingTags,
           excludedTags:[...new Set([...(movie.suppressedTags || []), ...(movie.suppressedRawTags || []), ...existingTags])],
@@ -962,6 +969,7 @@ async function requestAiTags(movies, opts={}) {
         retryPartials[String(movie.id)] = partials[String(movie.id)] || {tags:[], evidence:{}};
       }
       const partialCount = retryPartials[String(movie.id)]?.tags?.length || 0;
+      movie.aiTagPartial = retryPartials[String(movie.id)] || {tags:[], evidence:{}};
       movie.aiTagging = {
         status:'building',
         promptVersion:AI_TAG_PROMPT_VERSION,
@@ -990,6 +998,7 @@ async function requestAiTags(movies, opts={}) {
 async function applyAiTags(movie, opts={}) {
   if (!movie?.storyText) return movie;
   if (!opts.force && hasCurrentAiTags(movie)) return movie;
+  if (opts.force) delete movie.aiTagPartial;
   await requestAiTags([movie]);
   if (!hasCurrentAiTags(movie)) throw new Error(movie.aiTagging?.error || 'AI returned no usable tags');
   return movie;
@@ -1384,8 +1393,8 @@ function hasAllowedLanguageEvidence(cats, leadText) {
   const catText = (cats || []).join(' ');
   return {
     english: /\bcategory:\d{4} english-language films\b|\bcategory:english-language (?:films|television shows|web series|netflix original programming|amazon prime video original programming)\b/i.test(catText)
-      || /\benglish-language (?:film|television series|tv series|web series|miniseries)\b/i.test(leadText)
-      || /\b(?:american|british|canadian|australian|new zealand|irish)\b.{0,80}\b(?:film|television series|tv series|web series|miniseries|streaming television series)\b/i.test(leadText)
+      || /\benglish-language (?:film|television series|tv series|web series|miniseries|sitcom)\b/i.test(leadText)
+      || /\b(?:american|british|canadian|australian|new zealand|irish)\b.{0,80}\b(?:film|television series|tv series|web series|miniseries|streaming television series|sitcom)\b/i.test(leadText)
       || /\bcategory:(?:american|british|canadian|australian|new zealand|irish) (?:.* )?(?:films|television series|web series)\b/i.test(catText),
     hindi: /\bcategory:\d{4} hindi-language films\b|\bcategory:hindi-language (?:films|television shows|web series)\b/i.test(catText)
       || /\bhindi-language (?:film|television series|tv series|web series|miniseries)\b/i.test(leadText)
@@ -1396,7 +1405,7 @@ function hasAllowedLanguageEvidence(cats, leadText) {
 function pageMediaEvidence(leadText, cats=[]) {
   const catText = (cats || []).join(' ');
   const show = /\bcategory:.*(?:television series|tv series|web series|miniseries|netflix original programming|amazon prime video original programming)\b/i.test(catText)
-    || /\b(?:is an?|was an?) .{0,140}\b(?:television series|tv series|web series|miniseries|streaming television series)\b/i.test(leadText);
+    || /\b(?:is an?|was an?) .{0,140}\b(?:television series|tv series|web series|miniseries|streaming television series|sitcom)\b/i.test(leadText);
   const film = /\bcategory:\d{4} .*films\b|\bcategory:.*(?:action|adventure|animated|comedy|crime|drama|fantasy|horror|musical|mystery|romance|science fiction|sports|thriller|war|western|superhero).* films\b/i.test(catText)
     || /\b(?:is an?|was an?) .{0,140}\bfilm\b/i.test(leadText);
   return {film, show};
@@ -1413,7 +1422,7 @@ function inferPageFormat(pageTitle='', leadText='', cats=[], mediaEvidence=null)
   if (titleShow) return {format:/miniseries/i.test(title) ? 'miniseries' : 'series', strong:true, source:'title'};
 
   const leadFilm = /^\s*.{1,180}\b(?:is|was)\b.{0,180}\bfilm\b/i.test(definition);
-  const leadShow = /^\s*.{1,180}\b(?:is|was)\b.{0,180}\b(?:television series|tv series|web series|miniseries|streaming series)\b/i.test(definition);
+  const leadShow = /^\s*.{1,180}\b(?:is|was)\b.{0,180}\b(?:television series|tv series|web series|miniseries|streaming series|television sitcom|sitcom)\b/i.test(definition);
   if (leadFilm && !leadShow) return {format:null, strong:true, source:'lead'};
   if (leadShow && !leadFilm) return {format:/\bminiseries\b/i.test(definition) ? 'miniseries' : 'series', strong:true, source:'lead'};
 
@@ -2176,6 +2185,80 @@ function ratePendingManualMovie(rating) {
   rateMovie(id, rating);
 }
 
+function manualTagCloud(movie) {
+  const counts = new Map();
+  fullAiTagVocabulary().forEach(({tag, count}) => {
+    const resolved = resolvedTagAlias(tag);
+    if (!resolved || !tagAllowed(movie, resolved) || isMetaTag(resolved) || movieGenres(movie).includes(resolved)) return;
+    counts.set(resolved, (counts.get(resolved) || 0) + Number(count || 0));
+  });
+  return [...counts.entries()].sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+function openManualTagChooser(id, event) {
+  if (event) event.stopPropagation();
+  const movie = state.movies[id];
+  if (!movie) return;
+  manualTagMovieId = id;
+  manualTagSelections = new Set([
+    ...(movie.aiTagPartial?.tags || []),
+    ...(hasCurrentAiTags(movie) ? movie.tags || [] : [])
+  ].map(normaliseTagName).filter(Boolean));
+  const search = document.getElementById('manualTagSearch');
+  if (search) search.value = '';
+  document.getElementById('manualTagModal')?.classList.remove('hidden');
+  renderManualTagChooser();
+}
+
+function closeManualTagChooser() {
+  manualTagMovieId = '';
+  manualTagSelections = new Set();
+  document.getElementById('manualTagModal')?.classList.add('hidden');
+}
+
+function toggleManualTagChoice(encodedTag) {
+  const tag = decodeURIComponent(encodedTag);
+  if (manualTagSelections.has(tag)) manualTagSelections.delete(tag);
+  else if (manualTagSelections.size < AI_TAG_MAX_COUNT) manualTagSelections.add(tag);
+  renderManualTagChooser();
+}
+
+function renderManualTagChooser() {
+  const movie = state.movies[manualTagMovieId];
+  const grid = document.getElementById('manualTagGrid');
+  if (!movie || !grid) return;
+  const query = String(document.getElementById('manualTagSearch')?.value || '').trim().toLowerCase();
+  const cloud = manualTagCloud(movie).filter(([tag]) => !query || tag.includes(query));
+  const title = document.getElementById('manualTagTitle');
+  if (title) title.textContent = movie.title;
+  const count = document.getElementById('manualTagCount');
+  if (count) count.textContent = `${manualTagSelections.size}/${AI_TAG_MIN_COUNT} required · ${AI_TAG_MAX_COUNT} maximum`;
+  const save = document.getElementById('manualTagSaveBtn');
+  if (save) save.disabled = manualTagSelections.size < AI_TAG_MIN_COUNT;
+  grid.innerHTML = cloud.slice(0, 500).map(([tag, uses]) => {
+    const selected = manualTagSelections.has(tag);
+    return `<button class="manual-tag-option${selected ? ' selected' : ''}" onclick="toggleManualTagChoice('${encodeURIComponent(tag)}')">${tag}<span>${uses}</span></button>`;
+  }).join('') || '<span class="manual-tag-empty">No existing tags match this filter.</span>';
+}
+
+function saveManualTagChoices() {
+  const movie = state.movies[manualTagMovieId];
+  if (!movie || manualTagSelections.size < AI_TAG_MIN_COUNT) return;
+  const tags = [...manualTagSelections].slice(0, AI_TAG_MAX_COUNT);
+  const evidence = {...(movie.aiTagPartial?.evidence || {})};
+  tags.forEach(tag => {
+    if (!evidence[tag]) evidence[tag] = {confidence:1, evidence:'Selected manually from the existing CineLens tag cloud'};
+  });
+  commitAiTagSet(movie, {tags, evidence}, 'manual-tag-cloud');
+  rebuildTagBrain();
+  computeTagWeights();
+  saveLocalState();
+  syncDrive();
+  closeManualTagChooser();
+  render();
+  showToast(`Saved ${tags.length} tags for "${movie.title}"`, 'success');
+}
+
 async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) {
   const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&format=json&origin=*`;
   const data = await wikiApiJson(url);
@@ -2260,8 +2343,16 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
     id, title, year, director, language, country, format: format||null,
     genres, categoryText: cats.join(' '),
     tags: [], coreTags: [], plotTags: [], descriptorTags: [], rawDescriptors: [],
-    tagged: false, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, thumbnailUrl, storyText, leadText, wikiVerified: true, retagStatus: 'needs-ai-tags', retagMessage: 'AI tags pending'
+    tagged: false, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, thumbnailUrl, storyText, leadText, wikiVerified: true, retagStatus: 'needs-ai-tags', retagMessage: 'AI tags pending',
+    wikiParserVersion: WIKI_PARSER_VERSION
   };
+}
+
+function wikiHeadingInfo(line) {
+  const raw = String(line || '').trim();
+  const match = raw.match(/^(=+)\s*(.*?)\s*\1$/);
+  if (!match || match[1].length < 2) return null;
+  return { title:match[2].trim().toLowerCase(), level:match[1].length };
 }
 
 function extractNarrativeSection(extract) {
@@ -2270,17 +2361,21 @@ function extractNarrativeSection(extract) {
   const lines = text.split('\n');
   const candidates = [];
   for (let i = 0; i < lines.length; i++) {
-    const heading = normaliseWikiHeading(lines[i]);
-    if (!heading) continue;
+    const headingInfo = wikiHeadingInfo(lines[i]);
+    if (!headingInfo) continue;
     const out = [];
     for (let j = i + 1; j < lines.length; j++) {
       const line = lines[j].trim();
-      if (normaliseWikiHeading(line)) break;
+      const nextHeading = wikiHeadingInfo(line);
+      if (nextHeading) {
+        if (nextHeading.level <= headingInfo.level) break;
+        continue;
+      }
       if (line) out.push(line);
-      if (out.join(' ').length > 6500) break;
+      if (out.join(' ').length > 12000) break;
     }
     const section = out.join(' ').replace(/\s+/g, ' ').trim();
-    const score = narrativeSectionScore(heading, section);
+    const score = narrativeSectionScore(headingInfo.title, section);
     if (score > 0) candidates.push({ section, score });
   }
   candidates.sort((a,b) => b.score - a.score || b.section.length - a.section.length);
@@ -2314,7 +2409,9 @@ function narrativeSectionScore(heading, section) {
   const productionSignals = (text.match(/\b(production|filming|casting|cast members?|developed by|created by|executive producer|network|broadcast rights|renewed|canceled|cancelled|ratings|reception|viewership|episodes? ordered|premiered on|released on)\b/gi) || []).length;
   const actionSentences = (text.match(/(?:^|[.!?]\s+)[A-Z][^.!?]{20,220}\b(?:is|are|was|were|has|have|must|tries?|attempts?|discovers?|learns?|finds?|meets?|returns?|becomes?|begins?|leaves?|joins?|kills?|dies?|falls?|struggles?|decides?)\b[^.!?]*[.!?]/g) || []).length;
   const narrativeOpening = /\b(series|film|show|story)\s+(revolves?|follows?|cent(?:er|re)s?|chronicles?|depicts?|focuses?)\b/i.test(text.slice(0, 500));
-  const headingHint = /\b(plot|story|narrative|premise|synopsis|summary|overview|character)\b/i.test(heading) ? 2 : 0;
+  const headingHint = /^(plot|story|premise|synopsis|plot summary|story summary)$/i.test(heading)
+    ? 500
+    : /\b(plot|story|narrative|premise|synopsis|summary|overview|character)\b/i.test(heading) ? 12 : 0;
   const nonStoryHeading = /\b(cast|casting|characters? list|episodes?|production|development|filming|release|broadcast|reception|ratings?|awards?|music|soundtrack|marketing|references?|external links?|see also)\b/i.test(heading);
   const contentIsNarrative = narrativeSignals >= 3
     && (narrativeOpening || actionSentences >= 2 || narrativeSignals >= productionSignals * 2 + 2);
@@ -2323,11 +2420,7 @@ function narrativeSectionScore(heading, section) {
 }
 
 function normaliseWikiHeading(line) {
-  const raw = String(line || '').trim();
-  if (!raw) return '';
-  const stripped = raw.replace(/^=+\s*/, '').replace(/\s*=+$/, '').trim();
-  if (stripped === raw && !/^=+.*=+$/.test(raw)) return '';
-  return stripped.toLowerCase();
+  return wikiHeadingInfo(line)?.title || '';
 }
 
 function deriveReleaseYear(leadText, extract, cats, format) {
@@ -3167,6 +3260,7 @@ function buildCard(movie, opts={}) {
       <div class="card-tags" id="tags-${movie.id}">${renderTagInsightChips(movie, safeId, true, matchedTags, contextTag)}</div>
       <div class="card-actions">
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
+        ${!hiddenView && movie.storyText && !hasCurrentAiTags(movie) ? `<button class="card-act" onclick="openManualTagChooser('${safeId}',event)">choose tags</button>` : ''}
         ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
         ${!hiddenView?`<button class="card-act" onclick="deleteMovie('${safeId}',event)">hide</button>`:''}
         <button class="card-act del" onclick="removeTitlePermanently('${safeId}',event)">remove</button>
@@ -3622,7 +3716,7 @@ async function retagFromStoredData(id, opts={}) {
   showFetchProgress(opts.progressLabel || 'Refreshing AI tags...', 20, movie.wikiTitle || movie.pageTitle || movie.title);
   try {
     let updated = movie;
-    if (movie.storyText) {
+    if (movie.storyText && Number(movie.wikiParserVersion || 0) >= WIKI_PARSER_VERSION) {
       try {
         await applyAiTags(movie, {force:true});
       } catch(firstError) {
@@ -3654,9 +3748,12 @@ async function retagFromStoredData(id, opts={}) {
   } catch(err) {
     const current = state.movies[id] || movie;
     const reason = String(err?.message || current.aiTagging?.error || 'AI retag failed');
+    const partialCount = current.aiTagPartial?.tags?.length || 0;
     current.needsManualUrl = false;
     current.retagStatus = 'needs-ai-tags';
-    current.retagMessage = reason.includes('too few usable tags') ? `AI returned fewer than ${AI_TAG_MIN_COUNT} usable tags` : 'AI retag pending';
+    current.retagMessage = partialCount
+      ? `AI built ${partialCount}/${AI_TAG_MIN_COUNT} tags · choose tags or retry`
+      : reason.includes('too few usable tags') ? `AI returned fewer than ${AI_TAG_MIN_COUNT} usable tags` : 'AI retag pending';
     saveLocalState();
     render();
     if (opts.errorToast !== false) showToast(`Could not re-tag "${current.title}": ${reason}`, 'error');
