@@ -285,6 +285,7 @@ const USER_AVOID_TAGS = new Set([
 const USER_AVOID_GENRES = new Set(['documentary']);
 const MAX_RECOMMENDATION_TAG_SHARE = 0.10;
 let tagCorpusStatsCache = null;
+let tagFamilyIndexCache = null;
 
 const GENRE_RULES = [
   ['science-fiction', /\b(science fiction|sci-fi)\b/],
@@ -325,6 +326,13 @@ function normaliseTagName(tag) {
 }
 
 const CANONICAL_FUNCTION_WORDS = new Set('a an the and or but nor so yet of in on at to from into onto by for with without as is are was were be been being has have had do does did will would can could may might must shall should this that these those it its he she they them his her their who whom whose which what when where while after before during then than also just still already again ever never very more most less least much many some any each every both either neither keeps keep kept starts start started begins begin began continues continue continued tries try tried'.split(' '));
+const TAG_TOKEN_EQUIVALENTS = new Map([
+  ['humor','comedy'], ['humour','comedy'], ['humorous','comedy'], ['comedic','comedy'],
+  ['absurdist','absurd'],
+  ['kidnap','abduction'], ['kidnapping','abduction'], ['kidnapped','abduction'],
+  ['abduct','abduction'], ['abducted','abduction'], ['abducting','abduction'],
+  ['mishap','accident'], ['accidents','accident']
+]);
 
 function stemCanonicalToken(token) {
   let word = String(token || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -338,14 +346,30 @@ function stemCanonicalToken(token) {
   return word;
 }
 
+function canonicalSemanticToken(token) {
+  const stemmed = stemCanonicalToken(token);
+  return TAG_TOKEN_EQUIVALENTS.get(stemmed) || stemmed;
+}
+
+function resolvedTagAlias(tag) {
+  let current = normaliseTagName(tag);
+  const seen = new Set();
+  while (current && state?.tagAliases?.[current] && !seen.has(current)) {
+    seen.add(current);
+    current = normaliseTagName(state.tagAliases[current]);
+  }
+  return current;
+}
+
 function canonicalTagFeatures(tag) {
-  const tokens = normaliseTagName(tag).split(/[^a-z0-9]+/).filter(Boolean)
+  const resolvedTag = resolvedTagAlias(tag);
+  const tokens = resolvedTag.split(/[^a-z0-9]+/).filter(Boolean)
     .filter(token => !CANONICAL_FUNCTION_WORDS.has(token))
-    .map(stemCanonicalToken)
+    .map(canonicalSemanticToken)
     .filter(Boolean);
   const unique = [...new Set(tokens)];
   return {
-    tag: normaliseTagName(tag),
+    tag: resolvedTag,
     tokens: unique,
     signature: [...unique].sort().join('-'),
     phrase: unique.join('-'),
@@ -366,8 +390,18 @@ function suppressedRawTagSet(movie) {
   return new Set((movie?.suppressedRawTags || []).map(normaliseTagName).filter(Boolean));
 }
 
+function tagMatchesSuppressedFamily(movie, tag) {
+  const candidate = canonicalTagFeatures(tag);
+  return [...suppressedTagSet(movie)].some(suppressed => {
+    const blocked = canonicalTagFeatures(suppressed);
+    return candidate.tag === blocked.tag
+      || candidate.signature === blocked.signature
+      || canonicalFamilyContainment(candidate, blocked);
+  });
+}
+
 function tagAllowed(movie, tag) {
-  return !suppressedTagSet(movie).has(normaliseTagName(tag));
+  return !tagMatchesSuppressedFamily(movie, tag);
 }
 
 function rawTagAllowed(movie, tag) {
@@ -405,6 +439,16 @@ function canonicalPhraseSimilarity(a, b) {
   return coverage * (0.7 + 0.3 * lengthPenalty);
 }
 
+function canonicalFamilyContainment(a, b) {
+  if (!a.tokens.length || !b.tokens.length || a.tokens.length === b.tokens.length) return false;
+  const shorter = a.tokens.length < b.tokens.length ? a : b;
+  const longer = shorter === a ? b : a;
+  if (longer.tokens.length - shorter.tokens.length !== 1) return false;
+  if (!shorter.tokens.every(token => longer.tokens.includes(token))) return false;
+  if (shorter.tokens.length !== 1) return false;
+  return /(?:tion|sion|ment|ness|ity|ism|ship|ance|ence|hood)$/.test(shorter.tokens[0]);
+}
+
 function probableEntityTokens(movie) {
   const text = String(movie?.storyText || '');
   const counts = new Map();
@@ -417,9 +461,7 @@ function probableEntityTokens(movie) {
   return new Set([...counts.entries()].filter(([, count]) => count >= 2).map(([token]) => token));
 }
 
-function rebuildTagBrain() {
-  const records = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})];
-  const now = new Date().toISOString();
+function buildTagFamilyIndex(records=[...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})]) {
   const frequency = new Map();
   records.forEach(movie => rawScoringTags(movie).forEach(tag => frequency.set(tag, (frequency.get(tag) || 0) + 1)));
   const tags = [...frequency.keys()];
@@ -459,7 +501,9 @@ function rebuildTagBrain() {
       for (let j = i + 1; j < group.length; j++) {
         const a = group[i], b = group[j];
         if (find(a) === find(b)) continue;
-        if (canonicalPhraseSimilarity(features.get(a), features.get(b)) >= 0.84) union(a, b);
+        const aFeatures = features.get(a);
+        const bFeatures = features.get(b);
+        if (canonicalPhraseSimilarity(aFeatures, bFeatures) >= 0.84 || canonicalFamilyContainment(aFeatures, bFeatures)) union(a, b);
       }
     }
   });
@@ -469,43 +513,49 @@ function rebuildTagBrain() {
     if (!clusters.has(root)) clusters.set(root, []);
     clusters.get(root).push(tag);
   });
-  const labelFor = new Map();
-  const supportFor = new Map();
+  const familyFor = new Map();
   clusters.forEach(group => {
-    const label = [...group].sort((a, b) => (frequency.get(b) || 0) - (frequency.get(a) || 0) || canonicalTagFeatures(a).tokens.length - canonicalTagFeatures(b).tokens.length || a.length - b.length || a.localeCompare(b))[0];
-    const support = group.reduce((sum, tag) => sum + (frequency.get(tag) || 0), 0);
-    group.forEach(tag => { labelFor.set(tag, label); supportFor.set(tag, support); });
-  });
-  let changed = 0;
-  records.forEach(movie => {
-    const before = JSON.stringify(rawScoringTags(movie));
-    const learned = [];
-    rawScoringTags(movie).forEach(tag => {
-      const feature = features.get(tag) || canonicalTagFeatures(tag);
-      if ((supportFor.get(tag) || 0) > 1) learned.push(labelFor.get(tag) || feature.phrase);
+    const phraseFrequency = new Map();
+    group.forEach(tag => {
+      const phrase = features.get(tag)?.phrase || normaliseTagName(tag);
+      phraseFrequency.set(phrase, (phraseFrequency.get(phrase) || 0) + (frequency.get(tag) || 0));
     });
-    const fallback = rawScoringTags(movie).map(tag => labelFor.get(tag) || canonicalTagFeatures(tag).phrase).filter(Boolean);
-    const normalizedTags = cleanTagArray([...new Set(learned.length ? learned : fallback)].filter(tag => tagAllowed(movie, tag)), movie, false);
-    const originalTags = cleanTagArray(rawScoringTags(movie).filter(tag => tagAllowed(movie, tag)), movie, false);
-    const optimizedTags = originalTags.length >= AI_TAG_MIN_COUNT && normalizedTags.length < AI_TAG_MIN_COUNT
-      ? originalTags
-      : normalizedTags;
-    movie.tags = optimizedTags;
-    movie.coreTags = optimizedTags;
-    movie.plotTags = optimizedTags;
-    movie.descriptorTags = optimizedTags;
-    movie.tagged = optimizedTags.length > 0;
+    const label = [...phraseFrequency.keys()].sort((a, b) =>
+      canonicalTagFeatures(a).tokens.length - canonicalTagFeatures(b).tokens.length
+      || (phraseFrequency.get(b) || 0) - (phraseFrequency.get(a) || 0)
+      || a.length - b.length
+      || a.localeCompare(b)
+    )[0];
+    group.forEach(tag => familyFor.set(tag, label));
+  });
+  return {familyFor, candidateCount:tags.length, familyCount:new Set(familyFor.values()).size};
+}
+
+function tagFamilyIndex() {
+  if (!tagFamilyIndexCache) tagFamilyIndexCache = buildTagFamilyIndex();
+  return tagFamilyIndexCache;
+}
+
+function invalidateTagFamilyIndex() {
+  tagFamilyIndexCache = null;
+  tagCorpusStatsCache = null;
+}
+
+function rebuildTagBrain() {
+  const records = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})];
+  tagFamilyIndexCache = buildTagFamilyIndex(records);
+  records.forEach(movie => {
     delete movie.canonicalTags;
     delete movie.canonicalTagVersion;
-    if (before !== JSON.stringify(optimizedTags)) {
-      changed++;
-      touchRecord(movie, now);
-    }
   });
-  state.tagStats = { candidates:tags.length, tags:new Set(records.flatMap(movie => movie.tags || [])).size, rebuiltAt:new Date().toISOString() };
+  state.tagStats = {
+    candidates:tagFamilyIndexCache.candidateCount,
+    tags:tagFamilyIndexCache.familyCount,
+    rebuiltAt:new Date().toISOString()
+  };
   delete state.canonicalTagStats;
   tagCorpusStatsCache = null;
-  return changed;
+  return 0;
 }
 
 function tagCorpusStats() {
@@ -766,14 +816,17 @@ function purgeLegacyTagsForAi() {
 
 function cleanAiTagResults(result, movie) {
   const genres = new Set((movieGenres(movie) || []).map(normaliseTagName));
+  const suppressedFamilies = suppressedTagSet(movie);
+  const familyFor = tagFamilyIndex().familyFor;
   const evidence = {};
   const tags = [];
   (result?.tags || []).forEach(item => {
     const rawTag = normaliseTagName(item?.tag);
     const tag = normaliseTagName(state.tagAliases?.[rawTag] || rawTag);
+    const familyTag = familyFor.get(tag) || canonicalTagFeatures(tag).phrase;
     const confidence = Number(item?.confidence);
     const support = String(item?.evidence || '').trim().slice(0, 240);
-    if (!tag || confidence < AI_TAG_MIN_CONFIDENCE || !support || genres.has(tag) || isMetaTag(tag) || !tagAllowed(movie, tag) || !rawTagAllowed(movie, tag)) return;
+    if (!tag || confidence < AI_TAG_MIN_CONFIDENCE || !support || genres.has(tag) || isMetaTag(tag) || suppressedFamilies.has(familyTag) || !tagAllowed(movie, tag) || !rawTagAllowed(movie, tag)) return;
     const cleaned = cleanTagArray([tag], movie, false)[0];
     if (!cleaned || tags.includes(cleaned)) return;
     tags.push(cleaned);
@@ -801,6 +854,7 @@ function applyAiTagAliases(aliases={}) {
   const aliasMap = new Map(entries);
   state.tagAliases = {...(state.tagAliases || {})};
   entries.forEach(([from, to]) => { state.tagAliases[from] = to; });
+  invalidateTagFamilyIndex();
   let changed = 0;
   [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(movie => {
     const before = JSON.stringify(movie.tags || []);
@@ -840,6 +894,7 @@ function commitAiTagSet(movie, cleaned, model='') {
   movie.retagStatus = 'verified';
   movie.retagMessage = '';
   touchRecord(movie);
+  invalidateTagFamilyIndex();
   return movie;
 }
 
@@ -2434,7 +2489,11 @@ function tagEvidenceOk(tag, movie) {
 
 function scoringTags(movie) {
   if (!movie) return [];
-  return [...new Set(rawScoringTags(movie).map(tag => canonicalTagFeatures(tag).phrase).filter(Boolean))].filter(tag => tagAllowed(movie, tag));
+  const families = tagFamilyIndex().familyFor;
+  return [...new Set(rawScoringTags(movie)
+    .map(tag => families.get(tag) || canonicalTagFeatures(tag).phrase)
+    .filter(Boolean))]
+    .filter(tag => tagAllowed(movie, tag));
 }
 
 function abortableSleep(ms) {
@@ -3180,12 +3239,19 @@ function removeTagFromMovie(id, tag, event) {
 }
 
 function suppressTagOnMovie(movie, tag) {
-  movie.suppressedTags = [...new Set([...(movie.suppressedTags || []), normaliseTagName(tag)])];
+  const suppressedFamily = normaliseTagName(tag);
+  const familyFor = tagFamilyIndex().familyFor;
+  movie.suppressedTags = [...new Set([...(movie.suppressedTags || []), suppressedFamily])];
   ['tags','coreTags','plotTags','descriptorTags'].forEach(key => {
-    movie[key] = (movie[key] || []).filter(t => normaliseTagName(t) !== normaliseTagName(tag));
+    movie[key] = (movie[key] || []).filter(t => {
+      const normalised = normaliseTagName(t);
+      const family = familyFor.get(normalised) || canonicalTagFeatures(normalised).phrase;
+      return normalised !== suppressedFamily && family !== suppressedFamily;
+    });
   });
   movie.tagged = scoringTags(movie).length > 0;
   touchRecord(movie);
+  invalidateTagFamilyIndex();
 }
 
 function removeRawTagFromMovie(id, tag, event) {
@@ -3199,6 +3265,7 @@ function removeRawTagFromMovie(id, tag, event) {
   });
   movie.tagged = scoringTags(movie).length > 0 || rawScoringTags(movie).length > 0;
   touchRecord(movie);
+  invalidateTagFamilyIndex();
   computeTagWeights();
   saveLocalState();
   syncDrive();
@@ -3833,6 +3900,7 @@ async function resetAllData() {
   state.wrongPicks = {};
   state.deletedMovieRecords = {};
   state.tagAliases = {};
+  invalidateTagFamilyIndex();
   state.tagStats = { candidates:0, tags:0, rebuiltAt:'' };
   state.settings.tagPreferences = {};
   state.settings.titleSearch = '';
@@ -4103,6 +4171,7 @@ function mergeRemoteData(remoteRaw={}) {
   }
 
   delete state.canonicalTagStats;
+  invalidateTagFamilyIndex();
   ensureSyncMetadata();
   return {localChanged, remoteChanged};
 }
