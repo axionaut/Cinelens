@@ -810,6 +810,7 @@ async function normalizeTagCloudWithAi(opts={}) {
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify({
         task:'normalize-tag-cloud',
+        items:[],
         normalizeVocabularyOnly:true,
         optimizeVocabulary:true,
         normalizationVersion:AI_TAG_CLOUD_NORMALIZE_VERSION,
