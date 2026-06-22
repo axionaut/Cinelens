@@ -223,31 +223,25 @@ function handleTagCloudNormalization(request) {
     vocabularySet[item.tag] = true;
   });
 
-  const existingAliases = sanitizeExistingAliases(
-    request.existingAliases,
-    vocabularySet
-  );
-
   const prompt = [
     'You are consolidating the shared tag vocabulary for CineLens recommendations.',
     '',
-    'Your task is semantic alias detection, not title tagging.',
+    'Your task is to create an in-place rewrite plan, not an alias layer and not title tagging.',
     'Review the complete submitted vocabulary and frequencies.',
-    'Return alias groups only when the phrases are genuinely interchangeable as recommendation signals.',
+    'Return rewrite groups only when phrases are genuinely interchangeable recommendation signals.',
     '',
     'Rules:',
     '- The canonical value must be one existing tag from tagVocabulary.',
-    '- Every alias must also be an existing tag from tagVocabulary.',
+    '- Every tag in replace must also be an existing tag from tagVocabulary.',
     '- Do not invent tags.',
     '- Do not merge phrases merely because they share a word, prefix, modifier, setting, relationship, action, cause or outcome.',
-    '- Keep materially different events separate. For example, accidental-poison and accidental-shooting are not aliases.',
+    '- Keep materially different events separate. For example, accidental-poison and accidental-shooting are not interchangeable.',
     '- Merge clear synonyms, equivalent grammatical forms and redundant qualified variants only when they express the same recommendation signal.',
     '- Prefer the clearest and most reusable existing phrase as canonical.',
-    '- Respect useful existingAliases unless they are clearly invalid.',
     '- Omit uncertain mappings. Precision is more important than reducing the count.',
-    '- Give each alias group a confidence from 0 to 1. Use 0.90 or higher only when every alias is genuinely interchangeable with the canonical tag.',
+    '- Give each rewrite group a confidence from 0 to 1. Use 0.90 or higher only when every replaced tag is genuinely interchangeable with the canonical tag.',
     '',
-    'Return aliasGroups. Do not return identity mappings.',
+    'Return rewriteGroups. Do not return identity mappings.',
     'Return only JSON matching the schema.',
     '',
     JSON.stringify({
@@ -255,7 +249,6 @@ function handleTagCloudNormalization(request) {
         request.normalizationVersion || ''
       ),
       tagVocabulary: vocabulary,
-      existingAliases: existingAliases,
       clientInstructions: String(request.instructions || '').slice(0, 4000)
     })
   ].join('\n');
@@ -263,7 +256,7 @@ function handleTagCloudNormalization(request) {
   const schema = {
     type: 'object',
     properties: {
-      aliasGroups: {
+      rewriteGroups: {
         type: 'array',
         maxItems: vocabulary.length,
         items: {
@@ -273,7 +266,7 @@ function handleTagCloudNormalization(request) {
               type: 'string',
               pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
             },
-            aliases: {
+            replace: {
               type: 'array',
               minItems: 1,
               maxItems: 50,
@@ -288,12 +281,12 @@ function handleTagCloudNormalization(request) {
               maximum: 1
             }
           },
-          required: ['canonical', 'aliases', 'confidence'],
+          required: ['canonical', 'replace', 'confidence'],
           additionalProperties: false
         }
       }
     },
-    required: ['aliasGroups'],
+    required: ['rewriteGroups'],
     additionalProperties: false
   };
 
@@ -303,8 +296,8 @@ function handleTagCloudNormalization(request) {
   return {
     ok: true,
     model: MODEL,
-    tagAliases: validateAliasGroups(
-      result.aliasGroups,
+    rewriteGroups: validateRewriteGroups(
+      result.rewriteGroups,
       vocabularySet
     )
   };
@@ -442,26 +435,7 @@ function sanitizeVocabulary(value) {
     });
 }
 
-function sanitizeExistingAliases(value, vocabularySet) {
-  const output = {};
-
-  Object.keys(value && typeof value === 'object' ? value : {})
-    .forEach(function (from) {
-      const cleanFrom = normalizeTag(from);
-      const cleanTo = normalizeTag(value[from]);
-      if (cleanFrom &&
-          cleanTo &&
-          cleanFrom !== cleanTo &&
-          vocabularySet[cleanFrom] &&
-          vocabularySet[cleanTo]) {
-        output[cleanFrom] = cleanTo;
-      }
-    });
-
-  return output;
-}
-
-function validateAliasGroups(groups, vocabularySet) {
+function validateRewriteGroups(groups, vocabularySet) {
   const output = [];
   const assigned = {};
 
@@ -475,23 +449,23 @@ function validateAliasGroups(groups, vocabularySet) {
       return;
     }
 
-    const aliases = cleanTagList(
-      group && group.aliases,
+    const replacements = cleanTagList(
+      group && group.replace,
       50
-    ).filter(function (alias) {
-      if (alias === canonical ||
-          !vocabularySet[alias] ||
-          assigned[alias]) {
+    ).filter(function (sourceTag) {
+      if (sourceTag === canonical ||
+          !vocabularySet[sourceTag] ||
+          assigned[sourceTag]) {
         return false;
       }
-      assigned[alias] = canonical;
+      assigned[sourceTag] = canonical;
       return true;
     });
 
-    if (aliases.length) {
+    if (replacements.length) {
       output.push({
         canonical: canonical,
-        aliases: aliases,
+        replace: replacements,
         confidence: confidence
       });
     }

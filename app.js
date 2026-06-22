@@ -30,7 +30,7 @@ const AI_TAG_BATCH_SIZE = 20;
 const AI_TAG_RETRY_LIMIT = 3;
 const AI_VOCABULARY_SAMPLE_SIZE = 240;
 const AI_TAG_CLOUD_NORMALIZE_EVERY = 500;
-const AI_TAG_CLOUD_NORMALIZE_VERSION = 'cinelens-tag-cloud-v1';
+const AI_TAG_CLOUD_NORMALIZE_VERSION = 'cinelens-tag-cloud-v2';
 const AI_REQUEST_DELAY_MS = 12000;
 const WIKI_LIST_SOURCES = {
   showsIndex: 'Lists of television programs',
@@ -250,7 +250,7 @@ let state = {
   hiddenTitles: {},
   wrongPicks: {},
   deletedMovieRecords: {},
-  tagAliases: {},
+  legacyTagAliases: {},
   tagStats: { candidates:0, tags:0, rebuiltAt:'' },
   tagNormalization: { version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:'' },
   discoveryCursor: {},
@@ -293,7 +293,6 @@ const USER_AVOID_TAGS = new Set([
 const USER_AVOID_GENRES = new Set(['documentary']);
 const MAX_RECOMMENDATION_TAG_SHARE = 0.10;
 let tagCorpusStatsCache = null;
-let tagFamilyIndexCache = null;
 
 const GENRE_RULES = [
   ['science-fiction', /\b(science fiction|sci-fi)\b/],
@@ -347,25 +346,15 @@ function stemCanonicalToken(token) {
   return word;
 }
 
-function resolvedTagAlias(tag) {
-  let current = normaliseTagName(tag);
-  const seen = new Set();
-  while (current && state?.tagAliases?.[current] && !seen.has(current)) {
-    seen.add(current);
-    current = normaliseTagName(state.tagAliases[current]);
-  }
-  return current;
-}
-
 function canonicalTagFeatures(tag) {
-  const resolvedTag = resolvedTagAlias(tag);
-  const tokens = resolvedTag.split(/[^a-z0-9]+/).filter(Boolean)
+  const normalisedTag = normaliseTagName(tag);
+  const tokens = normalisedTag.split(/[^a-z0-9]+/).filter(Boolean)
     .filter(token => !CANONICAL_FUNCTION_WORDS.has(token))
     .map(stemCanonicalToken)
     .filter(Boolean);
   const unique = [...new Set(tokens)];
   return {
-    tag: resolvedTag,
+    tag: normalisedTag,
     tokens: unique,
     signature: [...unique].sort().join('-'),
     phrase: unique.join('-'),
@@ -386,13 +375,12 @@ function suppressedRawTagSet(movie) {
   return new Set((movie?.suppressedRawTags || []).map(normaliseTagName).filter(Boolean));
 }
 
-function tagMatchesSuppressedFamily(movie, tag) {
-  const candidate = resolvedTagAlias(tag);
-  return [...suppressedTagSet(movie)].some(suppressed => resolvedTagAlias(suppressed) === candidate);
+function tagIsSuppressed(movie, tag) {
+  return suppressedTagSet(movie).has(normaliseTagName(tag));
 }
 
 function tagAllowed(movie, tag) {
-  return !tagMatchesSuppressedFamily(movie, tag);
+  return !tagIsSuppressed(movie, tag);
 }
 
 function rawTagAllowed(movie, tag) {
@@ -411,34 +399,21 @@ function probableEntityTokens(movie) {
   return new Set([...counts.entries()].filter(([, count]) => count >= 2).map(([token]) => token));
 }
 
-function buildTagFamilyIndex(records=[...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})]) {
-  const frequency = new Map();
-  records.forEach(movie => rawScoringTags(movie).forEach(tag => frequency.set(tag, (frequency.get(tag) || 0) + 1)));
-  const tags = [...frequency.keys()];
-  const familyFor = new Map(tags.map(tag => [tag, resolvedTagAlias(tag)]));
-  return {familyFor, candidateCount:tags.length, familyCount:new Set(familyFor.values()).size};
-}
-
-function tagFamilyIndex() {
-  if (!tagFamilyIndexCache) tagFamilyIndexCache = buildTagFamilyIndex();
-  return tagFamilyIndexCache;
-}
-
-function invalidateTagFamilyIndex() {
-  tagFamilyIndexCache = null;
+function invalidateTagCaches() {
   tagCorpusStatsCache = null;
 }
 
 function rebuildTagBrain() {
   const records = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})];
-  tagFamilyIndexCache = buildTagFamilyIndex(records);
+  const tags = new Set();
+  records.forEach(movie => rawScoringTags(movie).forEach(tag => tags.add(tag)));
   records.forEach(movie => {
     delete movie.canonicalTags;
     delete movie.canonicalTagVersion;
   });
   state.tagStats = {
-    candidates:tagFamilyIndexCache.candidateCount,
-    tags:tagFamilyIndexCache.familyCount,
+    candidates:tags.size,
+    tags:tags.size,
     rebuiltAt:new Date().toISOString()
   };
   delete state.canonicalTagStats;
@@ -663,7 +638,8 @@ function hasCurrentAiTags(movie) {
     movie.aiTagging.promptVersion === AI_TAG_PROMPT_VERSION &&
     movie.aiTagging.storyHash === aiStoryHash(movie.storyText) &&
     Array.isArray(movie.tags) &&
-    movie.tags.length >= AI_TAG_MIN_COUNT
+    movie.tags.length > 0 &&
+    Number(movie.aiTagging.completedTagCount || movie.tags.length) >= AI_TAG_MIN_COUNT
   );
 }
 
@@ -704,17 +680,15 @@ function purgeLegacyTagsForAi() {
 
 function cleanAiTagResults(result, movie) {
   const genres = new Set((movieGenres(movie) || []).map(normaliseTagName));
-  const suppressedFamilies = suppressedTagSet(movie);
-  const familyFor = tagFamilyIndex().familyFor;
+  const suppressedTags = suppressedTagSet(movie);
   const evidence = {};
   const tags = [];
   (result?.tags || []).forEach(item => {
     const rawTag = normaliseTagName(item?.tag);
     const tag = rawTag;
-    const familyTag = familyFor.get(tag) || resolvedTagAlias(tag);
     const confidence = Number(item?.confidence);
     const support = String(item?.evidence || '').trim().slice(0, 240);
-    if (!tag || confidence < AI_TAG_MIN_CONFIDENCE || !support || genres.has(tag) || isMetaTag(tag) || suppressedFamilies.has(familyTag) || !tagAllowed(movie, tag) || !rawTagAllowed(movie, tag)) return;
+    if (!tag || confidence < AI_TAG_MIN_CONFIDENCE || !support || genres.has(tag) || isMetaTag(tag) || suppressedTags.has(tag) || !tagAllowed(movie, tag) || !rawTagAllowed(movie, tag)) return;
     const cleaned = cleanTagArray([tag], movie, false)[0];
     if (!cleaned || tags.includes(cleaned)) return;
     tags.push(cleaned);
@@ -744,38 +718,120 @@ function fullAiTagVocabulary() {
     .map(([tag, count]) => ({tag, count}));
 }
 
-function normaliseAiAliasPayload(aliases={}) {
-  if (Array.isArray(aliases)) {
+function normaliseRewritePayload(groups={}) {
+  if (Array.isArray(groups)) {
     const out = {};
-    aliases.forEach(group => {
+    groups.forEach(group => {
       const canonical = normaliseTagName(group?.canonical || group?.tag || '');
-      (group?.aliases || group?.variants || []).forEach(alias => {
-        const from = normaliseTagName(alias);
+      (group?.replace || []).forEach(source => {
+        const from = normaliseTagName(source);
         if (from && canonical && from !== canonical) out[from] = canonical;
       });
     });
     return out;
   }
-  return aliases && typeof aliases === 'object' ? aliases : {};
+  return groups && typeof groups === 'object' ? groups : {};
 }
 
-function applyAiTagAliases(aliases={}) {
+function tagRewriteMap(value={}) {
   const rawVocabulary = new Set(fullAiTagVocabulary().map(item => item.tag));
-  const entries = Object.entries(normaliseAiAliasPayload(aliases))
+  const direct = new Map();
+  Object.entries(normaliseRewritePayload(value))
     .map(([from, to]) => [normaliseTagName(from), normaliseTagName(to)])
-    .filter(([from, to]) => from && to && from !== to && rawVocabulary.has(from) && rawVocabulary.has(to));
-  if (!entries.length) return 0;
-  state.tagAliases = {...(state.tagAliases || {})};
-  let changed = 0;
-  entries.forEach(([from, to]) => {
-    if (resolvedTagAlias(to) === from) return;
-    if (state.tagAliases[from] !== to) {
-      state.tagAliases[from] = to;
-      changed++;
+    .filter(([from, to]) => from && to && from !== to && rawVocabulary.has(from) && rawVocabulary.has(to))
+    .forEach(([from, to]) => {
+      if (!direct.has(from)) direct.set(from, to);
+    });
+  const rewrite = new Map();
+  direct.forEach((to, from) => {
+    const seen = new Set([from]);
+    let target = to;
+    while (direct.has(target) && !seen.has(target)) {
+      seen.add(target);
+      target = direct.get(target);
+    }
+    if (!seen.has(target) && target !== from) rewrite.set(from, target);
+  });
+  return rewrite;
+}
+
+function rewriteTagList(tags, rewrite) {
+  return [...new Set((tags || [])
+    .map(normaliseTagName)
+    .map(tag => rewrite.get(tag) || tag)
+    .filter(Boolean))];
+}
+
+function rewriteTagEvidence(evidence, rewrite) {
+  const output = {};
+  Object.entries(evidence || {}).forEach(([tag, value]) => {
+    const canonical = rewrite.get(normaliseTagName(tag)) || normaliseTagName(tag);
+    if (!canonical) return;
+    const current = output[canonical];
+    if (!current || Number(value?.confidence || 0) > Number(current?.confidence || 0)) output[canonical] = value;
+  });
+  return output;
+}
+
+function applyTagCloudRewrite(groups={}) {
+  const rewrite = tagRewriteMap(groups);
+  if (!rewrite.size) {
+    state.legacyTagAliases = {};
+    return {changedTitles:0, rewrites:0};
+  }
+  let changedTitles = 0;
+  [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(movie => {
+    const before = JSON.stringify({
+      tags:movie.tags || [],
+      coreTags:movie.coreTags || [],
+      plotTags:movie.plotTags || [],
+      descriptorTags:movie.descriptorTags || [],
+      partial:movie.aiTagPartial || null,
+      evidence:movie.aiTagEvidence || {},
+      suppressedTags:movie.suppressedTags || [],
+      suppressedRawTags:movie.suppressedRawTags || []
+    });
+    ['tags','coreTags','plotTags','descriptorTags'].forEach(key => {
+      movie[key] = rewriteTagList(movie[key], rewrite);
+    });
+    if (movie.aiTagPartial) {
+      movie.aiTagPartial.tags = rewriteTagList(movie.aiTagPartial.tags, rewrite);
+      movie.aiTagPartial.evidence = rewriteTagEvidence(movie.aiTagPartial.evidence, rewrite);
+    }
+    movie.aiTagEvidence = rewriteTagEvidence(movie.aiTagEvidence, rewrite);
+    movie.suppressedTags = rewriteTagList(movie.suppressedTags, rewrite);
+    movie.suppressedRawTags = rewriteTagList(movie.suppressedRawTags, rewrite);
+    movie.tagged = (movie.tags || []).length > 0;
+    const after = JSON.stringify({
+      tags:movie.tags || [],
+      coreTags:movie.coreTags || [],
+      plotTags:movie.plotTags || [],
+      descriptorTags:movie.descriptorTags || [],
+      partial:movie.aiTagPartial || null,
+      evidence:movie.aiTagEvidence || {},
+      suppressedTags:movie.suppressedTags || [],
+      suppressedRawTags:movie.suppressedRawTags || []
+    });
+    if (before !== after) {
+      changedTitles++;
+      touchRecord(movie);
     }
   });
-  invalidateTagFamilyIndex();
-  return changed;
+  const nextPreferences = {};
+  Object.entries(state.settings?.tagPreferences || {}).forEach(([tag, value]) => {
+    const canonical = rewrite.get(normaliseTagName(tag)) || normaliseTagName(tag);
+    nextPreferences[canonical] = Math.max(-4, Math.min(4, Number(nextPreferences[canonical] || 0) + Number(value || 0)));
+  });
+  state.settings.tagPreferences = nextPreferences;
+  if (selectedTag) selectedTag = rewrite.get(normaliseTagName(selectedTag)) || normaliseTagName(selectedTag);
+  state.legacyTagAliases = {};
+  invalidateTagCaches();
+  return {changedTitles, rewrites:rewrite.size};
+}
+
+function migrateLegacyTagAliases() {
+  if (!state.legacyTagAliases || !Object.keys(state.legacyTagAliases).length) return {changedTitles:0, rewrites:0};
+  return applyTagCloudRewrite(state.legacyTagAliases);
 }
 
 function tagCloudNormalizationDue(rawCount=fullAiTagVocabulary().length) {
@@ -817,10 +873,9 @@ async function normalizeTagCloudWithAi(opts={}) {
         optimizeVocabulary:true,
         normalizationVersion:AI_TAG_CLOUD_NORMALIZE_VERSION,
         tagVocabulary:vocabulary,
-        existingAliases:state.tagAliases || {},
         instructions:[
           'Review the complete CineLens tag vocabulary as a semantic normalization task.',
-          'Return aliases only for tags that are genuinely interchangeable for recommendation overlap.',
+          'Return rewrite groups only for tags that are genuinely interchangeable.',
           'Choose the clearest existing tag in tagVocabulary as the canonical target. Never invent a new tag.',
           'Merge synonyms and equivalent phrasing such as a base idea and a redundant qualified variant when they represent the same recommendation signal.',
           'Do not merge tags merely because they share one modifier or topic word.',
@@ -832,13 +887,15 @@ async function normalizeTagCloudWithAi(opts={}) {
     if (!response.ok) throw new Error(`AI tag normalization HTTP ${response.status}`);
     const payload = await response.json();
     if (payload.ok === false) throw new Error(payload.error || 'AI tag normalization failed');
-    const aliases = payload.tagAliases || payload.aliases || payload.normalizedAliases || {};
-    const changed = applyAiTagAliases(aliases);
+    const groups = payload.rewriteGroups || payload.tagRewrites || {};
+    const result = applyTagCloudRewrite(groups);
     state.tagNormalization = {
       version:AI_TAG_CLOUD_NORMALIZE_VERSION,
-      lastRawTagCount:rawCount,
+      lastRawTagCount:fullAiTagVocabulary().length,
       normalizedAt:nowStamp(),
       model:String(payload.model || ''),
+      rewrittenTitles:result.changedTitles,
+      rewrites:result.rewrites,
       error:''
     };
     rebuildTagBrain();
@@ -846,8 +903,8 @@ async function normalizeTagCloudWithAi(opts={}) {
     saveLocalState();
     syncDrive();
     render();
-    if (opts.toast !== false) showToast(`Gemini normalized ${rawCount} tags into ${state.tagStats.tags} scoring tags`, 'success');
-    return changed > 0;
+    if (opts.toast !== false) showToast(`Gemini rewrote ${result.rewrites} tags across ${result.changedTitles} titles`, 'success');
+    return result;
   } catch(error) {
     state.tagNormalization = {
       ...(state.tagNormalization || {}),
@@ -880,10 +937,10 @@ async function consolidateTagCloud() {
   }
   showFetchProgress('Gemini consolidating tag cloud...', 35, `${rawCount} raw tags`);
   try {
-    const before = tagFamilyIndex().familyCount;
+    const before = fullAiTagVocabulary().length;
     await normalizeTagCloudWithAi({force:true, toast:false});
-    const after = tagFamilyIndex().familyCount;
-    showToast(`Tag cloud consolidated: ${before} → ${after} scoring tags`, 'success');
+    const after = fullAiTagVocabulary().length;
+    showToast(`Tag cloud consolidated: ${before} → ${after} stored tags`, 'success');
   } catch(error) {
     showToast(`Could not consolidate tag cloud: ${error?.message || error}`, 'error');
   } finally {
@@ -910,12 +967,13 @@ function commitAiTagSet(movie, cleaned, model='') {
     model:String(model || ''),
     promptVersion:AI_TAG_PROMPT_VERSION,
     storyHash:aiStoryHash(movie.storyText),
+    completedTagCount:cleaned.tags.length,
     taggedAt:new Date().toISOString()
   };
   movie.retagStatus = 'verified';
   movie.retagMessage = '';
   touchRecord(movie);
-  invalidateTagFamilyIndex();
+  invalidateTagCaches();
   return movie;
 }
 
@@ -1149,8 +1207,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   restoreDriveSession().finally(() => {
     startupDriveRestoreDone = true;
     const migratedWrongPicks = migrateVisibleWrongPicks();
+    const migratedAliases = migrateLegacyTagAliases();
     const purgedTags = purgeLegacyTagsForAi();
-    if (migratedWrongPicks || purgedTags) {
+    if (migratedWrongPicks || purgedTags || migratedAliases.rewrites) {
       rebuildTagBrain();
       computeTagWeights();
       saveLocalState();
@@ -2233,9 +2292,9 @@ function ratePendingManualMovie(rating) {
 function manualTagCloud(movie) {
   const counts = new Map();
   fullAiTagVocabulary().forEach(({tag, count}) => {
-    const resolved = resolvedTagAlias(tag);
-    if (!resolved || !tagAllowed(movie, resolved) || isMetaTag(resolved) || movieGenres(movie).includes(resolved)) return;
-    counts.set(resolved, (counts.get(resolved) || 0) + Number(count || 0));
+    const normalised = normaliseTagName(tag);
+    if (!normalised || !tagAllowed(movie, normalised) || isMetaTag(normalised) || movieGenres(movie).includes(normalised)) return;
+    counts.set(normalised, (counts.get(normalised) || 0) + Number(count || 0));
   });
   return [...counts.entries()].sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 }
@@ -2666,11 +2725,7 @@ function tagEvidenceOk(tag, movie) {
 
 function scoringTags(movie) {
   if (!movie) return [];
-  const families = tagFamilyIndex().familyFor;
-  return [...new Set(rawScoringTags(movie)
-    .map(tag => families.get(tag) || resolvedTagAlias(tag))
-    .filter(Boolean))]
-    .filter(tag => tagAllowed(movie, tag));
+  return rawScoringTags(movie).filter(tag => tagAllowed(movie, tag));
 }
 
 function abortableSleep(ms) {
@@ -3418,19 +3473,14 @@ function removeTagFromMovie(id, tag, event) {
 }
 
 function suppressTagOnMovie(movie, tag) {
-  const suppressedFamily = normaliseTagName(tag);
-  const familyFor = tagFamilyIndex().familyFor;
-  movie.suppressedTags = [...new Set([...(movie.suppressedTags || []), suppressedFamily])];
+  const suppressedTag = normaliseTagName(tag);
+  movie.suppressedTags = [...new Set([...(movie.suppressedTags || []), suppressedTag])];
   ['tags','coreTags','plotTags','descriptorTags'].forEach(key => {
-    movie[key] = (movie[key] || []).filter(t => {
-      const normalised = normaliseTagName(t);
-      const family = familyFor.get(normalised) || resolvedTagAlias(normalised);
-      return normalised !== suppressedFamily && family !== suppressedFamily;
-    });
+    movie[key] = (movie[key] || []).filter(t => normaliseTagName(t) !== suppressedTag);
   });
   movie.tagged = scoringTags(movie).length > 0;
   touchRecord(movie);
-  invalidateTagFamilyIndex();
+  invalidateTagCaches();
 }
 
 function removeRawTagFromMovie(id, tag, event) {
@@ -3444,7 +3494,7 @@ function removeRawTagFromMovie(id, tag, event) {
   });
   movie.tagged = scoringTags(movie).length > 0 || rawScoringTags(movie).length > 0;
   touchRecord(movie);
-  invalidateTagFamilyIndex();
+  invalidateTagCaches();
   computeTagWeights();
   saveLocalState();
   syncDrive();
@@ -4073,8 +4123,8 @@ async function resetAllData() {
   state.hiddenTitles = {};
   state.wrongPicks = {};
   state.deletedMovieRecords = {};
-  state.tagAliases = {};
-  invalidateTagFamilyIndex();
+  state.legacyTagAliases = {};
+  invalidateTagCaches();
   state.tagStats = { candidates:0, tags:0, rebuiltAt:'' };
   state.tagNormalization = { version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:'' };
   state.settings.tagPreferences = {};
@@ -4189,7 +4239,6 @@ function exportCinelensData() {
     hiddenTitles: state.hiddenTitles,
     wrongPicks: state.wrongPicks,
     deletedMovieRecords: state.deletedMovieRecords,
-    tagAliases: state.tagAliases,
     tagStats: state.tagStats,
     tagNormalization: state.tagNormalization,
     discoveryCursor: state.discoveryCursor
@@ -4248,7 +4297,7 @@ function normaliseIncomingData(d={}) {
     hiddenTitles: d.hiddenTitles || {},
     wrongPicks: d.wrongPicks || {},
     deletedMovieRecords: d.deletedMovieRecords || {},
-    tagAliases: d.tagAliases || {},
+    legacyTagAliases: d.tagAliases || d.legacyTagAliases || {},
     tagStats,
     tagNormalization: d.tagNormalization || {version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:''},
     discoveryCursor: normaliseDiscoveryCursor(d.discoveryCursor || {})
@@ -4263,7 +4312,7 @@ function replaceStateFromDataset(dataset) {
   state.hiddenTitles = incoming.hiddenTitles;
   state.wrongPicks = incoming.wrongPicks;
   state.deletedMovieRecords = incoming.deletedMovieRecords;
-  state.tagAliases = incoming.tagAliases;
+  state.legacyTagAliases = incoming.legacyTagAliases;
   state.tagStats = incoming.tagStats;
   state.tagNormalization = incoming.tagNormalization;
   state.discoveryCursor = incoming.discoveryCursor;
@@ -4271,7 +4320,7 @@ function replaceStateFromDataset(dataset) {
   Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
   Object.values(state.hiddenTitles || {}).forEach(normaliseStoredTitleRecord);
   ensureDiscoveryCursor();
-  invalidateTagFamilyIndex();
+  invalidateTagCaches();
 }
 
 function mergeRemoteData(remoteRaw={}) {
@@ -4281,7 +4330,7 @@ function mergeRemoteData(remoteRaw={}) {
   const localResetAt = Date.parse(state.meta?.resetAt || '') || 0;
   const remoteResetAt = Date.parse(remote.meta?.resetAt || '') || 0;
   const remoteWins = remoteResetAt > localResetAt || (remoteResetAt === localResetAt && remoteStamp > localStamp);
-  const localData = exportCinelensData();
+  const localData = normaliseIncomingData(exportCinelensData());
   const sameData = JSON.stringify(localData) === JSON.stringify(remote);
   if (remoteWins) {
     replaceStateFromDataset(remote);
@@ -4318,7 +4367,7 @@ function loadLocalState() {
       if (s.hiddenTitles) state.hiddenTitles=s.hiddenTitles;
       if (s.wrongPicks) state.wrongPicks=s.wrongPicks;
       if (s.deletedMovieRecords) state.deletedMovieRecords=s.deletedMovieRecords;
-      if (s.tagAliases) state.tagAliases=s.tagAliases;
+      if (s.tagAliases || s.legacyTagAliases) state.legacyTagAliases=s.tagAliases || s.legacyTagAliases;
       if (s.tagStats) state.tagStats=s.tagStats;
       else if (s.canonicalTagStats) state.tagStats={candidates:s.canonicalTagStats.raw||0,tags:s.canonicalTagStats.canonical||0,rebuiltAt:s.canonicalTagStats.rebuiltAt||''};
       if (s.tagNormalization) state.tagNormalization=s.tagNormalization;
@@ -4617,6 +4666,7 @@ async function loadFromDrive() {
     if (!resp.ok) throw new Error('Drive load failed');
     const d=await resp.json();
     const merge = mergeRemoteData(d);
+    const migratedAliases = migrateLegacyTagAliases();
     migrateLegacyPoolItems();
     const cleaned = cleanContaminatedTags(true);
     computeTagWeights();
@@ -4625,7 +4675,7 @@ async function loadFromDrive() {
     showToast(merge.winner === 'drive' ? 'Drive was newer. Local data replaced.' : merge.remoteChanged ? 'Local was newer. Updating Drive.' : 'Local and Drive are identical.', 'success');
     state.drive.connected=true;
     setDriveStatus('connected');
-    if (merge.remoteChanged || cleaned) await uploadDriveData();
+    if (merge.remoteChanged || cleaned || migratedAliases.rewrites) await uploadDriveData();
     scheduleTagCloudNormalization(1600);
   } catch(e){
     state.drive.connected=false;
