@@ -1,0 +1,574 @@
+const MODEL = 'gemini-3.1-flash-lite';
+const DAILY_REQUEST_LIMIT = 100;
+const MAX_ITEMS = 20;
+const MAX_STORY_CHARS = 14000;
+const DEFAULT_MIN_TAGS = 10;
+const DEFAULT_MAX_TAGS = 20;
+const MAX_VOCABULARY_TAGS = 6000;
+
+function doGet() {
+  return jsonOutput({
+    ok: true,
+    service: 'CineLens Gemini Tagger',
+    model: MODEL,
+    supports: ['tag-titles', 'normalize-tag-cloud']
+  });
+}
+
+function doPost(e) {
+  try {
+    const request = JSON.parse(
+      e && e.postData && e.postData.contents || '{}'
+    );
+
+    if (request.task === 'normalize-tag-cloud' ||
+        request.normalizeVocabularyOnly === true) {
+      return jsonOutput(handleTagCloudNormalization(request));
+    }
+
+    return jsonOutput(handleTitleTagging(request));
+  } catch (error) {
+    return jsonOutput({
+      ok: false,
+      error: String(error && error.message || error)
+    });
+  }
+}
+
+function handleTitleTagging(request) {
+  const items = Array.isArray(request.items)
+    ? request.items.slice(0, MAX_ITEMS)
+    : [];
+
+  if (!items.length) {
+    throw new Error('No titles supplied');
+  }
+
+  const minimumTags = clampNumber(
+    request.minimumTags,
+    1,
+    DEFAULT_MAX_TAGS,
+    DEFAULT_MIN_TAGS
+  );
+  const maximumTags = clampNumber(
+    request.maximumTags,
+    minimumTags,
+    DEFAULT_MAX_TAGS,
+    DEFAULT_MAX_TAGS
+  );
+
+  const cleanItems = items.map(function (item, index) {
+    const existingTags = cleanTagList(item.existingTags, maximumTags);
+    const excludedTags = cleanTagList(item.excludedTags, 200);
+    const requestedAdditional = clampNumber(
+      item.minimumAdditionalTags,
+      0,
+      maximumTags,
+      Math.max(0, minimumTags - existingTags.length)
+    );
+
+    return {
+      id: String(item.id || index),
+      title: String(item.title || '').slice(0, 200),
+      year: Number(item.year) || null,
+      format: item.format === 'show' ? 'show' : 'movie',
+      language: String(item.language || '').slice(0, 30),
+      genres: Array.isArray(item.genres)
+        ? item.genres.slice(0, 12).map(String)
+        : [],
+      plot: String(item.storyText || '').slice(0, MAX_STORY_CHARS),
+      existingTags: existingTags,
+      excludedTags: excludedTags,
+      minimumAdditionalTags: requestedAdditional,
+      preferredTagVocabulary: cleanTagList(
+        item.preferredTagVocabulary,
+        500
+      )
+    };
+  });
+
+  const prompt = buildTitleTaggingPrompt(
+    cleanItems,
+    minimumTags,
+    maximumTags,
+    request.continueTagging === true
+  );
+
+  const schema = {
+    type: 'object',
+    properties: {
+      results: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            tags: {
+              type: 'array',
+              minItems: 1,
+              maxItems: maximumTags,
+              items: {
+                type: 'object',
+                properties: {
+                  tag: {
+                    type: 'string',
+                    pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+                  },
+                  confidence: {
+                    type: 'number',
+                    minimum: 0,
+                    maximum: 1
+                  },
+                  evidence: {
+                    type: 'string'
+                  }
+                },
+                required: ['tag', 'confidence', 'evidence'],
+                additionalProperties: false
+              }
+            }
+          },
+          required: ['id', 'tags'],
+          additionalProperties: false
+        }
+      }
+    },
+    required: ['results'],
+    additionalProperties: false
+  };
+
+  enforceDailyLimit();
+  const result = callGemini(prompt, schema, 24000);
+
+  return {
+    ok: true,
+    model: MODEL,
+    results: sanitizeTaggingResults(
+      result.results,
+      cleanItems,
+      maximumTags
+    )
+  };
+}
+
+function buildTitleTaggingPrompt(
+  cleanItems,
+  minimumTags,
+  maximumTags,
+  continuation
+) {
+  return [
+    'You are the story-tagging engine for CineLens, a movie and television recommendation system.',
+    '',
+    'Each input item represents one movie or television show.',
+    'The plot field contains narrative text selected from Wikipedia.',
+    'It may combine multiple season or chapter subsections from one parent Plot, Story, Premise, Synopsis, Summary, or Overview section.',
+    '',
+    'Ignore production, development, filming, casting, release, broadcast, reception, ratings, awards, soundtrack, marketing, references, and other non-story information.',
+    '',
+    'For a new item, produce ' + minimumTags + ' to ' + maximumTags + ' distinct, evidence-supported tags when the supplied narrative supports them.',
+    'For a continuation item, return only new tags. Do not repeat, rename, paraphrase, or reformat existingTags.',
+    'Return at least minimumAdditionalTags new tags for a continuation item whenever the narrative supports them.',
+    'Never return a tag present in excludedTags.',
+    '',
+    'For a long-running series, cover the full supplied narrative rather than only one season:',
+    '- central premise and recurring conflict;',
+    '- important friendships, romances, family and social dynamics;',
+    '- work, academic or institutional setting;',
+    '- recurring interests and lifestyle context;',
+    '- major character development and long-term arcs;',
+    '- important narrative devices, stakes and ending attributes.',
+    '',
+    'The goal is a rich story fingerprint suitable for comparing thousands of titles.',
+    'Do not pad with generic, overlapping, weak, speculative, genre-only or meta tags.',
+    '',
+    'Tag rules:',
+    '- Base every tag only on clear evidence in plot.',
+    '- Use lowercase kebab-case.',
+    '- Prefer reusable recommendation signals over one-off wording.',
+    '- Do not output genres, title, language, country, year, decade, film, movie, show, series or miniseries.',
+    '- Do not output actor, director, writer, character, real-person, organization, studio, network or brand names.',
+    '- Do not infer details that are not explicit and important to the story.',
+    '- Merge near-duplicate ideas inside this response.',
+    '- preferredTagVocabulary is optional guidance, not a requirement.',
+    '',
+    'Evidence rules:',
+    '- Every tag must include a short exact quotation or close paraphrase from plot.',
+    '- Evidence must demonstrate why the tag applies.',
+    '- Confidence must be between 0 and 1.',
+    '- Use confidence below 0.55 when evidence is weak or incidental.',
+    '- Omit uncertain tags.',
+    '',
+    'Return one result for every supplied item.',
+    'Preserve each item id exactly.',
+    'Return only JSON matching the required schema.',
+    'Do not include Markdown or commentary.',
+    continuation
+      ? 'This is a continuation request. Existing accepted tags must not appear in the returned tags.'
+      : '',
+    '',
+    JSON.stringify(cleanItems)
+  ].join('\n');
+}
+
+function handleTagCloudNormalization(request) {
+  const vocabulary = sanitizeVocabulary(request.tagVocabulary);
+
+  if (vocabulary.length < 2) {
+    throw new Error('At least two vocabulary tags are required');
+  }
+
+  const vocabularySet = {};
+  vocabulary.forEach(function (item) {
+    vocabularySet[item.tag] = true;
+  });
+
+  const existingAliases = sanitizeExistingAliases(
+    request.existingAliases,
+    vocabularySet
+  );
+
+  const prompt = [
+    'You are consolidating the shared tag vocabulary for CineLens recommendations.',
+    '',
+    'Your task is semantic alias detection, not title tagging.',
+    'Review the complete submitted vocabulary and frequencies.',
+    'Return alias groups only when the phrases are genuinely interchangeable as recommendation signals.',
+    '',
+    'Rules:',
+    '- The canonical value must be one existing tag from tagVocabulary.',
+    '- Every alias must also be an existing tag from tagVocabulary.',
+    '- Do not invent tags.',
+    '- Do not merge phrases merely because they share a word, prefix, modifier, setting, relationship, action, cause or outcome.',
+    '- Keep materially different events separate. For example, accidental-poison and accidental-shooting are not aliases.',
+    '- Merge clear synonyms, equivalent grammatical forms and redundant qualified variants only when they express the same recommendation signal.',
+    '- Prefer the clearest and most reusable existing phrase as canonical.',
+    '- Respect useful existingAliases unless they are clearly invalid.',
+    '- Omit uncertain mappings. Precision is more important than reducing the count.',
+    '- Give each alias group a confidence from 0 to 1. Use 0.90 or higher only when every alias is genuinely interchangeable with the canonical tag.',
+    '',
+    'Return aliasGroups. Do not return identity mappings.',
+    'Return only JSON matching the schema.',
+    '',
+    JSON.stringify({
+      normalizationVersion: String(
+        request.normalizationVersion || ''
+      ),
+      tagVocabulary: vocabulary,
+      existingAliases: existingAliases,
+      clientInstructions: String(request.instructions || '').slice(0, 4000)
+    })
+  ].join('\n');
+
+  const schema = {
+    type: 'object',
+    properties: {
+      aliasGroups: {
+        type: 'array',
+        maxItems: vocabulary.length,
+        items: {
+          type: 'object',
+          properties: {
+            canonical: {
+              type: 'string',
+              pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+            },
+            aliases: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 50,
+              items: {
+                type: 'string',
+                pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+              }
+            },
+            confidence: {
+              type: 'number',
+              minimum: 0,
+              maximum: 1
+            }
+          },
+          required: ['canonical', 'aliases', 'confidence'],
+          additionalProperties: false
+        }
+      }
+    },
+    required: ['aliasGroups'],
+    additionalProperties: false
+  };
+
+  enforceDailyLimit();
+  const result = callGemini(prompt, schema, 24000);
+
+  return {
+    ok: true,
+    model: MODEL,
+    tagAliases: validateAliasGroups(
+      result.aliasGroups,
+      vocabularySet
+    )
+  };
+}
+
+function callGemini(prompt, schema, maxOutputTokens) {
+  const apiKey = PropertiesService
+    .getScriptProperties()
+    .getProperty('GEMINI_API_KEY');
+
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is missing');
+  }
+
+  const url =
+    'https://generativelanguage.googleapis.com/v1beta/models/' +
+    MODEL +
+    ':generateContent';
+
+  const response = UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'x-goog-api-key': apiKey
+    },
+    muteHttpExceptions: true,
+    payload: JSON.stringify({
+      contents: [{
+        role: 'user',
+        parts: [{ text: prompt }]
+      }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: maxOutputTokens || 24000,
+        responseMimeType: 'application/json',
+        responseJsonSchema: schema
+      }
+    })
+  });
+
+  const status = response.getResponseCode();
+  const body = JSON.parse(response.getContentText() || '{}');
+
+  if (status < 200 || status >= 300) {
+    throw new Error(
+      body.error && body.error.message
+        ? body.error.message
+        : 'Gemini request failed: HTTP ' + status
+    );
+  }
+
+  const text =
+    body.candidates &&
+    body.candidates[0] &&
+    body.candidates[0].content &&
+    body.candidates[0].content.parts &&
+    body.candidates[0].content.parts[0] &&
+    body.candidates[0].content.parts[0].text;
+
+  if (!text) {
+    throw new Error('Gemini returned no result');
+  }
+
+  return JSON.parse(text);
+}
+
+function sanitizeTaggingResults(results, cleanItems, maximumTags) {
+  const allowedIds = {};
+  cleanItems.forEach(function (item) {
+    allowedIds[item.id] = {
+      excluded: toLookup(item.excludedTags),
+      existing: toLookup(item.existingTags)
+    };
+  });
+
+  return (Array.isArray(results) ? results : [])
+    .filter(function (result) {
+      return allowedIds[String(result && result.id)];
+    })
+    .map(function (result) {
+      const id = String(result.id);
+      const rules = allowedIds[id];
+      const seen = {};
+      const tags = (Array.isArray(result.tags) ? result.tags : [])
+        .map(function (item) {
+          return {
+            tag: normalizeTag(item && item.tag),
+            confidence: Number(item && item.confidence),
+            evidence: String(item && item.evidence || '').slice(0, 500)
+          };
+        })
+        .filter(function (item) {
+          if (!item.tag ||
+              !item.evidence ||
+              !isFinite(item.confidence) ||
+              item.confidence < 0 ||
+              item.confidence > 1 ||
+              seen[item.tag] ||
+              rules.excluded[item.tag] ||
+              rules.existing[item.tag]) {
+            return false;
+          }
+          seen[item.tag] = true;
+          return true;
+        })
+        .slice(0, maximumTags);
+
+      return {
+        id: id,
+        tags: tags
+      };
+    });
+}
+
+function sanitizeVocabulary(value) {
+  const counts = {};
+
+  (Array.isArray(value) ? value : [])
+    .slice(0, MAX_VOCABULARY_TAGS)
+    .forEach(function (item) {
+      const tag = normalizeTag(item && item.tag);
+      if (!tag) return;
+      counts[tag] = Math.max(
+        counts[tag] || 0,
+        Math.max(1, Number(item.count) || 1)
+      );
+    });
+
+  return Object.keys(counts)
+    .map(function (tag) {
+      return { tag: tag, count: counts[tag] };
+    })
+    .sort(function (a, b) {
+      return b.count - a.count || a.tag.localeCompare(b.tag);
+    });
+}
+
+function sanitizeExistingAliases(value, vocabularySet) {
+  const output = {};
+
+  Object.keys(value && typeof value === 'object' ? value : {})
+    .forEach(function (from) {
+      const cleanFrom = normalizeTag(from);
+      const cleanTo = normalizeTag(value[from]);
+      if (cleanFrom &&
+          cleanTo &&
+          cleanFrom !== cleanTo &&
+          vocabularySet[cleanFrom] &&
+          vocabularySet[cleanTo]) {
+        output[cleanFrom] = cleanTo;
+      }
+    });
+
+  return output;
+}
+
+function validateAliasGroups(groups, vocabularySet) {
+  const output = [];
+  const assigned = {};
+
+  (Array.isArray(groups) ? groups : []).forEach(function (group) {
+    const canonical = normalizeTag(group && group.canonical);
+    const confidence = Number(group && group.confidence);
+    if (!canonical ||
+        !vocabularySet[canonical] ||
+        !isFinite(confidence) ||
+        confidence < 0.9) {
+      return;
+    }
+
+    const aliases = cleanTagList(
+      group && group.aliases,
+      50
+    ).filter(function (alias) {
+      if (alias === canonical ||
+          !vocabularySet[alias] ||
+          assigned[alias]) {
+        return false;
+      }
+      assigned[alias] = canonical;
+      return true;
+    });
+
+    if (aliases.length) {
+      output.push({
+        canonical: canonical,
+        aliases: aliases,
+        confidence: confidence
+      });
+    }
+  });
+
+  return output;
+}
+
+function cleanTagList(value, limit) {
+  const seen = {};
+  return (Array.isArray(value) ? value : [])
+    .map(normalizeTag)
+    .filter(function (tag) {
+      if (!tag || seen[tag]) return false;
+      seen[tag] = true;
+      return true;
+    })
+    .slice(0, limit || 200);
+}
+
+function normalizeTag(value) {
+  const tag = String(value || '')
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '-');
+
+  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(tag)
+    ? tag
+    : '';
+}
+
+function toLookup(values) {
+  const output = {};
+  (values || []).forEach(function (value) {
+    output[value] = true;
+  });
+  return output;
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(number)));
+}
+
+function enforceDailyLimit() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(5000);
+
+  try {
+    const properties = PropertiesService.getScriptProperties();
+    const day = Utilities.formatDate(
+      new Date(),
+      'Etc/UTC',
+      'yyyy-MM-dd'
+    );
+
+    const storedDay = properties.getProperty('USAGE_DAY');
+    let count = Number(properties.getProperty('USAGE_COUNT') || 0);
+
+    if (storedDay !== day) {
+      count = 0;
+      properties.setProperty('USAGE_DAY', day);
+    }
+
+    if (count >= DAILY_REQUEST_LIMIT) {
+      throw new Error('Daily CineLens tagging limit reached');
+    }
+
+    properties.setProperty('USAGE_COUNT', String(count + 1));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function jsonOutput(value) {
+  return ContentService
+    .createTextOutput(JSON.stringify(value))
+    .setMimeType(ContentService.MimeType.JSON);
+}
