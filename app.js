@@ -863,6 +863,38 @@ async function normalizeTagCloudWithAi(opts={}) {
   }
 }
 
+async function consolidateTagCloud() {
+  const btn = document.getElementById('normalizeTagCloudBtn');
+  if (tagCloudNormalizationInProgress) {
+    showToast('Tag-cloud consolidation is already running.', '');
+    return;
+  }
+  const rawCount = fullAiTagVocabulary().length;
+  if (rawCount < 2) {
+    showToast('Add more tagged titles before consolidating the tag cloud.', '');
+    return;
+  }
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Consolidating...';
+  }
+  showFetchProgress('Gemini consolidating tag cloud...', 35, `${rawCount} raw tags`);
+  try {
+    const before = tagFamilyIndex().familyCount;
+    await normalizeTagCloudWithAi({force:true, toast:false});
+    const after = tagFamilyIndex().familyCount;
+    showToast(`Tag cloud consolidated: ${before} → ${after} scoring tags`, 'success');
+  } catch(error) {
+    showToast(`Could not consolidate tag cloud: ${error?.message || error}`, 'error');
+  } finally {
+    hideFetchProgress();
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Consolidate Tag Cloud';
+    }
+  }
+}
+
 function commitAiTagSet(movie, cleaned, model='') {
   if (cleaned.tags.length < AI_TAG_MIN_COUNT) throw new Error(`AI returned too few usable tags for ${movie.title}`);
   movie.tags = cleaned.tags;
@@ -894,6 +926,19 @@ function applyAiTagResult(movie, result, model='') {
 function mergeAiTagPartials(previous={tags:[], evidence:{}}, next={tags:[], evidence:{}}) {
   const tags = [...new Set([...(previous.tags || []), ...(next.tags || [])])].slice(0, AI_TAG_MAX_COUNT);
   return {tags, evidence:{...(previous.evidence || {}), ...(next.evidence || {})}};
+}
+
+function aiTagFailureMessage(error, movie=null) {
+  const reason = String(error?.message || error || movie?.aiTagging?.error || 'AI tagging failed');
+  const partialCount = movie?.aiTagPartial?.tags?.length || 0;
+  if (/daily cinelens tagging limit reached/i.test(reason)) {
+    return partialCount
+      ? `Daily AI limit reached · ${partialCount}/${AI_TAG_MIN_COUNT} tags saved · choose tags or retry later`
+      : 'Daily AI limit reached · choose tags or retry later';
+  }
+  if (partialCount) return `AI built ${partialCount}/${AI_TAG_MIN_COUNT} tags · choose tags or retry`;
+  if (/too few usable tags|fewer than/i.test(reason)) return `AI returned fewer than ${AI_TAG_MIN_COUNT} usable tags · choose tags or retry`;
+  return `${reason} · choose tags or retry`;
 }
 
 async function requestAiTags(movies, opts={}) {
@@ -2131,7 +2176,7 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
         await applyAiTags(stored, {force:true});
       } catch(e) {
         stored.retagStatus = 'needs-ai-tags';
-        stored.retagMessage = `AI returned fewer than ${AI_TAG_MIN_COUNT} usable tags`;
+        stored.retagMessage = aiTagFailureMessage(e, stored);
         touchRecord(stored);
       }
     }
@@ -3720,6 +3765,7 @@ async function retagFromStoredData(id, opts={}) {
       try {
         await applyAiTags(movie, {force:true});
       } catch(firstError) {
+        if (/daily cinelens tagging limit reached/i.test(String(firstError?.message || firstError))) throw firstError;
         const fresh = await refreshTitleFromWikipedia(movie, {ai:false});
         if (!fresh) throw firstError;
         updated = applyFreshWikiMovie(id, fresh, movie);
@@ -3747,16 +3793,12 @@ async function retagFromStoredData(id, opts={}) {
     return updated;
   } catch(err) {
     const current = state.movies[id] || movie;
-    const reason = String(err?.message || current.aiTagging?.error || 'AI retag failed');
-    const partialCount = current.aiTagPartial?.tags?.length || 0;
     current.needsManualUrl = false;
     current.retagStatus = 'needs-ai-tags';
-    current.retagMessage = partialCount
-      ? `AI built ${partialCount}/${AI_TAG_MIN_COUNT} tags · choose tags or retry`
-      : reason.includes('too few usable tags') ? `AI returned fewer than ${AI_TAG_MIN_COUNT} usable tags` : 'AI retag pending';
+    current.retagMessage = aiTagFailureMessage(err, current);
     saveLocalState();
     render();
-    if (opts.errorToast !== false) showToast(`Could not re-tag "${current.title}": ${reason}`, 'error');
+    if (opts.errorToast !== false) showToast(`Could not re-tag "${current.title}": ${current.retagMessage}`, 'error');
     return null;
   } finally {
     hideFetchProgress();
