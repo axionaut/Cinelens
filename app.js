@@ -29,7 +29,7 @@ const AI_TAG_MIGRATION_VERSION = 1;
 const AI_TAG_BATCH_SIZE = 20;
 const AI_TAG_RETRY_LIMIT = 3;
 const AI_VOCABULARY_SAMPLE_SIZE = 240;
-const AI_TAG_CLOUD_NORMALIZE_EVERY = 500;
+const AI_TAG_CLOUD_NORMALIZE_EVERY = 100;
 const AI_TAG_CLOUD_NORMALIZE_VERSION = 'cinelens-tag-cloud-v2';
 const AI_REQUEST_DELAY_MS = 12000;
 const WIKI_LIST_SOURCES = {
@@ -638,8 +638,7 @@ function hasCurrentAiTags(movie) {
     movie.aiTagging.promptVersion === AI_TAG_PROMPT_VERSION &&
     movie.aiTagging.storyHash === aiStoryHash(movie.storyText) &&
     Array.isArray(movie.tags) &&
-    movie.tags.length > 0 &&
-    Number(movie.aiTagging.completedTagCount || movie.tags.length) >= AI_TAG_MIN_COUNT
+    movie.tags.length > 0
   );
 }
 
@@ -842,12 +841,44 @@ function tagCloudNormalizationDue(rawCount=fullAiTagVocabulary().length) {
 }
 
 function scheduleTagCloudNormalization(delay=1200) {
-  if (!startupDriveRestoreDone || tagCloudNormalizationTimer || tagCloudNormalizationInProgress || poolExpansionInProgress) return;
+  if (
+    !startupDriveRestoreDone ||
+    tagCloudNormalizationTimer ||
+    tagCloudNormalizationInProgress ||
+    poolExpansionInProgress
+  ) {
+    return;
+  }
+
   const rawCount = fullAiTagVocabulary().length;
-  if (!tagCloudNormalizationDue(rawCount) || tagCloudNormalizationAttemptedCount === rawCount) return;
-  tagCloudNormalizationTimer = setTimeout(() => {
+
+  if (
+    !tagCloudNormalizationDue(rawCount) ||
+    tagCloudNormalizationAttemptedCount === rawCount
+  ) {
+    return;
+  }
+
+  tagCloudNormalizationTimer = setTimeout(async () => {
     tagCloudNormalizationTimer = null;
-    normalizeTagCloudWithAi().catch(error => console.warn('Tag cloud normalization failed', error));
+
+    try {
+      for (let pass = 1; pass <= 2; pass++) {
+        const result = await normalizeTagCloudWithAi({
+          force: true,
+          toast: false
+        });
+
+        const rewrites = Number(result?.rewrites || 0);
+        const changedTitles = Number(result?.changedTitles || 0);
+
+        if (!rewrites || !changedTitles) {
+          break;
+        }
+      }
+    } catch (error) {
+      console.warn('Tag cloud normalization failed', error);
+    }
   }, delay);
 }
 
@@ -922,29 +953,71 @@ async function normalizeTagCloudWithAi(opts={}) {
 
 async function consolidateTagCloud() {
   const btn = document.getElementById('normalizeTagCloudBtn');
+  const maxPasses = 8;
+
   if (tagCloudNormalizationInProgress) {
     showToast('Tag-cloud consolidation is already running.', '');
     return;
   }
-  const rawCount = fullAiTagVocabulary().length;
-  if (rawCount < 2) {
+
+  const before = fullAiTagVocabulary().length;
+
+  if (before < 2) {
     showToast('Add more tagged titles before consolidating the tag cloud.', '');
     return;
   }
+
   if (btn) {
     btn.disabled = true;
     btn.textContent = 'Consolidating...';
   }
-  showFetchProgress('Gemini consolidating tag cloud...', 35, `${rawCount} raw tags`);
+
+  let totalRewrites = 0;
+  let totalChangedTitles = 0;
+  let completedPasses = 0;
+
   try {
-    const before = fullAiTagVocabulary().length;
-    await normalizeTagCloudWithAi({force:true, toast:false});
+    for (let pass = 1; pass <= maxPasses; pass++) {
+      const currentCount = fullAiTagVocabulary().length;
+
+      showFetchProgress(
+        `Gemini consolidating tag cloud, pass ${pass}/${maxPasses}...`,
+        35 + Math.min(55, pass * 7),
+        `${currentCount} current tags`
+      );
+
+      const result = await normalizeTagCloudWithAi({
+        force: true,
+        toast: false
+      });
+
+      completedPasses = pass;
+
+      const rewrites = Number(result?.rewrites || 0);
+      const changedTitles = Number(result?.changedTitles || 0);
+
+      totalRewrites += rewrites;
+      totalChangedTitles += changedTitles;
+
+      if (!rewrites || !changedTitles) {
+        break;
+      }
+    }
+
     const after = fullAiTagVocabulary().length;
-    showToast(`Tag cloud consolidated: ${before} → ${after} stored tags`, 'success');
-  } catch(error) {
-    showToast(`Could not consolidate tag cloud: ${error?.message || error}`, 'error');
+
+    showToast(
+      `Tag cloud consolidated in ${completedPasses} pass${completedPasses === 1 ? '' : 'es'}: ${before} → ${after} tags, ${totalRewrites} rewrites across ${totalChangedTitles} title updates`,
+      'success'
+    );
+  } catch (error) {
+    showToast(
+      `Could not consolidate tag cloud: ${error?.message || error}`,
+      'error'
+    );
   } finally {
     hideFetchProgress();
+
     if (btn) {
       btn.disabled = false;
       btn.textContent = 'Consolidate Tag Cloud';
