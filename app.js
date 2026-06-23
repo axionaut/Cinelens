@@ -2073,84 +2073,77 @@ async function expandPool(manual=true) {
 
   const flushPendingAiMovies = async () => {
     if (!pendingAiMovies.length || fetchAbortRequested) return;
+
     const pendingBatch = pendingAiMovies.splice(0, AI_TAG_BATCH_SIZE);
+
     if (aiUnavailable) {
       outcomes.ai += pendingBatch.length;
       return;
     }
-    const flushPendingAiMovies = async () => {
-      if (!pendingAiMovies.length || fetchAbortRequested) return;
 
-      const pendingBatch = pendingAiMovies.splice(0, AI_TAG_BATCH_SIZE);
+    const batch = completeAiBatch(
+      pendingBatch.map(item => item.movie)
+    );
 
-      if (aiUnavailable) {
-        outcomes.ai += pendingBatch.length;
-        return;
-      }
+    if (!batch.length) {
+      return;
+    }
 
-      const batch = completeAiBatch(
-        pendingBatch.map(item => item.movie)
+    try {
+      showFetchProgress(
+        'AI tagging batch.',
+        Math.min(96, attempts % 100),
+        batch.map(movie => movie.title).join(' · ')
       );
 
-      if (!batch.length) {
+      const result = await requestAiTags(batch);
+
+      const newlyFetchedIds = new Set(
+        pendingBatch.map(item => String(item.movie.id))
+      );
+
+      const newlyFetchedFailed = batch.filter(movie =>
+        newlyFetchedIds.has(String(movie.id)) &&
+        !hasCurrentAiTags(movie)
+      ).length;
+
+      outcomes.ai += newlyFetchedFailed;
+
+      rebuildTagBrain();
+      computeTagWeights();
+      saveLocalState();
+      updateStats();
+      fetchStatus = recommendationFetchStatus();
+
+      if (result.failed && !result.tagged) {
+        console.warn(
+          'CineLens AI batch completed without verified tags:',
+          batch.map(movie => ({
+            title: movie.title,
+            status: movie.aiTagging?.status,
+            partialCount: movie.aiTagPartial?.tags?.length || 0,
+            error: movie.aiTagging?.error || ''
+          }))
+        );
+      }
+    } catch (e) {
+      aiFailure = String(e?.message || e);
+
+      outcomes.ai += pendingBatch.length;
+
+      if (isExternalRateLimitError(e)) {
+        aiUnavailable = true;
+        autoFetchPaused = true;
+        fetchAbortRequested = true;
         return;
       }
 
-      try {
-        showFetchProgress(
-          'AI tagging batch.',
-          Math.min(96, attempts % 100),
-          batch.map(movie => movie.title).join(' · ')
-        );
-
-        const result = await requestAiTags(batch);
-
-        const newlyFetchedIds = new Set(
-          pendingBatch.map(item => String(item.movie.id))
-        );
-
-        const newlyFetchedFailed = batch.filter(movie =>
-          newlyFetchedIds.has(String(movie.id)) &&
-          !hasCurrentAiTags(movie)
-        ).length;
-
-        outcomes.ai += newlyFetchedFailed;
-
-        rebuildTagBrain();
-        computeTagWeights();
-        saveLocalState();
-        updateStats();
-        fetchStatus = recommendationFetchStatus();
-
-        if (result.failed && !result.tagged) {
-          console.warn(
-            'CineLens AI batch completed without verified tags:',
-            batch.map(movie => ({
-              title: movie.title,
-              status: movie.aiTagging?.status,
-              partialCount: movie.aiTagPartial?.tags?.length || 0,
-              error: movie.aiTagging?.error || ''
-            }))
-          );
-        }
-      } catch (e) {
-        aiFailure = String(e?.message || e);
-
-        outcomes.ai += pendingBatch.length;
-
-        if (isExternalRateLimitError(e)) {
-          aiUnavailable = true;
-          autoFetchPaused = true;
-          fetchAbortRequested = true;
-          return;
-        }
-
-        console.warn(
-          'CineLens background AI batch failed; titles remain pending for retry:',
-          aiFailure
-        );
-      }
-    };
+      console.warn(
+        'CineLens background AI batch failed; titles remain pending for retry:',
+        aiFailure
+      );
+    }
+  };
 
   while (!fetchAbortRequested) {
     const cursorBeforeBatch = JSON.parse(JSON.stringify(state.discoveryCursor || {}));
