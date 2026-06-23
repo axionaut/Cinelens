@@ -714,7 +714,7 @@ function fullAiTagVocabulary() {
     rawScoringTags(movie).forEach(tag => frequency.set(tag, (frequency.get(tag) || 0) + 1));
   });
   return [...frequency.entries()]
-    .sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .sort((a,b) => a[1] - b[1] || a[0].localeCompare(b[0]))
     .map(([tag, count]) => ({tag, count}));
 }
 
