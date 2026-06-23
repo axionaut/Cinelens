@@ -2078,30 +2078,79 @@ async function expandPool(manual=true) {
       outcomes.ai += pendingBatch.length;
       return;
     }
-    const batch = completeAiBatch(pendingBatch.map(item => item.movie));
-    try {
-      showFetchProgress('AI tagging batch...', Math.min(96, attempts % 100), batch.map(movie => movie.title).join(' · '));
-      await requestAiTags(batch);
-      pendingBatch.forEach(({movie}) => {
-        if (!hasCurrentAiTags(movie)) { outcomes.ai++; return; }
-        if (isMovieHidden(movie)) { outcomes.hidden++; return; }
-      });
-      rebuildTagBrain();
-      computeTagWeights();
-      saveLocalState();
-      updateStats();
-      fetchStatus = recommendationFetchStatus();
-    } catch(e) {
-      aiFailure = String(e?.message || e);
-      aiUnavailable = true;
-      outcomes.ai += pendingBatch.length;
+    const flushPendingAiMovies = async () => {
+      if (!pendingAiMovies.length || fetchAbortRequested) return;
 
-      if (isExternalRateLimitError(e)) {
-        autoFetchPaused = true;
-        fetchAbortRequested = true;
+      const pendingBatch = pendingAiMovies.splice(0, AI_TAG_BATCH_SIZE);
+
+      if (aiUnavailable) {
+        outcomes.ai += pendingBatch.length;
+        return;
       }
-    }
-  };
+
+      const batch = completeAiBatch(
+        pendingBatch.map(item => item.movie)
+      );
+
+      if (!batch.length) {
+        return;
+      }
+
+      try {
+        showFetchProgress(
+          'AI tagging batch.',
+          Math.min(96, attempts % 100),
+          batch.map(movie => movie.title).join(' · ')
+        );
+
+        const result = await requestAiTags(batch);
+
+        const newlyFetchedIds = new Set(
+          pendingBatch.map(item => String(item.movie.id))
+        );
+
+        const newlyFetchedFailed = batch.filter(movie =>
+          newlyFetchedIds.has(String(movie.id)) &&
+          !hasCurrentAiTags(movie)
+        ).length;
+
+        outcomes.ai += newlyFetchedFailed;
+
+        rebuildTagBrain();
+        computeTagWeights();
+        saveLocalState();
+        updateStats();
+        fetchStatus = recommendationFetchStatus();
+
+        if (result.failed && !result.tagged) {
+          console.warn(
+            'CineLens AI batch completed without verified tags:',
+            batch.map(movie => ({
+              title: movie.title,
+              status: movie.aiTagging?.status,
+              partialCount: movie.aiTagPartial?.tags?.length || 0,
+              error: movie.aiTagging?.error || ''
+            }))
+          );
+        }
+      } catch (e) {
+        aiFailure = String(e?.message || e);
+
+        outcomes.ai += pendingBatch.length;
+
+        if (isExternalRateLimitError(e)) {
+          aiUnavailable = true;
+          autoFetchPaused = true;
+          fetchAbortRequested = true;
+          return;
+        }
+
+        console.warn(
+          'CineLens background AI batch failed; titles remain pending for retry:',
+          aiFailure
+        );
+      }
+    };
 
   while (!fetchAbortRequested) {
     const cursorBeforeBatch = JSON.parse(JSON.stringify(state.discoveryCursor || {}));
@@ -2191,7 +2240,14 @@ async function expandPool(manual=true) {
     ? `Not added ${skipped}: parser ${outcomes.parser}, duplicate ${outcomes.duplicate}, hidden ${outcomes.hidden}, filters ${outcomes.filtered}. AI pending ${outcomes.ai}.`
     : outcomes.ai ? `AI pending ${outcomes.ai}.` : '';
   if (outcomeSummary) console.info('CineLens expansion outcomes', {attempts, added, outcomes, parserReasons});
-  if (aiFailure) showToast(aiFailure.includes('Daily CineLens tagging limit reached') ? `Added ${added}. Daily AI limit reached; untagged titles remain in Pool.` : `Added ${added}. AI tagging failed; untagged titles remain in Pool.`, 'error');
+  if (aiFailure) {
+    console.error('CineLens AI tagging failure:', aiFailure);
+
+    showToast(
+      `Added ${added}. AI tagging failed: ${aiFailure}`,
+      'error'
+    );
+  }
   else if (stopped && manual) showToast(`Checked ${attempts}, added ${added}. ${outcomeSummary}`, added?'success':'');
   else if (manual || added) showToast(`Checked ${attempts}, added ${added}. ${outcomeSummary}`, added?'success':'');
 }
