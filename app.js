@@ -222,6 +222,7 @@ const STRONG_REC_MIN_OVERLAP = 3;
 const FETCH_AUTO_ATTEMPT_BUDGET = 55;
 const FETCH_MANUAL_ATTEMPT_BUDGET = 100;
 const FETCH_MAX_ADDED_PER_RUN = 35;
+const AUTO_EXPAND_DELAY_MS = 2500;
 const DRIVE_TOKEN_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
 let recVisibleLimit = 10;
 let currentWikiAbortController = null;
@@ -940,10 +941,6 @@ async function normalizeTagCloudWithAi(opts={}) {
   }
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 async function consolidateTagCloud() {
   const btn = document.getElementById('normalizeTagCloudBtn');
   const maxPasses = 3;
@@ -1288,9 +1285,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     runStartupMaintenance();
     scheduleTagCloudNormalization(1800);
     render();
-    if (Object.keys(state.movies).length < 50 && (!state.drive.enabled || state.drive.connected)) {
-      scheduleAutoExpand(800);
-    }
+    maybeAutoExpandPool();
   });
   window.addEventListener('scroll', handleScroll);
 });
@@ -2046,6 +2041,35 @@ function isExternalRateLimitError(error) {
   );
 }
 
+async function requestAiTagsWithBackoff(movies, maxAttempts = 2) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await requestAiTags(movies);
+    } catch (error) {
+      lastError = error;
+
+      if (
+        fetchAbortRequested ||
+        error?.name === 'AbortError' ||
+        isExternalRateLimitError(error) ||
+        attempt === maxAttempts
+      ) {
+        break;
+      }
+
+      await abortableSleep(15000 * attempt);
+
+      if (fetchAbortRequested) {
+        break;
+      }
+    }
+  }
+
+  throw lastError || new Error('AI tagging failed');
+}
+
 async function expandPool(manual=true) {
   if (poolExpansionInProgress) return;
   if (!manual && autoFetchPaused) return;
@@ -2075,63 +2099,32 @@ async function expandPool(manual=true) {
     if (!pendingAiMovies.length || fetchAbortRequested) return;
 
     const pendingBatch = pendingAiMovies.splice(0, AI_TAG_BATCH_SIZE);
+    const batch = pendingBatch
+      .map(item => item.movie)
+      .filter(movie => movie?.storyText && !hasCurrentAiTags(movie));
 
-    if (aiUnavailable) {
-      outcomes.ai += pendingBatch.length;
-      return;
-    }
-
-    const batch = completeAiBatch(
-      pendingBatch.map(item => item.movie)
-    );
-
-    if (!batch.length) {
-      return;
-    }
+    if (!batch.length) return;
 
     try {
       showFetchProgress(
-        'AI tagging batch.',
+        'AI tagging batch...',
         Math.min(96, attempts % 100),
         batch.map(movie => movie.title).join(' · ')
       );
 
-      const result = await requestAiTags(batch);
-
-      const newlyFetchedIds = new Set(
-        pendingBatch.map(item => String(item.movie.id))
-      );
-
-      const newlyFetchedFailed = batch.filter(movie =>
-        newlyFetchedIds.has(String(movie.id)) &&
-        !hasCurrentAiTags(movie)
-      ).length;
-
-      outcomes.ai += newlyFetchedFailed;
+      const result = await requestAiTagsWithBackoff(batch, 2);
+      outcomes.ai += Number(result.failed || 0);
 
       rebuildTagBrain();
       computeTagWeights();
       saveLocalState();
       updateStats();
       fetchStatus = recommendationFetchStatus();
+    } catch (error) {
+      aiFailure = String(error?.message || error);
+      outcomes.ai += batch.length;
 
-      if (result.failed && !result.tagged) {
-        console.warn(
-          'CineLens AI batch completed without verified tags:',
-          batch.map(movie => ({
-            title: movie.title,
-            status: movie.aiTagging?.status,
-            partialCount: movie.aiTagPartial?.tags?.length || 0,
-            error: movie.aiTagging?.error || ''
-          }))
-        );
-      }
-    } catch (e) {
-      aiFailure = String(e?.message || e);
-
-      outcomes.ai += pendingBatch.length;
-
-      if (isExternalRateLimitError(e)) {
+      if (isExternalRateLimitError(error)) {
         aiUnavailable = true;
         autoFetchPaused = true;
         fetchAbortRequested = true;
@@ -2139,14 +2132,15 @@ async function expandPool(manual=true) {
       }
 
       console.warn(
-        'CineLens background AI batch failed; titles remain pending for retry:',
+        'CineLens background AI tagging deferred; titles remain pending for retry:',
         aiFailure
       );
     }
   };
 
-  while (!fetchAbortRequested) {
-    const cursorBeforeBatch = JSON.parse(JSON.stringify(state.discoveryCursor || {}));
+  try {
+    while (!fetchAbortRequested) {
+      const cursorBeforeBatch = JSON.parse(JSON.stringify(state.discoveryCursor || {}));
     const toFetch = await nextDiscoveryCandidates(mode, Math.max(4, Math.min(8, attemptBudget - attempts)), seenThisRun);
 
     if (!toFetch.length) {
@@ -2215,7 +2209,13 @@ async function expandPool(manual=true) {
       ensureDiscoveryCursor();
       saveLocalState({preserveUpdatedAt:true});
     }
-    if (!fetchAbortRequested) await flushPendingAiMovies();
+      if (!fetchAbortRequested) await flushPendingAiMovies();
+    }
+  } catch (error) {
+    if (!fetchAbortRequested && error?.name !== 'AbortError') {
+      aiFailure = aiFailure || String(error?.message || error);
+      console.error('CineLens pool expansion failed:', error);
+    }
   }
 
   if (manual || chasingStrong || added) hideFetchProgress();
@@ -2234,11 +2234,12 @@ async function expandPool(manual=true) {
     : outcomes.ai ? `AI pending ${outcomes.ai}.` : '';
   if (outcomeSummary) console.info('CineLens expansion outcomes', {attempts, added, outcomes, parserReasons});
   if (aiFailure) {
-    console.error('CineLens AI tagging failure:', aiFailure);
-
+    const rateLimited = isExternalRateLimitError(aiFailure);
     showToast(
-      `Added ${added}. AI tagging failed: ${aiFailure}`,
-      'error'
+      rateLimited
+        ? `Checked ${attempts}, added ${added}. AI rate limit reached; background fetching paused.`
+        : `Checked ${attempts}, added ${added}. Some titles are awaiting AI tags and will retry later.`,
+      rateLimited ? 'error' : ''
     );
   }
   else if (stopped && manual) showToast(`Checked ${attempts}, added ${added}. ${outcomeSummary}`, added?'success':'');
@@ -3063,7 +3064,6 @@ function setTab(tab, btn) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   document.querySelector('.tab-bar')?.classList.remove('open');
-  if (!recommendationPageActive()) stopFetching({silent:true});
   recVisibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
   render();
 }
@@ -3255,11 +3255,16 @@ function maybeAutoExpandPool() {
     return;
   }
 
-  lastAutoExpandAt = Date.now();
-  scheduleAutoExpand(1000);
+  const elapsed = Date.now() - lastAutoExpandAt;
+  if (elapsed < AUTO_EXPAND_DELAY_MS) {
+    scheduleAutoExpand(AUTO_EXPAND_DELAY_MS - elapsed);
+    return;
+  }
+
+  scheduleAutoExpand(AUTO_EXPAND_DELAY_MS);
 }
 
-function scheduleAutoExpand(delay = 1000) {
+function scheduleAutoExpand(delay = AUTO_EXPAND_DELAY_MS) {
   if (
     !startupDriveRestoreDone ||
     autoFetchPaused ||
@@ -3276,8 +3281,14 @@ function scheduleAutoExpand(delay = 1000) {
       return;
     }
 
-    expandPool(false);
-  }, delay);
+    lastAutoExpandAt = Date.now();
+
+    expandPool(false).catch(error => {
+      console.error('CineLens automatic expansion failed:', error);
+      poolExpansionInProgress = false;
+      hideFetchProgress();
+    });
+  }, Math.max(0, delay));
 }
 
 function renderRecs() {
@@ -3298,10 +3309,6 @@ function renderRecs() {
         : sortMovies(scored.map(item => item.movie), 'title-asc').map(movie => scored.find(item => item.movie.id === movie.id)).filter(Boolean);
       const top = ordered.slice(0, visibleLimit);
     const fetchStatus = recommendationFetchStatus(scored);
-    if (fetchStatus.strongCount < STRONG_REC_TARGET && !poolExpansionInProgress && !autoFetchPaused) {
-      lastAutoExpandAt = Date.now();
-      scheduleAutoExpand(100);
-    }
     if (top.length) {
       document.getElementById('recCount').textContent = fetchStatus.strongCount < STRONG_REC_TARGET
         ? `improving recommendations · ${fetchStatus.strongCount}/${STRONG_REC_TARGET} strong · showing ${top.length} of ${scored.length}`
@@ -3313,10 +3320,6 @@ function renderRecs() {
 
   const browseLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
   const batch = sortMovies(discoveryPool(), 'title-asc').slice(0, browseLimit);
-  if (ratedTagged.length >= 3 && !poolExpansionInProgress && !autoFetchPaused) {
-    lastAutoExpandAt = Date.now();
-    scheduleAutoExpand(100);
-  }
   document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building recommendation pool · showing ${batch.length} unrated`;
   if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expanding the pool in the background.</p></div>`; return; }
   batch.forEach(m => grid.appendChild(buildCard(m, {})));
@@ -4724,8 +4727,19 @@ async function restoreDriveSession(showFailure=false) {
 }
 
 function setDriveStatus(s) {
-  document.getElementById('driveDot').className='drive-dot '+s;
-  document.getElementById('driveLabel').textContent=s==='connected'?'drive connected':s==='syncing'?'syncing...':state.drive.enabled?'drive ready':'not connected';
+  const dot = document.getElementById('driveDot');
+  const label = document.getElementById('driveLabel');
+
+  if (dot) dot.className = 'drive-dot ' + s;
+  if (label) {
+    label.textContent = s === 'connected'
+      ? 'drive connected'
+      : s === 'syncing'
+        ? 'syncing...'
+        : state.drive.enabled
+          ? 'drive ready'
+          : 'not connected';
+  }
 }
 function driveErrorMessage(e) {
   const code = e?.error || e?.message || 'unknown';
