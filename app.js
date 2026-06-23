@@ -222,7 +222,6 @@ const STRONG_REC_MIN_OVERLAP = 3;
 const FETCH_AUTO_ATTEMPT_BUDGET = 55;
 const FETCH_MANUAL_ATTEMPT_BUDGET = 100;
 const FETCH_MAX_ADDED_PER_RUN = 35;
-const AUTO_EXPAND_DELAY_MS = 2500;
 const DRIVE_TOKEN_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
 let recVisibleLimit = 10;
 let currentWikiAbortController = null;
@@ -1285,7 +1284,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     runStartupMaintenance();
     scheduleTagCloudNormalization(1800);
     render();
-    maybeAutoExpandPool();
+    if (Object.keys(state.movies).length < 50 && (!state.drive.enabled || state.drive.connected)) {
+      scheduleAutoExpand(800);
+    }
   });
   window.addEventListener('scroll', handleScroll);
 });
@@ -2041,211 +2042,208 @@ function isExternalRateLimitError(error) {
   );
 }
 
-async function requestAiTagsWithBackoff(movies, maxAttempts = 2) {
-  let lastError;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await requestAiTags(movies);
-    } catch (error) {
-      lastError = error;
-
-      if (
-        fetchAbortRequested ||
-        error?.name === 'AbortError' ||
-        isExternalRateLimitError(error) ||
-        attempt === maxAttempts
-      ) {
-        break;
-      }
-
-      await abortableSleep(15000 * attempt);
-
-      if (fetchAbortRequested) {
-        break;
-      }
-    }
-  }
-
-  throw lastError || new Error('AI tagging failed');
-}
-
 async function expandPool(manual=true) {
   if (poolExpansionInProgress) return;
   if (!manual && autoFetchPaused) return;
+
   if (manual) autoFetchPaused = false;
+
   poolExpansionInProgress = true;
   fetchAbortRequested = false;
-  const btn = document.getElementById('expandBtn');
-  if (btn) { btn.disabled = false; btn.textContent = 'Stop Fetching'; }
-  const mode = expansionMode();
-  const chasingStrong = needsMoreStrongRecommendations();
-  const chasingPerfect = chasingStrong;
-  let fetchStatus = recommendationFetchStatus();
-  if (manual || chasingStrong) showFetchProgress(chasingStrong ? `Improving recommendations...` : `Expanding ${mode === 'all' ? 'movies and shows' : mode} from Wikipedia...`, 0, '');
-  await nextPaint();
 
-  let added = 0;
-  let attempts = 0;
+  const btn = document.getElementById('expandBtn');
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = 'Stop Fetching';
+  }
+
+  const mode = expansionMode();
+  const attemptBudget = manual ? FETCH_MANUAL_ATTEMPT_BUDGET : FETCH_AUTO_ATTEMPT_BUDGET;
+  const showProgress = manual || needsMoreStrongRecommendations();
   const outcomes = {parser:0, hidden:0, filtered:0, duplicate:0, ai:0};
   const parserReasons = {};
-  const attemptBudget = manual ? FETCH_MANUAL_ATTEMPT_BUDGET : FETCH_AUTO_ATTEMPT_BUDGET;
   const seenThisRun = new Set();
   const pendingAiMovies = [];
+  let added = 0;
+  let attempts = 0;
   let aiFailure = '';
-  let aiUnavailable = false;
+  let stopped = false;
 
   const flushPendingAiMovies = async () => {
     if (!pendingAiMovies.length || fetchAbortRequested) return;
 
     const pendingBatch = pendingAiMovies.splice(0, AI_TAG_BATCH_SIZE);
-    const batch = pendingBatch
+    const movies = pendingBatch
       .map(item => item.movie)
       .filter(movie => movie?.storyText && !hasCurrentAiTags(movie));
 
-    if (!batch.length) return;
+    if (!movies.length) return;
 
     try {
-      showFetchProgress(
-        'AI tagging batch...',
-        Math.min(96, attempts % 100),
-        batch.map(movie => movie.title).join(' · ')
-      );
+      if (showProgress) {
+        showFetchProgress(
+          'AI tagging new titles…',
+          Math.min(96, Math.max(8, Math.round((attempts / Math.max(1, attemptBudget)) * 100))),
+          movies.map(movie => movie.title).join(' · ')
+        );
+      }
 
-      const result = await requestAiTagsWithBackoff(batch, 2);
-      outcomes.ai += Number(result.failed || 0);
-
+      const result = await requestAiTags(movies);
+      outcomes.ai += Number(result?.failed || 0);
       rebuildTagBrain();
       computeTagWeights();
       saveLocalState();
-      updateStats();
-      fetchStatus = recommendationFetchStatus();
     } catch (error) {
-      aiFailure = String(error?.message || error);
-      outcomes.ai += batch.length;
+      const message = String(error?.message || error);
+      outcomes.ai += movies.length;
 
       if (isExternalRateLimitError(error)) {
-        aiUnavailable = true;
+        aiFailure = message;
         autoFetchPaused = true;
         fetchAbortRequested = true;
         return;
       }
 
-      console.warn(
-        'CineLens background AI tagging deferred; titles remain pending for retry:',
-        aiFailure
-      );
+      // A transient tagging failure leaves these verified Wikipedia titles in Pool
+      // for the normal AI-tag queue. It must not poison the whole expansion run.
+      console.warn('Background AI tagging deferred for this batch:', message);
+      if (manual) aiFailure = message;
     }
   };
 
   try {
-    while (!fetchAbortRequested) {
-      const cursorBeforeBatch = JSON.parse(JSON.stringify(state.discoveryCursor || {}));
-    const toFetch = await nextDiscoveryCandidates(mode, Math.max(4, Math.min(8, attemptBudget - attempts)), seenThisRun);
-
-    if (!toFetch.length) {
-      break;
+    if (showProgress) {
+      showFetchProgress(
+        `Expanding ${mode === 'all' ? 'movies and shows' : mode} from Wikipedia…`,
+        0,
+        ''
+      );
     }
-    saveLocalState({preserveUpdatedAt:true});
-    let processedCandidates = 0;
 
-    for (let i = 0; i < toFetch.length; i++) {
-      if (fetchAbortRequested) break;
-      if (attempts >= attemptBudget || added >= FETCH_MAX_ADDED_PER_RUN) {
-        await flushPendingAiMovies();
-        fetchAbortRequested = true;
-        break;
-      }
-      const candidate = toFetch[i];
-      const title = typeof candidate === 'string' ? candidate : candidate.title;
-      const lane = typeof candidate === 'string' ? null : candidate.lane;
-      const pageId = typeof candidate === 'string' ? '' : candidate.pageid;
-      const fetchMode = lane?.mode || mode;
-      seenThisRun.add(normaliseTitleKey(title));
-      attempts++;
-      if (manual || chasingPerfect || needsMorePerfectRecommendations()) {
-        if (attempts === 1 || attempts % 8 === 0) fetchStatus = recommendationFetchStatus();
-        const perfectCount = fetchStatus.strongCount;
-        showFetchProgress(
-          needsMorePerfectRecommendations() ? `Improving recommendations · ${perfectCount}/${PERFECT_REC_TARGET} strong` : `Finding new ${mode === 'shows' ? 'shows' : mode === 'movies' ? 'movies' : 'titles'} · added ${added}`,
-          Math.min(96, (attempts % 100)),
-          `${attempts}/${attemptBudget} checked · ${added} added · ${Math.max(0, attempts-added)} not added · ${title}`
-        );
-      }
-      try {
-        const diagnostics = {};
-        const movie = pageId
-          ? await fetchWikiMovieByPageId(pageId, fetchMode, {ai:false, diagnostics, trustedLane:lane})
-          : await fetchWikiMovie(title, fetchMode, diagnostics, {ai:false, trustedLane:lane});
-        if (movie && isMovieHidden(movie)) {
-          outcomes.hidden++;
-        } else if (movie) {
-          if (meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
+    await nextPaint();
+
+    while (!fetchAbortRequested && attempts < attemptBudget && added < FETCH_MAX_ADDED_PER_RUN) {
+      const cursorBeforeBatch = JSON.parse(JSON.stringify(state.discoveryCursor || {}));
+      const remaining = Math.min(8, attemptBudget - attempts);
+      const toFetch = await nextDiscoveryCandidates(mode, Math.max(1, remaining), seenThisRun);
+
+      if (!toFetch.length) break;
+
+      let processedCandidates = 0;
+
+      for (const candidate of toFetch) {
+        if (fetchAbortRequested || attempts >= attemptBudget || added >= FETCH_MAX_ADDED_PER_RUN) break;
+
+        const title = typeof candidate === 'string' ? candidate : candidate.title;
+        const lane = typeof candidate === 'string' ? null : candidate.lane;
+        const pageId = typeof candidate === 'string' ? '' : candidate.pageid;
+        const fetchMode = lane?.mode || mode;
+
+        seenThisRun.add(normaliseTitleKey(title));
+        attempts++;
+
+        if (showProgress && (attempts === 1 || attempts % 4 === 0)) {
+          showFetchProgress(
+            `Finding new ${fetchMode === 'shows' ? 'shows' : fetchMode === 'movies' ? 'movies' : 'titles'}…`,
+            Math.min(90, Math.round((attempts / Math.max(1, attemptBudget)) * 100)),
+            `${attempts}/${attemptBudget} checked · ${added} added · ${title}`
+          );
+        }
+
+        try {
+          const diagnostics = {};
+          const movie = pageId
+            ? await fetchWikiMovieByPageId(pageId, fetchMode, {ai:false, diagnostics, trustedLane:lane})
+            : await fetchWikiMovie(title, fetchMode, diagnostics, {ai:false, trustedLane:lane});
+
+          if (movie && isMovieHidden(movie)) {
+            outcomes.hidden++;
+          } else if (movie && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
             const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
             const stored = upsertMoviePreservingUserState(movie, existingMovie);
-            if (!existingMovie) added++;
-            else outcomes.duplicate++;
-            pendingAiMovies.push({movie:stored, lane});
-            if (pendingAiMovies.length >= AI_TAG_BATCH_SIZE) await flushPendingAiMovies();
-          } else outcomes.filtered++;
-        } else {
+
+            if (existingMovie) outcomes.duplicate++;
+            else added++;
+
+            if (!hasCurrentAiTags(stored)) {
+              pendingAiMovies.push({movie:stored, lane});
+            }
+
+            if (pendingAiMovies.length >= AI_TAG_BATCH_SIZE) {
+              await flushPendingAiMovies();
+            }
+          } else if (movie) {
+            outcomes.filtered++;
+          } else {
+            outcomes.parser++;
+            const reason = diagnostics.reason || 'Wikipedia parser rejected page';
+            parserReasons[reason] = (parserReasons[reason] || 0) + 1;
+          }
+        } catch (error) {
+          if (fetchAbortRequested || error?.name === 'AbortError') break;
           outcomes.parser++;
-          const reason = diagnostics.reason || 'Wikipedia parser rejected page';
+          const reason = String(error?.message || 'Wikipedia request failed');
           parserReasons[reason] = (parserReasons[reason] || 0) + 1;
         }
-      } catch(e) {
-        if (fetchAbortRequested || e.name === 'AbortError') break;
-        outcomes.parser++;
-        const reason = String(e?.message || 'Wikipedia request failed');
-        parserReasons[reason] = (parserReasons[reason] || 0) + 1;
-      }
-      if (fetchAbortRequested) break;
-      processedCandidates++;
-      if (attempts % 20 === 0) await abortableSleep(WIKI_BATCH_PAUSE_MS);
-    }
 
-    if (fetchAbortRequested && processedCandidates < toFetch.length) {
-      state.discoveryCursor = cursorBeforeBatch;
-      ensureDiscoveryCursor();
-      saveLocalState({preserveUpdatedAt:true});
-    }
-      if (!fetchAbortRequested) await flushPendingAiMovies();
+        processedCandidates++;
+        if (attempts % 20 === 0 && !fetchAbortRequested) {
+          await abortableSleep(WIKI_BATCH_PAUSE_MS);
+        }
+      }
+
+      if (fetchAbortRequested && processedCandidates < toFetch.length) {
+        state.discoveryCursor = cursorBeforeBatch;
+        ensureDiscoveryCursor();
+        saveLocalState({preserveUpdatedAt:true});
+      }
+
+      if (!fetchAbortRequested) {
+        await flushPendingAiMovies();
+      }
     }
   } catch (error) {
-    if (!fetchAbortRequested && error?.name !== 'AbortError') {
-      aiFailure = aiFailure || String(error?.message || error);
-      console.error('CineLens pool expansion failed:', error);
+    if (error?.name !== 'AbortError') {
+      console.error('Pool expansion failed:', error);
+      if (manual) aiFailure = String(error?.message || error);
+    }
+  } finally {
+    stopped = fetchAbortRequested || autoFetchPaused;
+    fetchAbortRequested = false;
+    poolExpansionInProgress = false;
+
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '＋ Expand Pool';
+    }
+
+    if (showProgress) hideFetchProgress();
+
+    rebuildTagBrain();
+    computeTagWeights();
+    saveLocalState();
+    syncDrive();
+    scheduleTagCloudNormalization(1500);
+    render();
+
+    const skipped = attempts - added;
+    const outcomeSummary = skipped
+      ? `Not added ${skipped}: parser ${outcomes.parser}, duplicate ${outcomes.duplicate}, hidden ${outcomes.hidden}, filters ${outcomes.filtered}. AI pending ${outcomes.ai}.`
+      : outcomes.ai ? `AI pending ${outcomes.ai}.` : '';
+
+    if (outcomeSummary) {
+      console.info('CineLens expansion outcomes', {attempts, added, outcomes, parserReasons});
+    }
+
+    if (manual && aiFailure) {
+      showToast(`Checked ${attempts}, added ${added}. AI tagging deferred: ${aiFailure}`, 'error');
+    } else if (manual) {
+      showToast(`Checked ${attempts}, added ${added}.${outcomeSummary ? ` ${outcomeSummary}` : ''}`, added ? 'success' : '');
+    } else if (stopped && aiFailure) {
+      console.warn('Background expansion paused:', aiFailure);
     }
   }
-
-  if (manual || chasingStrong || added) hideFetchProgress();
-  if (btn) { btn.disabled = false; btn.textContent = '＋ Expand Pool'; }
-  poolExpansionInProgress = false;
-  const stopped = fetchAbortRequested || autoFetchPaused;
-  fetchAbortRequested = false;
-  if (!stopped) autoFetchPaused = false;
-  rebuildTagBrain();
-  computeTagWeights();
-  saveLocalState(); syncDrive(); render();
-  scheduleTagCloudNormalization(1500);
-  const skipped = attempts - added;
-  const outcomeSummary = skipped
-    ? `Not added ${skipped}: parser ${outcomes.parser}, duplicate ${outcomes.duplicate}, hidden ${outcomes.hidden}, filters ${outcomes.filtered}. AI pending ${outcomes.ai}.`
-    : outcomes.ai ? `AI pending ${outcomes.ai}.` : '';
-  if (outcomeSummary) console.info('CineLens expansion outcomes', {attempts, added, outcomes, parserReasons});
-  if (aiFailure) {
-    const rateLimited = isExternalRateLimitError(aiFailure);
-    showToast(
-      rateLimited
-        ? `Checked ${attempts}, added ${added}. AI rate limit reached; background fetching paused.`
-        : `Checked ${attempts}, added ${added}. Some titles are awaiting AI tags and will retry later.`,
-      rateLimited ? 'error' : ''
-    );
-  }
-  else if (stopped && manual) showToast(`Checked ${attempts}, added ${added}. ${outcomeSummary}`, added?'success':'');
-  else if (manual || added) showToast(`Checked ${attempts}, added ${added}. ${outcomeSummary}`, added?'success':'');
 }
-
 
 function wikipediaTitleFromUrl(value) {
   const raw = (value || '').trim();
@@ -2999,55 +2997,80 @@ function updateAiTagButton() {
 }
 
 async function tagAllUntagged() {
+  // AI tagging owns the same request/abort machinery as pool expansion.
+  // Stop the worker itself, wait for it to release, then continue automatically.
+  if (poolExpansionInProgress || autoExpandTimer) {
+    stopFetching({silent:true});
+    await waitForPoolIdle(10000);
+  }
+
   if (poolExpansionInProgress) {
-    showToast('Stop pool expansion before rebuilding tags.', 'error');
+    showToast('Pool expansion is still stopping. Try again in a moment.', 'error');
     return;
   }
+
   const queue = aiTagCandidates();
-  if (!queue.length) { showToast('All eligible titles have AI tags',''); return; }
+  if (!queue.length) {
+    showToast('All eligible titles have AI tags', '');
+    return;
+  }
+
   fetchAbortRequested = false;
   const btn = document.getElementById('tagUntaggedBtn');
   if (btn) btn.disabled = true;
+
   let tagged = 0;
   let failed = 0;
+
   try {
     let index = 0;
-    while (index < queue.length) {
-      if (fetchAbortRequested) break;
+
+    while (index < queue.length && !fetchAbortRequested) {
       const batch = [];
+
       while (index < queue.length && batch.length < AI_TAG_BATCH_SIZE && !fetchAbortRequested) {
         const candidate = queue[index++];
         showFetchProgress(
           `Resolving title data · ${index}/${queue.length}`,
-          Math.round(index / queue.length * 100),
+          Math.round((index / queue.length) * 100),
           candidate.title
         );
+
         const enriched = await enrichLegacyTitleForAi(candidate);
         if (enriched?.storyText && !hasCurrentAiTags(enriched)) batch.push(enriched);
       }
+
       if (!batch.length) continue;
+
       showFetchProgress(
         `AI tagging batch · ${index}/${queue.length}`,
-        Math.round(index / queue.length * 100),
+        Math.round((index / queue.length) * 100),
         batch.map(movie => movie.title).join(' · ')
       );
-      const result = await requestAiTags(completeAiBatch(batch));
-      tagged += result.tagged;
-      failed += result.failed;
+
+      // Tag exactly this queue batch. Do not append unrelated titles from Pool.
+      const result = await requestAiTags(batch);
+      tagged += Number(result?.tagged || 0);
+      failed += Number(result?.failed || 0);
+
       rebuildTagBrain();
       computeTagWeights();
       saveLocalState();
       render();
       await nextPaint();
     }
+
     syncDrive();
     scheduleTagCloudNormalization(1200);
-    showToast(`AI tagged ${tagged} titles${failed ? ` · ${failed} need retry` : ''}`, tagged ? 'success' : '');
-  } catch(e) {
+    showToast(
+      `AI tagged ${tagged} titles${failed ? ` · ${failed} need retry` : ''}`,
+      tagged ? 'success' : ''
+    );
+  } catch (error) {
     saveLocalState();
     syncDrive();
-    const message = String(e?.message || e);
-    showToast(message.includes('Daily CineLens tagging limit reached') ? `Daily free AI limit reached · tagged ${tagged}. Resume tomorrow.` : `AI tagging stopped: ${message}`, 'error');
+    const message = String(error?.message || error);
+    showToast(`AI tagging stopped: ${message}`, 'error');
   } finally {
     fetchAbortRequested = false;
     hideFetchProgress();
@@ -3255,16 +3278,13 @@ function maybeAutoExpandPool() {
     return;
   }
 
-  const elapsed = Date.now() - lastAutoExpandAt;
-  if (elapsed < AUTO_EXPAND_DELAY_MS) {
-    scheduleAutoExpand(AUTO_EXPAND_DELAY_MS - elapsed);
-    return;
-  }
-
-  scheduleAutoExpand(AUTO_EXPAND_DELAY_MS);
+  // One bounded worker batch at a time. expandPool() renders on completion,
+  // which schedules the next background batch while fetching remains enabled.
+  lastAutoExpandAt = Date.now();
+  scheduleAutoExpand(2500);
 }
 
-function scheduleAutoExpand(delay = AUTO_EXPAND_DELAY_MS) {
+function scheduleAutoExpand(delay = 2500) {
   if (
     !startupDriveRestoreDone ||
     autoFetchPaused ||
@@ -3276,19 +3296,10 @@ function scheduleAutoExpand(delay = AUTO_EXPAND_DELAY_MS) {
 
   autoExpandTimer = setTimeout(() => {
     autoExpandTimer = null;
-
-    if (autoFetchPaused || poolExpansionInProgress) {
-      return;
+    if (!autoFetchPaused && !poolExpansionInProgress) {
+      expandPool(false);
     }
-
-    lastAutoExpandAt = Date.now();
-
-    expandPool(false).catch(error => {
-      console.error('CineLens automatic expansion failed:', error);
-      poolExpansionInProgress = false;
-      hideFetchProgress();
-    });
-  }, Math.max(0, delay));
+  }, delay);
 }
 
 function renderRecs() {
@@ -4729,17 +4740,12 @@ async function restoreDriveSession(showFailure=false) {
 function setDriveStatus(s) {
   const dot = document.getElementById('driveDot');
   const label = document.getElementById('driveLabel');
-
   if (dot) dot.className = 'drive-dot ' + s;
-  if (label) {
-    label.textContent = s === 'connected'
-      ? 'drive connected'
-      : s === 'syncing'
-        ? 'syncing...'
-        : state.drive.enabled
-          ? 'drive ready'
-          : 'not connected';
-  }
+  if (label) label.textContent = s === 'connected'
+    ? 'drive connected'
+    : s === 'syncing'
+      ? 'syncing...'
+      : state.drive.enabled ? 'drive ready' : 'not connected';
 }
 function driveErrorMessage(e) {
   const code = e?.error || e?.message || 'unknown';
