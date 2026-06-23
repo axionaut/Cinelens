@@ -859,26 +859,15 @@ function scheduleTagCloudNormalization(delay=1200) {
     return;
   }
 
-  tagCloudNormalizationTimer = setTimeout(async () => {
+  tagCloudNormalizationTimer = setTimeout(() => {
     tagCloudNormalizationTimer = null;
 
-    try {
-      for (let pass = 1; pass <= 2; pass++) {
-        const result = await normalizeTagCloudWithAi({
-          force: true,
-          toast: false
-        });
-
-        const rewrites = Number(result?.rewrites || 0);
-        const changedTitles = Number(result?.changedTitles || 0);
-
-        if (!rewrites || !changedTitles) {
-          break;
-        }
-      }
-    } catch (error) {
+    normalizeTagCloudWithAi({
+      force: true,
+      toast: false
+    }).catch(error => {
       console.warn('Tag cloud normalization failed', error);
-    }
+    });
   }, delay);
 }
 
@@ -951,9 +940,13 @@ async function normalizeTagCloudWithAi(opts={}) {
   }
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function consolidateTagCloud() {
   const btn = document.getElementById('normalizeTagCloudBtn');
-  const maxPasses = 8;
+  const maxPasses = 3;
 
   if (tagCloudNormalizationInProgress) {
     showToast('Tag-cloud consolidation is already running.', '');
@@ -990,6 +983,10 @@ async function consolidateTagCloud() {
         force: true,
         toast: false
       });
+
+      if (pass < maxPasses) {
+        await sleep(30000);
+      }
 
       completedPasses = pass;
 
