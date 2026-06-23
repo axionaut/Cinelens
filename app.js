@@ -975,7 +975,7 @@ async function consolidateTagCloud() {
 
       showFetchProgress(
         `Gemini consolidating tag cloud, pass ${pass}/${maxPasses}...`,
-        35 + Math.min(55, pass * 7),
+        35 + Math.min(55, pass * 15),
         `${currentCount} current tags`
       );
 
@@ -983,10 +983,6 @@ async function consolidateTagCloud() {
         force: true,
         toast: false
       });
-
-      if (pass < maxPasses) {
-        await sleep(30000);
-      }
 
       completedPasses = pass;
 
@@ -998,6 +994,10 @@ async function consolidateTagCloud() {
 
       if (!rewrites || !changedTitles) {
         break;
+      }
+
+      if (pass < maxPasses) {
+        await new Promise(resolve => setTimeout(resolve, 30000));
       }
     }
 
@@ -2033,10 +2033,22 @@ async function fetchWikiSourceTitles(mode, pagesPerCategory=4) {
   return newestTitleFirst([...new Set(titles)]);
 }
 
+function isExternalRateLimitError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+
+  return (
+    /\b429\b/.test(message) ||
+    /too many requests/.test(message) ||
+    /resource exhausted/.test(message) ||
+    /rate limit/.test(message) ||
+    /quota exceeded/.test(message) ||
+    /quota exhausted/.test(message)
+  );
+}
+
 async function expandPool(manual=true) {
   if (poolExpansionInProgress) return;
   if (!manual && autoFetchPaused) return;
-  if (!manual && !recommendationPageActive()) return;
   if (manual) autoFetchPaused = false;
   poolExpansionInProgress = true;
   fetchAbortRequested = false;
@@ -2083,6 +2095,11 @@ async function expandPool(manual=true) {
       aiFailure = String(e?.message || e);
       aiUnavailable = true;
       outcomes.ai += pendingBatch.length;
+
+      if (isExternalRateLimitError(e)) {
+        autoFetchPaused = true;
+        fetchAbortRequested = true;
+      }
     }
   };
 
@@ -2134,7 +2151,6 @@ async function expandPool(manual=true) {
             else outcomes.duplicate++;
             pendingAiMovies.push({movie:stored, lane});
             if (pendingAiMovies.length >= AI_TAG_BATCH_SIZE) await flushPendingAiMovies();
-            if (!needsMoreStrongRecommendations() && !manual) { fetchAbortRequested = true; break; }
           } else outcomes.filtered++;
         } else {
           outcomes.parser++;
@@ -2158,7 +2174,6 @@ async function expandPool(manual=true) {
       saveLocalState({preserveUpdatedAt:true});
     }
     if (!fetchAbortRequested) await flushPendingAiMovies();
-    if (!needsMoreStrongRecommendations() && !manual) break;
   }
 
   if (manual || chasingStrong || added) hideFetchProgress();
@@ -3182,22 +3197,36 @@ function needsMorePerfectRecommendations() {
 }
 
 function maybeAutoExpandPool() {
-  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rated' || activeTab === 'tags' || autoFetchPaused) return;
-  const available = discoveryPool().length;
-  const needsStrong = needsMoreStrongRecommendations();
-  const gap = needsStrong ? 15000 : 120000;
-  if ((available < 30 || needsStrong) && !poolExpansionInProgress && Date.now()-lastAutoExpandAt > gap) {
-    lastAutoExpandAt = Date.now();
-    scheduleAutoExpand(600);
+  if (
+    !startupDriveRestoreDone ||
+    autoFetchPaused ||
+    poolExpansionInProgress ||
+    autoExpandTimer
+  ) {
+    return;
   }
+
+  lastAutoExpandAt = Date.now();
+  scheduleAutoExpand(1000);
 }
 
-function scheduleAutoExpand(delay=600) {
-  if (!startupDriveRestoreDone) return;
-  if (autoExpandTimer || autoFetchPaused) return;
+function scheduleAutoExpand(delay = 1000) {
+  if (
+    !startupDriveRestoreDone ||
+    autoFetchPaused ||
+    autoExpandTimer ||
+    poolExpansionInProgress
+  ) {
+    return;
+  }
+
   autoExpandTimer = setTimeout(() => {
     autoExpandTimer = null;
-    if (!recommendationPageActive() || autoFetchPaused || poolExpansionInProgress) return;
+
+    if (autoFetchPaused || poolExpansionInProgress) {
+      return;
+    }
+
     expandPool(false);
   }, delay);
 }
@@ -4072,7 +4101,6 @@ function openTagFromCard(tag) {
   tagDetailVisibleLimit=40;
   activeTab='tags';
   document.querySelectorAll('.tab-btn').forEach(button=>button.classList.toggle('active', button.textContent.trim()==='Tags'));
-  if (!recommendationPageActive()) stopFetching({silent:true});
   render();
   document.getElementById('tagDetail')?.scrollIntoView({behavior:'smooth',block:'start'});
 }
