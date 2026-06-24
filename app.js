@@ -5079,7 +5079,9 @@ async function connectDrive() {
       await requestDriveTokenInteractive();
     }
     state.drive.enabled=true;
-    const fileId=state.drive.fileId||await findDriveFile();
+    // Always rescan after sign-in. A stale fileId can point to a small library
+    // created by an earlier broken mobile session.
+    const fileId=await findDriveFile();
     if (fileId) {
       state.drive.fileId=fileId;
       // A browser being connected for the first time must hydrate from Drive
@@ -5113,7 +5115,9 @@ async function restoreDriveSession(showFailure=false, opts={}) {
   setDriveStatus('syncing');
   try {
     await requestDriveTokenSilent();
-    if (!state.drive.fileId) state.drive.fileId=await findDriveFile();
+    // Always resolve the canonical Drive library after authentication. Do not
+    // trust a browser-stored fileId because it may identify an old tiny duplicate.
+    state.drive.fileId=await findDriveFile();
     if (state.drive.fileId) await loadFromDrive({preferDrive: !!opts.preferDrive});
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
@@ -5214,10 +5218,43 @@ async function driveFetch(url, opts={}) {
 async function findDriveFile() {
   try {
     const q=`name='${DRIVE_FILE}' and trashed=false`;
-    const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&orderBy=modifiedTime%20desc&fields=files(id,name,modifiedTime)`);
-    const d=await resp.json();
-    return (d.files || []).sort((a, b) => Date.parse(b.modifiedTime || 0) - Date.parse(a.modifiedTime || 0))[0]?.id || null;
-  } catch(e){return null;}
+    const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&orderBy=modifiedTime%20desc&pageSize=100&fields=files(id,name,modifiedTime)`);
+    if (!resp.ok) throw new Error('Drive file search failed');
+    const listing=await resp.json();
+    const files=listing.files || [];
+    if (!files.length) return null;
+
+    // A previous broken client can leave behind a second, tiny CineLens file.
+    // Never choose by modified time alone: inspect every same-named JSON file and
+    // use the fullest library first. Modified time is only a tiebreaker.
+    const candidates=[];
+    for (const file of files) {
+      try {
+        const fileResp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`);
+        if (!fileResp.ok) continue;
+        const raw=await fileResp.json();
+        const dataset=normaliseIncomingData(raw);
+        candidates.push({
+          id:file.id,
+          recordCount:libraryRecordCount(dataset),
+          datasetStamp:Date.parse(dataset?.meta?.updatedAt || '') || 0,
+          modifiedStamp:Date.parse(file.modifiedTime || '') || 0
+        });
+      } catch (error) {
+        console.warn('Skipping unreadable CineLens Drive file', file.id, error);
+      }
+    }
+    if (!candidates.length) return null;
+    candidates.sort((a,b) =>
+      b.recordCount - a.recordCount ||
+      b.datasetStamp - a.datasetStamp ||
+      b.modifiedStamp - a.modifiedStamp
+    );
+    return candidates[0].id;
+  } catch(e){
+    console.warn('Drive file search failed', e);
+    return null;
+  }
 }
 async function loadFromDrive(opts={}) {
   if(!state.drive.fileId)return;
