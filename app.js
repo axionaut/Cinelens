@@ -4397,7 +4397,9 @@ function runHousekeeping(manual=true, deferCanonical=false) {
   updateHKStatus(tagStatusText());
 }
 
-function countUniqueTags() { const s=new Set(); Object.values(state.movies).forEach(m=>scoringTags(m).forEach(t=>s.add(t))); return s.size; }
+function countUniqueTags() {
+  return fullAiTagVocabulary().length;
+}
 function countRawTags() { const s=new Set(); Object.values(state.movies).forEach(m=>rawScoringTags(m).forEach(t=>s.add(t))); return s.size; }
 function tagStatusText() { return `tags: ${countUniqueTags()} · candidates: ${countRawTags()}`; }
 function updateHKStatus(msg) {
