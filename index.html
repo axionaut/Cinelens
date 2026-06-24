@@ -62,17 +62,23 @@
     </div>
   </div>
   <div class="header-right">
-    <div class="drive-status">
-      <div class="drive-dot" id="driveDot"></div>
+    <button class="library-status" type="button" onclick="toggleMaintenancePanel()" aria-label="Open library maintenance">
+      <span class="drive-dot" id="driveDot"></span>
       <span id="driveLabel">not connected</span>
-    </div>
-    <button class="btn btn-sm" onclick="connectDrive()">⚙ Drive</button>
-    <button class="btn btn-sm btn-warning" onclick="stopOrExpandPool()" id="expandBtn">＋ Expand Pool</button>
+      <span class="library-health-label" id="libraryHealthLabel">Starting library…</span>
+    </button>
   </div>
 </header>
 
 <main>
 <div class="container">
+
+  <div class="fetch-progress" id="fetchProgress" aria-live="polite" aria-busy="false">
+    <div class="fetch-label" id="fetchLabel">Working…</div>
+    <div class="fetch-bar"><div class="fetch-fill" id="fetchFill" style="width:0%"></div></div>
+    <div class="fetch-sub" id="fetchSub"></div>
+    <button class="btn btn-sm btn-warning fetch-stop" onclick="stopFetching()">Pause collection</button>
+  </div>
 
   <div class="control-deck">
   <button class="control-toggle" id="controlToggle" onclick="toggleControlDeck()">Filters & tools</button>
@@ -135,20 +141,24 @@
   </div>
   <div class="wiki-search-results" id="wikiSearchResults" hidden></div>
 
-  <div class="platform-bar manual-add-row">
-    <button class="platform-btn" id="tagUntaggedBtn" onclick="tagAllUntagged()" style="display:none">AI tag titles</button>
-    <button class="platform-btn" id="normalizeTagCloudBtn" onclick="consolidateTagCloud()">Consolidate Tag Cloud</button>
-    <button class="platform-btn danger" onclick="resetAllData()">Reset All</button>
-  </div>
+  <details class="maintenance-panel" id="maintenancePanel">
+    <summary>Library maintenance</summary>
+    <div class="maintenance-health" id="maintenanceHealth">Checking library health…</div>
+    <div class="maintenance-actions">
+      <button class="platform-btn" onclick="connectDrive()">Drive</button>
+      <button class="platform-btn" onclick="stopOrExpandPool()" id="expandBtn">Expand now</button>
+      <button class="platform-btn" id="tagUntaggedBtn" onclick="tagAllUntagged()" style="display:none">Retry pending AI tags</button>
+      <button class="platform-btn" id="normalizeTagCloudBtn" onclick="consolidateTagCloud()">Consolidate tags now</button>
+    </div>
+    <details class="maintenance-danger">
+      <summary>Danger zone</summary>
+      <p>Reset erases the local library and the connected Drive copy. You must type RESET to continue.</p>
+      <button class="platform-btn danger" onclick="resetAllData()">Reset all data</button>
+    </details>
+  </details>
   </div>
   </div>
 
-  <div class="fetch-progress" id="fetchProgress">
-    <div class="fetch-label" id="fetchLabel">Fetching films...</div>
-    <div class="fetch-bar"><div class="fetch-fill" id="fetchFill" style="width:0%"></div></div>
-    <div class="fetch-sub" id="fetchSub"></div>
-    <button class="btn btn-sm btn-warning fetch-stop" onclick="stopFetching()">Stop Fetching</button>
-  </div>
 
   <div class="section-header normal-only">
     <div class="section-title">For You</div>
