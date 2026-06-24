@@ -1320,11 +1320,16 @@ window.addEventListener('DOMContentLoaded', async () => {
   // dataset before Drive is checked.
   let restored = false;
   try {
-    restored = await restoreDriveSession();
+    // Startup restore is authoritative: Drive must populate this browser before
+    // timestamp-based merging or background collection is allowed.
+    restored = await restoreDriveSession(false, {preferDrive:true});
   } catch (error) {
     console.warn('Drive startup restore failed', error);
   }
-  finalizeStartupAfterDrive({allowCollection: restored || startupInitialLibraryPresent});
+  // Until Drive has been checked, a browser-local starter/partial library has no
+  // authority to start collection. Existing offline-only libraries can still run
+  // when Drive was never enabled on that browser.
+  finalizeStartupAfterDrive({allowCollection: restored || (!state.drive.enabled && startupInitialLibraryPresent)});
   window.addEventListener('scroll', handleScroll);
 });
 
@@ -5075,7 +5080,12 @@ async function connectDrive() {
     }
     state.drive.enabled=true;
     const fileId=state.drive.fileId||await findDriveFile();
-    if (fileId) { state.drive.fileId=fileId; await loadFromDrive(); }
+    if (fileId) {
+      state.drive.fileId=fileId;
+      // A browser being connected for the first time must hydrate from Drive
+      // before any local starter/partial records are allowed to participate.
+      await loadFromDrive({preferDrive: !startupFinalized || !libraryWritesUnlocked});
+    }
     else await createDriveFile();
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
@@ -5096,7 +5106,7 @@ async function connectDrive() {
   }
 }
 
-async function restoreDriveSession(showFailure=false) {
+async function restoreDriveSession(showFailure=false, opts={}) {
   if (driveRestoreInProgress) return false;
   if (!state.drive.enabled || (!state.drive.fileId && !state.drive.accessToken)) return false;
   driveRestoreInProgress=true;
@@ -5104,7 +5114,7 @@ async function restoreDriveSession(showFailure=false) {
   try {
     await requestDriveTokenSilent();
     if (!state.drive.fileId) state.drive.fileId=await findDriveFile();
-    if (state.drive.fileId) await loadFromDrive();
+    if (state.drive.fileId) await loadFromDrive({preferDrive: !!opts.preferDrive});
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
     saveLocalState({preserveUpdatedAt:true});
@@ -5209,14 +5219,20 @@ async function findDriveFile() {
     return (d.files || []).sort((a, b) => Date.parse(b.modifiedTime || 0) - Date.parse(a.modifiedTime || 0))[0]?.id || null;
   } catch(e){return null;}
 }
-async function loadFromDrive() {
+async function loadFromDrive(opts={}) {
   if(!state.drive.fileId)return;
   try {
     setDriveStatus('syncing');
     const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media`);
     if (!resp.ok) throw new Error('Drive load failed');
     const d=await resp.json();
-    const merge = mergeRemoteData(d);
+    const remote = normaliseIncomingData(d);
+    // On first-device/startup hydration, the Drive file is the source of truth.
+    // This prevents a locally generated starter pool or a freshly touched local
+    // timestamp from defeating the real library stored in Drive.
+    const merge = opts.preferDrive && libraryRecordCount(remote) > 0
+      ? (replaceStateFromDataset(remote), {localChanged:true, remoteChanged:false, winner:'drive'})
+      : mergeRemoteData(d);
     const migratedAliases = migrateLegacyTagAliases();
     migrateLegacyPoolItems();
     const cleaned = cleanContaminatedTags(true);
