@@ -479,3 +479,65 @@
   color: var(--accent);
   background: rgba(255, 204, 51, .1);
 }
+
+/* CineLens maintenance UI — safe external stylesheet overrides */
+.library-status {
+  display:inline-flex;
+  align-items:center;
+  gap:7px;
+  max-width:min(52vw, 620px);
+  border:1px solid rgba(255, 204, 51, .16);
+  background:rgba(255, 255, 255, .035);
+  color:var(--muted);
+  border-radius:6px;
+  padding:5px 9px;
+  font-family:'DM Mono', monospace;
+  font-size:11px;
+  cursor:pointer;
+}
+.library-status:hover { border-color:rgba(255, 204, 51, .42); color:var(--text); }
+.library-health-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }
+.fetch-progress {
+  position:sticky;
+  top:72px;
+  z-index:110;
+  margin:0 0 12px;
+  box-shadow:0 12px 28px rgba(0, 0, 0, .32);
+}
+.fetch-progress.visible { display:block; }
+body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)); }
+.maintenance-panel {
+  grid-column:2;
+  border-top:1px solid rgba(255, 204, 51, .12);
+  padding-top:9px;
+  font-family:'DM Mono', monospace;
+  font-size:11px;
+}
+.maintenance-panel > summary,
+.maintenance-danger > summary {
+  cursor:pointer;
+  list-style:none;
+}
+.maintenance-panel > summary {
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  color:var(--muted);
+}
+.maintenance-panel > summary::-webkit-details-marker,
+.maintenance-danger > summary::-webkit-details-marker { display:none; }
+.maintenance-panel > summary::before { content:'+'; color:var(--accent); font-size:15px; line-height:1; }
+.maintenance-panel[open] > summary::before { content:'−'; }
+.maintenance-health { margin:9px 0; color:var(--muted); line-height:1.5; }
+.maintenance-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.maintenance-danger { margin-top:10px; padding-top:10px; border-top:1px solid rgba(239, 83, 80, .22); }
+.maintenance-danger > summary { color:#ff8a86; }
+.maintenance-danger p { margin:7px 0 9px; color:var(--muted); max-width:620px; line-height:1.45; }
+@media (max-width:768px) {
+  .library-status { max-width:100%; font-size:10px; }
+  .library-health-label { max-width:190px; }
+  .fetch-progress { top:96px; margin-bottom:10px; }
+  body.fetching .control-deck { top:calc(96px + var(--fetch-progress-height, 104px)); }
+  .maintenance-panel { grid-column:1 / -1; }
+}
+
