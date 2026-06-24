@@ -4816,21 +4816,43 @@ function replaceStateFromDataset(dataset) {
   invalidateTagCaches();
 }
 
+function datasetContentCount(data={}) {
+  return [
+    Object.keys(data.movies || {}).length,
+    Object.keys(data.hiddenTitles || {}).length,
+    Object.keys(data.wrongPicks || {}).length,
+    Object.keys(data.deletedMovieRecords || {}).length
+  ].reduce((sum, count) => sum + count, 0);
+}
+
 function mergeRemoteData(remoteRaw={}) {
   const remote = normaliseIncomingData(remoteRaw);
-  const remoteStamp = dataTimestamp(remote);
-  const localStamp = dataTimestamp(state);
-  const localResetAt = Date.parse(state.meta?.resetAt || '') || 0;
-  const remoteResetAt = Date.parse(remote.meta?.resetAt || '') || 0;
-  const remoteWins = remoteResetAt > localResetAt || (remoteResetAt === localResetAt && remoteStamp > localStamp);
   const localData = normaliseIncomingData(exportCinelensData());
+  const remoteStamp = dataTimestamp(remote);
+  const localStamp = dataTimestamp(localData);
+  const localResetAt = Date.parse(localData.meta?.resetAt || '') || 0;
+  const remoteResetAt = Date.parse(remote.meta?.resetAt || '') || 0;
+  const localCount = datasetContentCount(localData);
+  const remoteCount = datasetContentCount(remote);
   const sameData = JSON.stringify(localData) === JSON.stringify(remote);
+
+  // A newly opened browser (such as Safari on iPhone) has no local library.
+  // It must restore the non-empty Drive library even if that blank local shell
+  // happened to receive a newer timestamp. Only an explicit later RESET may
+  // deliberately replace a populated Drive library with an empty one.
+  const localExplicitlyResetLater = localCount === 0 && localResetAt > remoteResetAt;
+  const remoteWins = (
+    (!localExplicitlyResetLater && localCount === 0 && remoteCount > 0) ||
+    (remoteResetAt > localResetAt) ||
+    (remoteResetAt === localResetAt && remoteStamp > localStamp)
+  );
+
   if (remoteWins) {
     replaceStateFromDataset(remote);
     ensureSyncMetadata();
-    return {localChanged:true, remoteChanged:false, winner:'drive', localStamp, remoteStamp};
+    return {localChanged:true, remoteChanged:false, winner:'drive', localStamp, remoteStamp, localCount, remoteCount};
   }
-  return {localChanged:false, remoteChanged:!sameData, winner:'local', localStamp, remoteStamp};
+  return {localChanged:false, remoteChanged:!sameData, winner:'local', localStamp, remoteStamp, localCount, remoteCount};
 }
 
 function saveLocalState(opts={}) {
@@ -5152,7 +5174,9 @@ async function driveFetch(url, opts={}) {
 async function findDriveFile() {
   try {
     const q=`name='${DRIVE_FILE}' and trashed=false`;
-    const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&fields=files(id,name,modifiedTime)`);
+    const url=`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&orderBy=modifiedTime%20desc&fields=files(id,name,modifiedTime)`;
+    const resp=await driveFetch(url);
+    if (!resp.ok) throw new Error('Drive file search failed');
     const d=await resp.json();
     return d.files?.[0]?.id||null;
   } catch(e){return null;}
