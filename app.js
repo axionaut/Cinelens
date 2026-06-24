@@ -215,7 +215,7 @@ let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const CARD_REFRESH_BATCH_SIZE = 20;
-const WIKI_PARSER_VERSION = 5;
+const WIKI_PARSER_VERSION = 4;
 const REC_INFINITE_PAGE_SIZE = 20;
 const STRONG_REC_TARGET = 40;
 const STRONG_REC_REFILL_THRESHOLD = 20;
@@ -299,6 +299,7 @@ const USER_AVOID_TAGS = new Set([
 const USER_AVOID_GENRES = new Set(['documentary']);
 const MAX_RECOMMENDATION_TAG_SHARE = 0.10;
 let tagCorpusStatsCache = null;
+let cardMatchCache = null;
 
 const GENRE_RULES = [
   ['science-fiction', /\b(science fiction|sci-fi)\b/],
@@ -1578,111 +1579,6 @@ function hasAllowedLanguageEvidence(cats, leadText) {
   };
 }
 
-
-// Automatic discovery uses the page's own infobox Language row as the
-// authority. Discovery lanes are only a source of candidate titles and must
-// never assign a title's language.
-const DISALLOWED_INFOBOX_LANGUAGES = /\b(?:assamese|bengali|bhojpuri|gujarati|kannada|kashmiri|konkani|malayalam|manipuri|marathi|nepali|odia|oriya|punjabi|sanskrit|tamil|telugu|urdu|sindhi|maithili|rajasthani|tulu|santali|korean|japanese|mandarin|cantonese|chinese|arabic|persian|french|german|italian|spanish|russian|turkish|thai|vietnamese|indonesian|malay|swedish|danish|norwegian|dutch|polish|portuguese)\b/i;
-
-function wikiRevisionSource(page) {
-  const revision = page?.revisions?.[0] || {};
-  return String(
-    revision?.slots?.main?.['*']
-    || revision?.slots?.main?.content
-    || revision?.['*']
-    || revision?.content
-    || ''
-  );
-}
-
-function extractBalancedInfoboxSource(wikitext='') {
-  const source = String(wikitext || '');
-  const start = source.search(/\{\{\s*infobox\b/i);
-  if (start < 0) return '';
-  let depth = 0;
-  for (let i = start; i < source.length - 1; i++) {
-    const pair = source.slice(i, i + 2);
-    if (pair === '{{') {
-      depth++;
-      i++;
-      continue;
-    }
-    if (pair === '}}') {
-      depth--;
-      i++;
-      if (depth === 0) return source.slice(start, i + 1);
-    }
-  }
-  return '';
-}
-
-function splitTopLevelInfoboxParameters(infoboxSource='') {
-  const source = String(infoboxSource || '');
-  const parts = [];
-  let start = 0;
-  let templateDepth = 0;
-  let linkDepth = 0;
-  for (let i = 0; i < source.length; i++) {
-    const pair = source.slice(i, i + 2);
-    if (pair === '{{') { templateDepth++; i++; continue; }
-    if (pair === '}}') { templateDepth = Math.max(0, templateDepth - 1); i++; continue; }
-    if (pair === '[[') { linkDepth++; i++; continue; }
-    if (pair === ']]') { linkDepth = Math.max(0, linkDepth - 1); i++; continue; }
-    if (source[i] === '|' && templateDepth === 1 && linkDepth === 0) {
-      parts.push(source.slice(start, i));
-      start = i + 1;
-    }
-  }
-  parts.push(source.slice(start));
-  return parts;
-}
-
-function cleanInfoboxLanguageValue(value='') {
-  return String(value || '')
-    .replace(/<!--([\s\S]*?)-->/g, ' ')
-    .replace(/<ref\b[^>]*>[\s\S]*?<\/ref\s*>/gi, ' ')
-    .replace(/<ref\b[^/]*\/\s*>/gi, ' ')
-    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2')
-    .replace(/\[\[([^\]]+)\]\]/g, '$1')
-    // Keep template arguments because infobox values commonly use {{hlist|Hindi|English}}
-    // or {{lang|hi|Hindi}}. The template name itself is harmless; the arguments
-    // are what carry the language evidence.
-    .replace(/\{\{/g, ' ')
-    .replace(/\}\}/g, ' ')
-    .replace(/\|/g, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/['’]/g, '')
-    .replace(/[_/·,;()]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function extractInfoboxLanguage(page) {
-  const infobox = extractBalancedInfoboxSource(wikiRevisionSource(page));
-  if (!infobox) return '';
-  const parameters = splitTopLevelInfoboxParameters(infobox);
-  for (const parameter of parameters) {
-    const match = String(parameter || '').match(/^\s*(?:language|languages|original\s+language)\s*=\s*([\s\S]*)$/i);
-    if (match) return cleanInfoboxLanguageValue(match[1]);
-  }
-  return '';
-}
-
-function classifyInfoboxLanguage(languageValue='') {
-  const value = cleanInfoboxLanguageValue(languageValue).toLowerCase();
-  const hasHindi = /\bhindi\b/.test(value);
-  const hasEnglish = /\benglish\b/.test(value);
-  const hasDisallowedLanguage = DISALLOWED_INFOBOX_LANGUAGES.test(value);
-  if (hasDisallowedLanguage || (!hasHindi && !hasEnglish)) {
-    return { allowed:false, language:'', value };
-  }
-  return {
-    allowed:true,
-    language:hasHindi ? 'Hindi' : 'English',
-    value
-  };
-}
-
 function pageMediaEvidence(leadText, cats=[]) {
   const catText = (cats || []).join(' ');
   const show = /\bcategory:.*(?:television series|tv series|web series|miniseries|netflix original programming|amazon prime video original programming)\b/i.test(catText)
@@ -2485,12 +2381,7 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
         touchRecord(stored);
       }
     }
-    wikiSearchResults = [];
-    wikiSearchQuery = '';
-    renderWikiSearchResults();
-    const input = document.getElementById('titleSearch');
-    if (input) input.value = stored.title;
-    state.settings.titleSearch = stored.title;
+    clearUnifiedTitleSearch();
     rebuildTagBrain();
     computeTagWeights();
     saveLocalState();
@@ -2532,6 +2423,7 @@ function ratePendingManualMovie(rating) {
   const id = pendingManualRatingId;
   if (!id) return;
   closeManualRatingPrompt();
+  clearUnifiedTitleSearch();
   rateMovie(id, rating);
 }
 
@@ -2610,7 +2502,7 @@ function saveManualTagChoices() {
 }
 
 async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) {
-  const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages|revisions&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&rvslots=main&rvprop=content&rvlimit=1&format=json&origin=*`;
+  const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, wikiTitle, mode, diagnostics, opts);
   if (movie && opts.ai !== false) await applyAiTags(movie);
@@ -2620,7 +2512,7 @@ async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) 
 async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
   const clean = String(pageId || '').replace(/^wiki_/, '');
   if (!clean) return null;
-  const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages|revisions&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&rvslots=main&rvprop=content&rvlimit=1&format=json&origin=*`;
+  const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, clean, mode, opts.diagnostics || null, opts);
   if (movie && opts.ai !== false) await applyAiTags(movie);
@@ -2657,18 +2549,14 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   const storyText = extractNarrativeSection(extract);
   if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return rejectWikiParse(diagnostics, 'no usable narrative section');
 
-  const infoboxLanguage = extractInfoboxLanguage(page);
-  const infoboxLanguageDecision = classifyInfoboxLanguage(infoboxLanguage);
-  let language = infoboxLanguageDecision.language;
-  if (!infoboxLanguageDecision.allowed) {
-    if (!opts.manualLanguageOverride) {
-      const reason = infoboxLanguage
-        ? `infobox Language is outside Hindi/English scope: ${infoboxLanguage}`
-        : 'Wikipedia infobox has no usable Language field';
-      return rejectWikiParse(diagnostics, reason);
-    }
-    language = 'Other';
-  }
+  let language = '';
+  const languageEvidence = hasAllowedLanguageEvidence(cats, leadText);
+  const englishEvidence = languageEvidence.english;
+  const hindiEvidence = languageEvidence.hindi;
+  if (hindiEvidence) language = 'Hindi';
+  else if (englishEvidence) language = 'English';
+  else if (trustedLane?.language) language = trustedLane.language;
+  else if (opts.manualLanguageOverride) language = 'Other';
 
   const formatDecision = preliminaryFormat;
   const format = formatDecision.strong ? formatDecision.format : (trustedLane ? (trustedLane.mode === 'shows' ? 'series' : null) : formatDecision.format);
@@ -2682,8 +2570,9 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
 
   let country = language === 'Other' ? 'Unknown' : 'USA';
   if (language === 'Hindi') country = 'India';
+  else if (mode === 'shows' && (cats.some(c => c.includes('indian television') || c.includes('indian web series')) || /\bindian\b/i.test(leadText))) { country = 'India'; language = 'Hindi'; }
   else if (cats.some(c => c.includes('british film') || c.includes('united kingdom') || c.includes('british television'))) country = 'UK';
-  else if (cats.some(c => c.includes('indian film') || c.includes('indian television') || c.includes('indian web series'))) country = 'India';
+  else if (cats.some(c => c.includes('indian film') || c.includes('indian television'))) { country = 'India'; language = language || 'Hindi'; }
 
   const dirMatch = leadText.match(/directed by ([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,3})/);
   const creatorMatch = leadText.match(/created by ([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,3})/);
@@ -2694,7 +2583,7 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   const genres = deriveGenres(leadText, cats);
   return {
     id, title, year, director, language, country, format: format||null,
-    genres, categoryText: cats.join(' '), infoboxLanguage,
+    genres, categoryText: cats.join(' '),
     tags: [], coreTags: [], plotTags: [], descriptorTags: [], rawDescriptors: [],
     tagged: false, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, thumbnailUrl, storyText, leadText, wikiVerified: true, retagStatus: 'needs-ai-tags', retagMessage: 'AI tags pending',
     wikiParserVersion: WIKI_PARSER_VERSION
@@ -3234,6 +3123,7 @@ function matchesTab(m) {
 // RENDER
 // ─────────────────────────────────────────────
 function render() {
+  invalidateCardMatchCache();
   updateStats();
   updateAiTagButton();
   updateVisibleSections();
@@ -3299,6 +3189,16 @@ function shuffleAgain() {
   updateControlDeck();
 }
 
+function clearUnifiedTitleSearch() {
+  state.settings.titleSearch = '';
+  wikiSearchQuery = '';
+  wikiSearchResults = [];
+  const input = document.getElementById('titleSearch');
+  if (input) input.value = '';
+  renderWikiSearchResults();
+  saveSettingsState();
+}
+
 function updateTitleSearch(value) {
   state.settings.titleSearch = String(value || '').trim();
   if (!state.settings.titleSearch || state.settings.titleSearch !== wikiSearchQuery) {
@@ -3323,6 +3223,7 @@ function toggleMobileNav() {
 }
 
 function renderActiveCards() {
+  invalidateCardMatchCache();
   if (activeTab === 'pool') renderPoolGrid();
   else if (activeTab === 'hidden') renderHiddenGrid();
   else if (activeTab === 'tags') renderTagBrain();
@@ -3735,6 +3636,100 @@ function setSectionVisibility(selector, visible) {
   });
 }
 
+function invalidateCardMatchCache() {
+  cardMatchCache = null;
+}
+
+function buildCardMatchCache() {
+  computeTagWeights();
+  const allTitles = [
+    ...Object.values(state.movies || {}),
+    ...Object.values(state.hiddenTitles || {})
+  ].filter(movie => movie && scoringTags(movie).length > 0);
+
+  const totalPositiveTagWeight = Object.entries(state.tagWeights || {}).reduce(
+    (sum, [tag, weight]) => weight > 0 ? sum + weight * tagSpecificity(tag) : sum,
+    0
+  );
+  const totalPositiveGenreWeight = Object.values(state.genreWeights || {}).reduce(
+    (sum, weight) => weight > 0 ? sum + weight * GENRE_SCORE_FACTOR : sum,
+    0
+  );
+  const totalTasteWeight = totalPositiveTagWeight + totalPositiveGenreWeight;
+
+  const rows = allTitles.map(movie => {
+    let posOverlap = 0;
+    let genreOverlap = 0;
+    let negativeOverlap = 0;
+    let positiveScore = 0;
+    let negativePenalty = 0;
+    const matchedTags = new Set();
+    const matchedGenres = new Set();
+
+    recommendationScoringTags(movie).forEach(tag => {
+      const weight = Number(state.tagWeights[tag] || 0);
+      const specificity = tagSpecificity(tag);
+      if (weight > 0) {
+        posOverlap++;
+        positiveScore += weight * specificity;
+        matchedTags.add(tag);
+      } else if (weight < 0) {
+        negativeOverlap++;
+        negativePenalty += Math.abs(weight) * specificity * 0.5;
+      }
+    });
+
+    movieGenres(movie).forEach(genre => {
+      const weight = Number(state.genreWeights[genre] || 0);
+      if (weight > 0) {
+        genreOverlap++;
+        positiveScore += weight * GENRE_SCORE_FACTOR;
+        matchedGenres.add(genre);
+      } else if (weight < 0) {
+        negativePenalty += Math.abs(weight) * GENRE_SCORE_FACTOR * 0.5;
+      }
+    });
+
+    const score = positiveScore - negativePenalty;
+    const tasteFit = totalTasteWeight
+      ? Math.max(0, Math.min(1, positiveScore / totalTasteWeight))
+      : 0;
+
+    return { movie, score, posOverlap, genreOverlap, negativeOverlap, positiveScore, negativePenalty, tasteFit, matchedTags, matchedGenres };
+  });
+
+  const maxOverlap = Math.max(...rows.map(row => row.posOverlap), 0);
+  const maxScore = Math.max(...rows.map(row => Math.max(0, row.score)), 0);
+  const maxGenreOverlap = Math.max(...rows.map(row => row.genreOverlap), 0);
+  const cache = new Map();
+
+  rows.forEach(row => {
+    const overlapPart = maxOverlap ? row.posOverlap / maxOverlap : 0;
+    const scorePart = maxScore ? Math.max(0, Math.min(1, row.score / maxScore)) : 0;
+    const genrePart = maxGenreOverlap ? row.genreOverlap / maxGenreOverlap : 0;
+    const penalty = Math.min(0.25, row.negativeOverlap * 0.06);
+    row.matchScore = Math.max(0, Math.min(1, overlapPart * 0.7 + scorePart * 0.25 + genrePart * 0.05 - penalty));
+    cache.set(String(row.movie.id), row);
+  });
+
+  return cache;
+}
+
+function cardMatchData(movie) {
+  if (!personalizedEnough() || !movie?.id) return null;
+  if (!cardMatchCache) cardMatchCache = buildCardMatchCache();
+  return cardMatchCache.get(String(movie.id)) || {
+    movie,
+    matchScore: 0,
+    tasteFit: 0,
+    posOverlap: 0,
+    genreOverlap: 0,
+    negativeOverlap: 0,
+    matchedTags: new Set(),
+    matchedGenres: new Set()
+  };
+}
+
 function renderPoolGrid() {
   const grid = document.getElementById('poolGrid');
   if (!grid) return;
@@ -3798,10 +3793,25 @@ function restoreManualStars() {
 }
 function buildCard(movie, opts={}) {
   const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag } = opts;
+  const automaticMatch = cardMatchData(movie);
+  const hasSuppliedMatch = Number.isFinite(Number(matchScore)) || Number.isFinite(Number(tasteFit));
+  const resolvedMatch = hasSuppliedMatch
+    ? { matchScore:Number(matchScore ?? tasteFit) || 0, tasteFit:Number(tasteFit ?? matchScore) || 0, posOverlap:Number(posOverlap || 0), genreOverlap:Number(genreOverlap || 0), negativeOverlap:Number(negativeOverlap || 0), matchedTags:matchedTags || new Set(), matchedGenres:matchedGenres || new Set() }
+    : automaticMatch;
+  const showMatch = !!resolvedMatch;
+  const resolvedMatchScore = Number(resolvedMatch?.matchScore ?? resolvedMatch?.tasteFit ?? 0) || 0;
+  const resolvedPosOverlap = Number(resolvedMatch?.posOverlap || 0);
+  const resolvedGenreOverlap = Number(resolvedMatch?.genreOverlap || 0);
+  const resolvedNegativeOverlap = Number(resolvedMatch?.negativeOverlap || 0);
+  const resolvedMatchedTags = resolvedMatch?.matchedTags || new Set();
+  const resolvedMatchedGenres = resolvedMatch?.matchedGenres || new Set();
   const card = document.createElement('div');
   card.className = `movie-card ${isShow(movie) ? 'show-card' : 'film-card'}` + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
-  const matchPct = rank ? Math.round((Number(matchScore ?? tasteFit) || 0) * 100) : 0;
+  const matchPct = Math.round(resolvedMatchScore * 100);
+  const matchSummary = resolvedPosOverlap
+    ? `${resolvedPosOverlap} shared tag${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre match${resolvedGenreOverlap===1?'':'es'}`:''} · ${matchPct}% weighted fit${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} disliked`:''}`
+    : 'no current positive taste overlap';
   const safeId = movie.id.replace(/'/g,"\\'");
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';
   const wikiUrl = wikiUrlForMovie(movie);
@@ -3823,14 +3833,14 @@ function buildCard(movie, opts={}) {
         ${movie.thumbnailUrl ? `<img class="card-thumb" src="${movie.thumbnailUrl}" alt="" loading="lazy" decoding="async">` : ''}
         <div class="card-head-copy"><div class="card-title">${titleHtml}</div>
         <div class="format-row"><span class="title-format">${formatLabel}</span></div>
-        ${rank?`<div class="match-percent">${matchPct}% match</div>`:''}
+        ${showMatch?`<div class="match-percent">${matchPct}% match</div>`:''}
         <div class="card-meta">${movie.language}·${movie.country}·${movie.year||'?'}</div>
-        ${rank?`<div class="match-label">${posOverlap || 0} shared tag${posOverlap===1?'':'s'}${genreOverlap?` · ${genreOverlap} genre match${genreOverlap===1?'':'es'}`:''} · ${matchPct}% weighted fit${negativeOverlap?` · ${negativeOverlap} disliked`:''}</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
+        ${showMatch?`<div class="match-label">${matchSummary}</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
       </div>
       ${renderStars(safeId, movie.rating || 0)}
-      ${renderGenres(movie, matchedGenres)}
+      ${renderGenres(movie, resolvedMatchedGenres)}
       ${poolView && movie.retagMessage ? `<div class="pool-card-note">${movie.retagMessage}</div>`:''}
-      <div class="card-tags" id="tags-${movie.id}">${renderTagInsightChips(movie, safeId, true, matchedTags, contextTag)}</div>
+      <div class="card-tags" id="tags-${movie.id}">${renderTagInsightChips(movie, safeId, true, resolvedMatchedTags, contextTag)}</div>
       <div class="card-actions">
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
         ${!hiddenView && movie.storyText && !hasCurrentAiTags(movie) ? `<button class="card-act" onclick="openManualTagChooser('${safeId}',event)">choose tags</button>` : ''}
@@ -4557,7 +4567,7 @@ function renderTagDetail() {
   rows.sort((a,b)=>(a.status==='rated'?0:a.status==='pool'?1:2)-(b.status==='rated'?0:b.status==='pool'?1:2)||Number(b.movie.rating||0)-Number(a.movie.rating||0)||a.movie.title.localeCompare(b.movie.title));
   grid.innerHTML='';
   if (!rows.length) { grid.innerHTML='<div class="empty-state"><h3>No Titles In This Group</h3></div>'; return; }
-  rows.slice(0,tagDetailVisibleLimit).forEach(({movie,status})=>grid.appendChild(buildCard(movie,{hiddenView:status==='hidden',showEdit:status==='rated',poolView:status==='pool',matchedTags:new Set([selectedTag]),contextLabel:status==='rated'?'Rated':status==='hidden'?'Hidden':'In Pool',contextTag:selectedTag})));
+  rows.slice(0,tagDetailVisibleLimit).forEach(({movie,status})=>grid.appendChild(buildCard(movie,{hiddenView:status==='hidden',showEdit:status==='rated',poolView:status==='pool',contextLabel:status==='rated'?'Rated':status==='hidden'?'Hidden':'In Pool',contextTag:selectedTag})));
   if (rows.length>tagDetailVisibleLimit) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreTagTitles()">Show 40 more · ${rows.length-tagDetailVisibleLimit} remaining</button></div>`);
 }
 // ─────────────────────────────────────────────
