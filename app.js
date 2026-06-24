@@ -215,7 +215,7 @@ let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const CARD_REFRESH_BATCH_SIZE = 20;
-const WIKI_PARSER_VERSION = 4;
+const WIKI_PARSER_VERSION = 5;
 const REC_INFINITE_PAGE_SIZE = 20;
 const STRONG_REC_TARGET = 40;
 const STRONG_REC_REFILL_THRESHOLD = 20;
@@ -1578,6 +1578,111 @@ function hasAllowedLanguageEvidence(cats, leadText) {
   };
 }
 
+
+// Automatic discovery uses the page's own infobox Language row as the
+// authority. Discovery lanes are only a source of candidate titles and must
+// never assign a title's language.
+const DISALLOWED_INFOBOX_LANGUAGES = /\b(?:assamese|bengali|bhojpuri|gujarati|kannada|kashmiri|konkani|malayalam|manipuri|marathi|nepali|odia|oriya|punjabi|sanskrit|tamil|telugu|urdu|sindhi|maithili|rajasthani|tulu|santali|korean|japanese|mandarin|cantonese|chinese|arabic|persian|french|german|italian|spanish|russian|turkish|thai|vietnamese|indonesian|malay|swedish|danish|norwegian|dutch|polish|portuguese)\b/i;
+
+function wikiRevisionSource(page) {
+  const revision = page?.revisions?.[0] || {};
+  return String(
+    revision?.slots?.main?.['*']
+    || revision?.slots?.main?.content
+    || revision?.['*']
+    || revision?.content
+    || ''
+  );
+}
+
+function extractBalancedInfoboxSource(wikitext='') {
+  const source = String(wikitext || '');
+  const start = source.search(/\{\{\s*infobox\b/i);
+  if (start < 0) return '';
+  let depth = 0;
+  for (let i = start; i < source.length - 1; i++) {
+    const pair = source.slice(i, i + 2);
+    if (pair === '{{') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (pair === '}}') {
+      depth--;
+      i++;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  return '';
+}
+
+function splitTopLevelInfoboxParameters(infoboxSource='') {
+  const source = String(infoboxSource || '');
+  const parts = [];
+  let start = 0;
+  let templateDepth = 0;
+  let linkDepth = 0;
+  for (let i = 0; i < source.length; i++) {
+    const pair = source.slice(i, i + 2);
+    if (pair === '{{') { templateDepth++; i++; continue; }
+    if (pair === '}}') { templateDepth = Math.max(0, templateDepth - 1); i++; continue; }
+    if (pair === '[[') { linkDepth++; i++; continue; }
+    if (pair === ']]') { linkDepth = Math.max(0, linkDepth - 1); i++; continue; }
+    if (source[i] === '|' && templateDepth === 1 && linkDepth === 0) {
+      parts.push(source.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(source.slice(start));
+  return parts;
+}
+
+function cleanInfoboxLanguageValue(value='') {
+  return String(value || '')
+    .replace(/<!--([\s\S]*?)-->/g, ' ')
+    .replace(/<ref\b[^>]*>[\s\S]*?<\/ref\s*>/gi, ' ')
+    .replace(/<ref\b[^/]*\/\s*>/gi, ' ')
+    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2')
+    .replace(/\[\[([^\]]+)\]\]/g, '$1')
+    // Keep template arguments because infobox values commonly use {{hlist|Hindi|English}}
+    // or {{lang|hi|Hindi}}. The template name itself is harmless; the arguments
+    // are what carry the language evidence.
+    .replace(/\{\{/g, ' ')
+    .replace(/\}\}/g, ' ')
+    .replace(/\|/g, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/['’]/g, '')
+    .replace(/[_/·,;()]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractInfoboxLanguage(page) {
+  const infobox = extractBalancedInfoboxSource(wikiRevisionSource(page));
+  if (!infobox) return '';
+  const parameters = splitTopLevelInfoboxParameters(infobox);
+  for (const parameter of parameters) {
+    const match = String(parameter || '').match(/^\s*(?:language|languages|original\s+language)\s*=\s*([\s\S]*)$/i);
+    if (match) return cleanInfoboxLanguageValue(match[1]);
+  }
+  return '';
+}
+
+function classifyInfoboxLanguage(languageValue='') {
+  const value = cleanInfoboxLanguageValue(languageValue).toLowerCase();
+  const hasHindi = /\bhindi\b/.test(value);
+  const hasEnglish = /\benglish\b/.test(value);
+  const hasDisallowedLanguage = DISALLOWED_INFOBOX_LANGUAGES.test(value);
+  if (hasDisallowedLanguage || (!hasHindi && !hasEnglish)) {
+    return { allowed:false, language:'', value };
+  }
+  return {
+    allowed:true,
+    language:hasHindi ? 'Hindi' : 'English',
+    value
+  };
+}
+
 function pageMediaEvidence(leadText, cats=[]) {
   const catText = (cats || []).join(' ');
   const show = /\bcategory:.*(?:television series|tv series|web series|miniseries|netflix original programming|amazon prime video original programming)\b/i.test(catText)
@@ -2505,7 +2610,7 @@ function saveManualTagChoices() {
 }
 
 async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) {
-  const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&format=json&origin=*`;
+  const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages|revisions&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&rvslots=main&rvprop=content&rvlimit=1&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, wikiTitle, mode, diagnostics, opts);
   if (movie && opts.ai !== false) await applyAiTags(movie);
@@ -2515,7 +2620,7 @@ async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) 
 async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
   const clean = String(pageId || '').replace(/^wiki_/, '');
   if (!clean) return null;
-  const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&format=json&origin=*`;
+  const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages|revisions&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&rvslots=main&rvprop=content&rvlimit=1&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, clean, mode, opts.diagnostics || null, opts);
   if (movie && opts.ai !== false) await applyAiTags(movie);
@@ -2552,14 +2657,18 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   const storyText = extractNarrativeSection(extract);
   if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return rejectWikiParse(diagnostics, 'no usable narrative section');
 
-  let language = '';
-  const languageEvidence = hasAllowedLanguageEvidence(cats, leadText);
-  const englishEvidence = languageEvidence.english;
-  const hindiEvidence = languageEvidence.hindi;
-  if (hindiEvidence) language = 'Hindi';
-  else if (englishEvidence) language = 'English';
-  else if (trustedLane?.language) language = trustedLane.language;
-  else if (opts.manualLanguageOverride) language = 'Other';
+  const infoboxLanguage = extractInfoboxLanguage(page);
+  const infoboxLanguageDecision = classifyInfoboxLanguage(infoboxLanguage);
+  let language = infoboxLanguageDecision.language;
+  if (!infoboxLanguageDecision.allowed) {
+    if (!opts.manualLanguageOverride) {
+      const reason = infoboxLanguage
+        ? `infobox Language is outside Hindi/English scope: ${infoboxLanguage}`
+        : 'Wikipedia infobox has no usable Language field';
+      return rejectWikiParse(diagnostics, reason);
+    }
+    language = 'Other';
+  }
 
   const formatDecision = preliminaryFormat;
   const format = formatDecision.strong ? formatDecision.format : (trustedLane ? (trustedLane.mode === 'shows' ? 'series' : null) : formatDecision.format);
@@ -2573,9 +2682,8 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
 
   let country = language === 'Other' ? 'Unknown' : 'USA';
   if (language === 'Hindi') country = 'India';
-  else if (mode === 'shows' && (cats.some(c => c.includes('indian television') || c.includes('indian web series')) || /\bindian\b/i.test(leadText))) { country = 'India'; language = 'Hindi'; }
   else if (cats.some(c => c.includes('british film') || c.includes('united kingdom') || c.includes('british television'))) country = 'UK';
-  else if (cats.some(c => c.includes('indian film') || c.includes('indian television'))) { country = 'India'; language = language || 'Hindi'; }
+  else if (cats.some(c => c.includes('indian film') || c.includes('indian television') || c.includes('indian web series'))) country = 'India';
 
   const dirMatch = leadText.match(/directed by ([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,3})/);
   const creatorMatch = leadText.match(/created by ([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,3})/);
@@ -2586,7 +2694,7 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   const genres = deriveGenres(leadText, cats);
   return {
     id, title, year, director, language, country, format: format||null,
-    genres, categoryText: cats.join(' '),
+    genres, categoryText: cats.join(' '), infoboxLanguage,
     tags: [], coreTags: [], plotTags: [], descriptorTags: [], rawDescriptors: [],
     tagged: false, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, thumbnailUrl, storyText, leadText, wikiVerified: true, retagStatus: 'needs-ai-tags', retagMessage: 'AI tags pending',
     wikiParserVersion: WIKI_PARSER_VERSION
