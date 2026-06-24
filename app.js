@@ -236,6 +236,11 @@ let autoExpandTimer = null;
 let backgroundAiTaggingInProgress = false;
 let backgroundAiTimer = null;
 let startupDriveRestoreDone = false;
+// A browser with no local library must restore Drive before background work can
+// create titles or advance the dataset timestamp.
+let libraryWritesUnlocked = false;
+let startupInitialLibraryPresent = false;
+let startupFinalized = false;
 let driveTokenRefreshTimer = null;
 let settingsSyncTimer = null;
 let tagCloudNormalizationTimer = null;
@@ -1273,12 +1278,18 @@ function runStartupMaintenance() {
 // ─────────────────────────────────────────────
 // INIT
 // ─────────────────────────────────────────────
-window.addEventListener('DOMContentLoaded', async () => {
-  loadLocalState();
-  recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
-  render();
-  restoreDriveSession().finally(() => {
-    startupDriveRestoreDone = true;
+function libraryRecordCount(dataset=state) {
+  return Object.keys(dataset?.movies || {}).length + Object.keys(dataset?.hiddenTitles || {}).length;
+}
+
+function finalizeStartupAfterDrive({allowCollection=false}={}) {
+  if (startupFinalized) return;
+  startupFinalized = true;
+  startupDriveRestoreDone = true;
+  libraryWritesUnlocked = !!allowCollection;
+
+  // Maintenance can rewrite stored data, so it must follow the Drive decision.
+  if (libraryWritesUnlocked) {
     const migratedWrongPicks = migrateVisibleWrongPicks();
     const migratedAliases = migrateLegacyTagAliases();
     const purgedTags = purgeLegacyTagsForAi();
@@ -1290,11 +1301,30 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
     runStartupMaintenance();
     scheduleTagCloudNormalization(1800);
-    render();
-    if (Object.keys(state.movies).length < 50 && (!state.drive.enabled || state.drive.connected)) {
-      scheduleAutoExpand(800);
-    }
-  });
+  }
+
+  render();
+  if (libraryWritesUnlocked && Object.keys(state.movies).length < 50) {
+    scheduleAutoExpand(800);
+  }
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  loadLocalState();
+  startupInitialLibraryPresent = libraryRecordCount() > 0;
+  recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
+  render();
+
+  // A previously connected browser may restore silently. A new browser remains
+  // read-only until the user taps Drive, so it cannot manufacture a newer local
+  // dataset before Drive is checked.
+  let restored = false;
+  try {
+    restored = await restoreDriveSession();
+  } catch (error) {
+    console.warn('Drive startup restore failed', error);
+  }
+  finalizeStartupAfterDrive({allowCollection: restored || startupInitialLibraryPresent});
   window.addEventListener('scroll', handleScroll);
 });
 
@@ -2056,6 +2086,10 @@ function isExternalRateLimitError(error) {
 
 async function expandPool(manual=true) {
   if (poolExpansionInProgress) return;
+  if (!libraryWritesUnlocked) {
+    showToast('Connect Drive first to restore this device before collecting titles.', '');
+    return;
+  }
   if (!manual && (autoFetchPaused || !shouldRunBackgroundCollection())) return;
 
   if (manual) {
@@ -3468,6 +3502,7 @@ async function runBackgroundAiQueue() {
 function maybeAutoExpandPool() {
   if (
     !startupDriveRestoreDone ||
+    !libraryWritesUnlocked ||
     autoFetchPaused ||
     poolExpansionInProgress ||
     backgroundAiTaggingInProgress ||
@@ -3497,6 +3532,7 @@ function maybeAutoExpandPool() {
 function scheduleAutoExpand(delay = 2500) {
   if (
     !startupDriveRestoreDone ||
+    !libraryWritesUnlocked ||
     autoFetchPaused ||
     autoExpandTimer ||
     poolExpansionInProgress ||
@@ -4816,43 +4852,30 @@ function replaceStateFromDataset(dataset) {
   invalidateTagCaches();
 }
 
-function datasetContentCount(data={}) {
-  return [
-    Object.keys(data.movies || {}).length,
-    Object.keys(data.hiddenTitles || {}).length,
-    Object.keys(data.wrongPicks || {}).length,
-    Object.keys(data.deletedMovieRecords || {}).length
-  ].reduce((sum, count) => sum + count, 0);
-}
-
 function mergeRemoteData(remoteRaw={}) {
   const remote = normaliseIncomingData(remoteRaw);
-  const localData = normaliseIncomingData(exportCinelensData());
   const remoteStamp = dataTimestamp(remote);
-  const localStamp = dataTimestamp(localData);
-  const localResetAt = Date.parse(localData.meta?.resetAt || '') || 0;
+  const localStamp = dataTimestamp(state);
+  const localResetAt = Date.parse(state.meta?.resetAt || '') || 0;
   const remoteResetAt = Date.parse(remote.meta?.resetAt || '') || 0;
-  const localCount = datasetContentCount(localData);
-  const remoteCount = datasetContentCount(remote);
-  const sameData = JSON.stringify(localData) === JSON.stringify(remote);
-
-  // A newly opened browser (such as Safari on iPhone) has no local library.
-  // It must restore the non-empty Drive library even if that blank local shell
-  // happened to receive a newer timestamp. Only an explicit later RESET may
-  // deliberately replace a populated Drive library with an empty one.
-  const localExplicitlyResetLater = localCount === 0 && localResetAt > remoteResetAt;
-  const remoteWins = (
-    (!localExplicitlyResetLater && localCount === 0 && remoteCount > 0) ||
-    (remoteResetAt > localResetAt) ||
-    (remoteResetAt === localResetAt && remoteStamp > localStamp)
+  const localHasLibrary = libraryRecordCount(state) > 0;
+  const remoteHasLibrary = libraryRecordCount(remote) > 0;
+  // A brand-new browser has no authority to overwrite a populated Drive file.
+  // A deliberate later local reset remains authoritative.
+  const remoteWins = remoteResetAt > localResetAt || (
+    remoteResetAt === localResetAt && (
+      (!localHasLibrary && remoteHasLibrary) ||
+      (localHasLibrary === remoteHasLibrary && remoteStamp > localStamp)
+    )
   );
-
+  const localData = normaliseIncomingData(exportCinelensData());
+  const sameData = JSON.stringify(localData) === JSON.stringify(remote);
   if (remoteWins) {
     replaceStateFromDataset(remote);
     ensureSyncMetadata();
-    return {localChanged:true, remoteChanged:false, winner:'drive', localStamp, remoteStamp, localCount, remoteCount};
+    return {localChanged:true, remoteChanged:false, winner:'drive', localStamp, remoteStamp};
   }
-  return {localChanged:false, remoteChanged:!sameData, winner:'local', localStamp, remoteStamp, localCount, remoteCount};
+  return {localChanged:false, remoteChanged:!sameData, winner:'local', localStamp, remoteStamp};
 }
 
 function saveLocalState(opts={}) {
@@ -5058,7 +5081,12 @@ async function connectDrive() {
     state.drive.lastConnectedAt=Date.now();
     saveLocalState({preserveUpdatedAt:true});
     setDriveStatus('connected');
-    render();
+    if (!startupFinalized || !libraryWritesUnlocked) {
+      startupFinalized = false;
+      finalizeStartupAfterDrive({allowCollection:true});
+    } else {
+      render();
+    }
     showToast('Drive connected','success');
   } catch(e) {
     console.error('Drive sign-in failed', e);
@@ -5069,8 +5097,8 @@ async function connectDrive() {
 }
 
 async function restoreDriveSession(showFailure=false) {
-  if (driveRestoreInProgress) return;
-  if (!state.drive.enabled || (!state.drive.fileId && !state.drive.accessToken)) return;
+  if (driveRestoreInProgress) return false;
+  if (!state.drive.enabled || (!state.drive.fileId && !state.drive.accessToken)) return false;
   driveRestoreInProgress=true;
   setDriveStatus('syncing');
   try {
@@ -5081,6 +5109,7 @@ async function restoreDriveSession(showFailure=false) {
     state.drive.lastConnectedAt=Date.now();
     saveLocalState({preserveUpdatedAt:true});
     setDriveStatus('connected');
+    return true;
   } catch(e) {
     state.drive.connected=false;
     state.drive.accessToken='';
@@ -5089,6 +5118,7 @@ async function restoreDriveSession(showFailure=false) {
   } finally {
     driveRestoreInProgress=false;
   }
+  return false;
 }
 
 function setDriveStatus(s) {
@@ -5174,11 +5204,9 @@ async function driveFetch(url, opts={}) {
 async function findDriveFile() {
   try {
     const q=`name='${DRIVE_FILE}' and trashed=false`;
-    const url=`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&orderBy=modifiedTime%20desc&fields=files(id,name,modifiedTime)`;
-    const resp=await driveFetch(url);
-    if (!resp.ok) throw new Error('Drive file search failed');
+    const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&orderBy=modifiedTime%20desc&fields=files(id,name,modifiedTime)`);
     const d=await resp.json();
-    return d.files?.[0]?.id||null;
+    return (d.files || []).sort((a, b) => Date.parse(b.modifiedTime || 0) - Date.parse(a.modifiedTime || 0))[0]?.id || null;
   } catch(e){return null;}
 }
 async function loadFromDrive() {
