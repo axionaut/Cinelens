@@ -227,6 +227,9 @@ const FETCH_AUTO_ATTEMPT_BUDGET = 55;
 const FETCH_MANUAL_ATTEMPT_BUDGET = 100;
 const FETCH_MAX_ADDED_PER_RUN = 35;
 const DRIVE_TOKEN_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
+const TASTE_STORY_VERSION = 'cinelens-taste-story-v1';
+const TASTE_STORY_MIN_RATINGS = 3;
+const TASTE_STORY_DEBOUNCE_MS = 1200;
 let recVisibleLimit = 10;
 let currentWikiAbortController = null;
 let currentSleepCancel = null;
@@ -246,6 +249,9 @@ let settingsSyncTimer = null;
 let tagCloudNormalizationTimer = null;
 let tagCloudNormalizationInProgress = false;
 let tagCloudNormalizationAttemptedCount = 0;
+let tasteStoryTimer = null;
+let tasteStoryInProgress = false;
+let tasteStoryRefreshPending = false;
 let poolVisibleLimit = 80;
 let hiddenVisibleLimit = 80;
 let wikiSearchResults = [];
@@ -264,6 +270,7 @@ let state = {
   legacyTagAliases: {},
   tagStats: { candidates:0, tags:0, rebuiltAt:'' },
   tagNormalization: { version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:'' },
+  tasteStory: { version:TASTE_STORY_VERSION, profileHash:'', title:'', story:'', generatedAt:'', status:'idle', error:'' },
   discoveryCursor: {},
   meta: { updatedAt:'' },
   poolFetched: false
@@ -4118,6 +4125,7 @@ function rateMovie(id, rating) {
   collapseDuplicateMovies(state.movies);
   computeTagWeights();
   saveLocalState(); syncDrive(); render();
+  scheduleTasteStoryUpdate();
   showToast(nextRating ? `"${movie.title}" → ${nextRating}/5` : `Removed rating from "${movie.title}"`, nextRating ? 'success' : '');
 }
 
@@ -4449,6 +4457,187 @@ function updateHKStatus(msg) {
 }
 
 // ─────────────────────────────────────────────
+// TASTE STORY — independent creative feature
+// ─────────────────────────────────────────────
+function normaliseTasteStory(value={}) {
+  return {
+    version:String(value?.version || TASTE_STORY_VERSION),
+    profileHash:String(value?.profileHash || ''),
+    title:String(value?.title || '').trim().slice(0, 180),
+    story:String(value?.story || '').trim().slice(0, 14000),
+    generatedAt:String(value?.generatedAt || ''),
+    status:['idle','queued','writing','ready','error'].includes(value?.status) ? value.status : 'idle',
+    error:String(value?.error || '').slice(0, 240),
+    ratingCount:Math.max(0, Number(value?.ratingCount || 0))
+  };
+}
+
+function tasteStoryRatingCount() {
+  return tasteEvidenceMovies().filter(movie => Number(movie?.rating || 0) > 0).length;
+}
+
+function buildTasteStoryProfile() {
+  computeTagWeights();
+  const weighted=Object.entries(state.tagWeights || {})
+    .map(([tag, weight]) => ({tag:normaliseTagName(tag), weight:Number(weight || 0)}))
+    .filter(item => item.tag && item.weight)
+    .sort((a,b) => Math.abs(b.weight) - Math.abs(a.weight) || a.tag.localeCompare(b.tag));
+  const likedTags=weighted.filter(item => item.weight > 0).slice(0, 42);
+  const avoidedTags=weighted.filter(item => item.weight < 0).slice(0, 28);
+  const preferredGenres=Object.entries(state.genreWeights || {})
+    .map(([genre, weight]) => ({genre:normaliseTagName(genre), weight:Number(weight || 0)}))
+    .filter(item => item.genre && item.weight > 0)
+    .sort((a,b) => b.weight - a.weight || a.genre.localeCompare(b.genre))
+    .slice(0, 10);
+  const avoidedGenres=Object.entries(state.genreWeights || {})
+    .map(([genre, weight]) => ({genre:normaliseTagName(genre), weight:Number(weight || 0)}))
+    .filter(item => item.genre && item.weight < 0)
+    .sort((a,b) => a.weight - b.weight || a.genre.localeCompare(b.genre))
+    .slice(0, 10);
+  const ratingCount=tasteStoryRatingCount();
+  const profile={
+    version:TASTE_STORY_VERSION,
+    ratingCount,
+    likedTags,
+    avoidedTags,
+    preferredGenres,
+    avoidedGenres
+  };
+  return {...profile, profileHash:String(stableHash(JSON.stringify(profile)))};
+}
+
+function ensureTasteStoryCard() {
+  let card=document.getElementById('tasteStoryCard');
+  if (card) return card;
+  const anchor=document.getElementById('tagBrainSep');
+  if (!anchor) return null;
+  anchor.insertAdjacentHTML('beforebegin', `
+    <section class="tag-only" id="tasteStoryCard" style="display:none;margin:0 0 26px;padding:18px 20px;border:1px solid var(--border);border-radius:7px;background:linear-gradient(135deg,rgba(242,193,78,.08),rgba(36,28,23,.82) 48%,rgba(16,13,11,.95));box-shadow:0 12px 30px rgba(0,0,0,.16)">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:10px">
+        <div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:2px;color:var(--accent)">A Story for You</div>
+          <div id="tasteStoryMeta" style="margin-top:2px;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)"></div>
+        </div>
+        <button class="card-act" id="tasteStoryRefreshBtn" onclick="refreshTasteStory()">write a new story</button>
+      </div>
+      <div id="tasteStoryBody" style="max-width:900px;font-size:14px;line-height:1.76;color:var(--text)"></div>
+    </section>`);
+  return document.getElementById('tasteStoryCard');
+}
+
+function renderTasteStoryCard() {
+  const card=ensureTasteStoryCard();
+  if (!card) return;
+  const body=document.getElementById('tasteStoryBody');
+  const meta=document.getElementById('tasteStoryMeta');
+  const button=document.getElementById('tasteStoryRefreshBtn');
+  const ratingCount=tasteStoryRatingCount();
+  const story=normaliseTasteStory(state.tasteStory || {});
+  state.tasteStory=story;
+  card.style.display=activeTab === 'tags' ? 'block' : 'none';
+  if (activeTab !== 'tags' || !body || !meta) return;
+  if (ratingCount < TASTE_STORY_MIN_RATINGS) {
+    meta.textContent=`Rate ${TASTE_STORY_MIN_RATINGS - ratingCount} more ${TASTE_STORY_MIN_RATINGS - ratingCount === 1 ? 'title' : 'titles'} to begin your story`;
+    body.innerHTML='<span style="color:var(--muted)">Your rated tags will become the creative ingredients for an original story made for you.</span>';
+    if (button) button.disabled=true;
+    return;
+  }
+  if (button) {
+    button.disabled=!!tasteStoryInProgress;
+    button.textContent=tasteStoryInProgress ? 'writing…' : 'write a new story';
+  }
+  if (story.story) {
+    const title=story.title ? `<div style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:1.4px;color:var(--text);margin-bottom:10px">${attrSafe(story.title)}</div>` : '';
+    const paragraphs=attrSafe(story.story).split(/\n{2,}/).map(p => `<p style="margin:0 0 12px">${p.replace(/\n/g,'<br>')}</p>`).join('');
+    body.innerHTML=title+paragraphs;
+    meta.textContent=story.status === 'writing'
+      ? 'Your next story is being written from your latest ratings…'
+      : `Written from ${ratingCount} ratings${story.generatedAt ? ` · updated ${new Date(story.generatedAt).toLocaleString()}` : ''}`;
+  } else if (story.status === 'writing' || story.status === 'queued') {
+    body.innerHTML='<span style="color:var(--muted)">Gemini is writing an original story from the story patterns your ratings favour.</span>';
+    meta.textContent='Writing your first story…';
+  } else {
+    body.innerHTML='<span style="color:var(--muted)">Your first story is ready to be written from the tags your ratings have shaped.</span>';
+    meta.textContent=`${ratingCount} ratings ready`;
+  }
+}
+
+async function generateTasteStory({force=false}={}) {
+  if (tasteStoryInProgress) {
+    tasteStoryRefreshPending = true;
+    return false;
+  }
+  const profile=buildTasteStoryProfile();
+  if (profile.ratingCount < TASTE_STORY_MIN_RATINGS) return false;
+  const existing=normaliseTasteStory(state.tasteStory || {});
+  if (!force && existing.profileHash === profile.profileHash && existing.story) return true;
+  tasteStoryInProgress=true;
+  state.tasteStory={...existing, version:TASTE_STORY_VERSION, profileHash:profile.profileHash, status:'writing', error:'', ratingCount:profile.ratingCount};
+  renderTasteStoryCard();
+  const wait=Math.max(0, AI_REQUEST_DELAY_MS - (Date.now() - lastAiRequestAt));
+  if (wait) await abortableSleep(wait);
+  lastAiRequestAt=Date.now();
+  try {
+    const response=await fetch(AI_TAGGER_URL, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify({task:'generate-taste-story', profile})
+    });
+    if (!response.ok) throw new Error(`Taste story HTTP ${response.status}`);
+    const payload=await response.json();
+    if (!payload.ok) throw new Error(payload.error || 'Taste story generation failed');
+    const title=String(payload.title || '').trim();
+    const story=String(payload.story || '').trim();
+    if (!title || !story) throw new Error('Gemini returned no usable story');
+    state.tasteStory={
+      version:TASTE_STORY_VERSION,
+      profileHash:profile.profileHash,
+      title:title.slice(0,180),
+      story:story.slice(0,14000),
+      generatedAt:nowStamp(),
+      status:'ready',
+      error:'',
+      ratingCount:profile.ratingCount
+    };
+    saveLocalState();
+    syncDrive();
+    renderTasteStoryCard();
+    return true;
+  } catch(error) {
+    state.tasteStory={...existing, version:TASTE_STORY_VERSION, profileHash:existing.profileHash || profile.profileHash, status:'error', error:String(error?.message || error), ratingCount:profile.ratingCount};
+    renderTasteStoryCard();
+    console.warn('Taste story generation failed', error);
+    return false;
+  } finally {
+    tasteStoryInProgress=false;
+    renderTasteStoryCard();
+    if (tasteStoryRefreshPending) {
+      tasteStoryRefreshPending=false;
+      scheduleTasteStoryUpdate();
+    }
+  }
+}
+
+function scheduleTasteStoryUpdate({force=false}={}) {
+  clearTimeout(tasteStoryTimer);
+  if (tasteStoryInProgress) {
+    tasteStoryRefreshPending=true;
+    return;
+  }
+  const profile=buildTasteStoryProfile();
+  if (profile.ratingCount < TASTE_STORY_MIN_RATINGS) return;
+  const existing=normaliseTasteStory(state.tasteStory || {});
+  if (!force && existing.profileHash === profile.profileHash && existing.story) return;
+  state.tasteStory={...existing, version:TASTE_STORY_VERSION, profileHash:profile.profileHash, status:'queued', error:'', ratingCount:profile.ratingCount};
+  renderTasteStoryCard();
+  tasteStoryTimer=setTimeout(() => generateTasteStory({force}), TASTE_STORY_DEBOUNCE_MS);
+}
+
+function refreshTasteStory() {
+  scheduleTasteStoryUpdate({force:true});
+}
+
+// ─────────────────────────────────────────────
 // TAG BRAIN
 // ─────────────────────────────────────────────
 function setTagFilter(filter, btn) {
@@ -4460,6 +4649,9 @@ function setTagFilter(filter, btn) {
 function renderTagBrain() {
   computeTagWeights();
   if (!state.settings.tagPreferences) state.settings.tagPreferences = {};
+  renderTasteStoryCard();
+  const profile=buildTasteStoryProfile();
+  if (profile.ratingCount >= TASTE_STORY_MIN_RATINGS && (!state.tasteStory?.story || state.tasteStory?.profileHash !== profile.profileHash)) scheduleTasteStoryUpdate();
   const grid=document.getElementById('tagBrainGrid');
   const countEl=document.getElementById('tagBrainCount');
   const search=(document.getElementById('tagSearch')?.value || '').trim().toLowerCase();
@@ -4775,6 +4967,7 @@ function exportCinelensData() {
     deletedMovieRecords: state.deletedMovieRecords,
     tagStats: state.tagStats,
     tagNormalization: state.tagNormalization,
+    tasteStory: state.tasteStory,
     discoveryCursor: state.discoveryCursor
   };
 }
@@ -4834,6 +5027,7 @@ function normaliseIncomingData(d={}) {
     legacyTagAliases: d.tagAliases || d.legacyTagAliases || {},
     tagStats,
     tagNormalization: d.tagNormalization || {version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:''},
+    tasteStory: normaliseTasteStory(d.tasteStory || {}),
     discoveryCursor: normaliseDiscoveryCursor(d.discoveryCursor || {})
   };
 }
@@ -4849,6 +5043,7 @@ function replaceStateFromDataset(dataset) {
   state.legacyTagAliases = incoming.legacyTagAliases;
   state.tagStats = incoming.tagStats;
   state.tagNormalization = incoming.tagNormalization;
+  state.tasteStory = incoming.tasteStory;
   state.discoveryCursor = incoming.discoveryCursor;
   state.meta = incoming.meta;
   Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
@@ -4878,6 +5073,16 @@ function mergeRecordMap(localMap={}, remoteMap={}) {
     if (selected) merged[id]=selected;
   });
   return merged;
+}
+
+function newestTasteStory(localStory={}, remoteStory={}) {
+  const local=normaliseTasteStory(localStory);
+  const remote=normaliseTasteStory(remoteStory);
+  const localTime=Date.parse(local.generatedAt || '') || 0;
+  const remoteTime=Date.parse(remote.generatedAt || '') || 0;
+  if (remoteTime > localTime) return remote;
+  if (localTime > remoteTime) return local;
+  return remote.story.length > local.story.length ? remote : local;
 }
 
 function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
@@ -4925,6 +5130,7 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
     legacyTagAliases:{...remote.legacyTagAliases, ...local.legacyTagAliases},
     tagStats:{candidates:0, tags:0, rebuiltAt:''},
     tagNormalization:dataTimestamp(remote) > dataTimestamp(local) ? remote.tagNormalization : local.tagNormalization,
+    tasteStory:newestTasteStory(local.tasteStory, remote.tasteStory),
     discoveryCursor:cursor
   };
   return {dataset, source:'record-merge'};
@@ -4981,6 +5187,7 @@ function loadLocalState() {
       if (s.tagStats) state.tagStats=s.tagStats;
       else if (s.canonicalTagStats) state.tagStats={candidates:s.canonicalTagStats.raw||0,tags:s.canonicalTagStats.canonical||0,rebuiltAt:s.canonicalTagStats.rebuiltAt||''};
       if (s.tagNormalization) state.tagNormalization=s.tagNormalization;
+      if (s.tasteStory) state.tasteStory=normaliseTasteStory(s.tasteStory);
       delete state.canonicalTagStats;
       if (s.meta) state.meta={...state.meta,...s.meta};
       if (s.discoveryCursor) state.discoveryCursor=normaliseDiscoveryCursor(s.discoveryCursor);
