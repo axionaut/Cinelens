@@ -4857,30 +4857,96 @@ function replaceStateFromDataset(dataset) {
   invalidateTagCaches();
 }
 
+function copyRecord(record) {
+  return record && typeof record === 'object' ? JSON.parse(JSON.stringify(record)) : record;
+}
+
+function newestRecord(localRecord, remoteRecord, {preferHiddenOnTie=false}={}) {
+  if (!localRecord) return copyRecord(remoteRecord);
+  if (!remoteRecord) return copyRecord(localRecord);
+  const localTime = recordTimestamp(localRecord);
+  const remoteTime = recordTimestamp(remoteRecord);
+  if (remoteTime > localTime) return copyRecord(remoteRecord);
+  if (localTime > remoteTime) return copyRecord(localRecord);
+  return copyRecord(preferHiddenOnTie ? remoteRecord : localRecord);
+}
+
+function mergeRecordMap(localMap={}, remoteMap={}) {
+  const merged={};
+  new Set([...Object.keys(localMap || {}), ...Object.keys(remoteMap || {})]).forEach(id => {
+    const selected=newestRecord(localMap?.[id], remoteMap?.[id]);
+    if (selected) merged[id]=selected;
+  });
+  return merged;
+}
+
+function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
+  const local=normaliseIncomingData(localRaw);
+  const remote=normaliseIncomingData(remoteRaw);
+  const localResetAt=Date.parse(local.meta?.resetAt || '') || 0;
+  const remoteResetAt=Date.parse(remote.meta?.resetAt || '') || 0;
+
+  // A later deliberate reset is the only whole-library overwrite rule.
+  if (localResetAt > remoteResetAt) return {dataset:local, source:'local-reset'};
+  if (remoteResetAt > localResetAt) return {dataset:remote, source:'drive-reset'};
+
+  const movies={...mergeRecordMap(local.movies, remote.movies)};
+  const hiddenTitles={...mergeRecordMap(local.hiddenTitles, remote.hiddenTitles)};
+
+  // A title cannot be active and hidden at once. Newer state wins; on an exact
+  // timestamp tie, hidden wins so an old active cache cannot resurrect it.
+  new Set([...Object.keys(movies), ...Object.keys(hiddenTitles)]).forEach(id => {
+    const active=movies[id];
+    const hidden=hiddenTitles[id];
+    if (!active || !hidden) return;
+    const activeTime=recordTimestamp(active);
+    const hiddenTime=recordTimestamp(hidden);
+    if (hiddenTime >= activeTime) delete movies[id];
+    else delete hiddenTitles[id];
+  });
+
+  const localSettingsTime=settingsTimestamp(local);
+  const remoteSettingsTime=settingsTimestamp(remote);
+  const settings={
+    ...(remoteSettingsTime > localSettingsTime ? remote.settings : local.settings),
+    tagPreferences:{
+      ...((remoteSettingsTime > localSettingsTime ? remote.settings : local.settings)?.tagPreferences || {})
+    }
+  };
+  const cursor=mergeDiscoveryCursor(local.discoveryCursor, remote.discoveryCursor).merged;
+  const chosenMeta=dataTimestamp(remote) > dataTimestamp(local) ? remote.meta : local.meta;
+  const dataset={
+    meta:{...chosenMeta, updatedAt:nowStamp()},
+    movies,
+    settings,
+    hiddenTitles,
+    wrongPicks:mergeRecordMap(local.wrongPicks, remote.wrongPicks),
+    deletedMovieRecords:mergeRecordMap(local.deletedMovieRecords, remote.deletedMovieRecords),
+    legacyTagAliases:{...remote.legacyTagAliases, ...local.legacyTagAliases},
+    tagStats:{candidates:0, tags:0, rebuiltAt:''},
+    tagNormalization:dataTimestamp(remote) > dataTimestamp(local) ? remote.tagNormalization : local.tagNormalization,
+    discoveryCursor:cursor
+  };
+  return {dataset, source:'record-merge'};
+}
+
+// Retained for legacy callers. It no longer chooses one whole library by a
+// dataset timestamp; it converges records into the canonical Drive dataset.
 function mergeRemoteData(remoteRaw={}) {
-  const remote = normaliseIncomingData(remoteRaw);
-  const remoteStamp = dataTimestamp(remote);
-  const localStamp = dataTimestamp(state);
-  const localResetAt = Date.parse(state.meta?.resetAt || '') || 0;
-  const remoteResetAt = Date.parse(remote.meta?.resetAt || '') || 0;
-  const localHasLibrary = libraryRecordCount(state) > 0;
-  const remoteHasLibrary = libraryRecordCount(remote) > 0;
-  // A brand-new browser has no authority to overwrite a populated Drive file.
-  // A deliberate later local reset remains authoritative.
-  const remoteWins = remoteResetAt > localResetAt || (
-    remoteResetAt === localResetAt && (
-      (!localHasLibrary && remoteHasLibrary) ||
-      (localHasLibrary === remoteHasLibrary && remoteStamp > localStamp)
-    )
-  );
-  const localData = normaliseIncomingData(exportCinelensData());
-  const sameData = JSON.stringify(localData) === JSON.stringify(remote);
-  if (remoteWins) {
-    replaceStateFromDataset(remote);
-    ensureSyncMetadata();
-    return {localChanged:true, remoteChanged:false, winner:'drive', localStamp, remoteStamp};
-  }
-  return {localChanged:false, remoteChanged:!sameData, winner:'local', localStamp, remoteStamp};
+  const result=mergeCanonicalDatasets(exportCinelensData(), remoteRaw);
+  replaceStateFromDataset(result.dataset);
+  ensureSyncMetadata({touchDataset:true});
+  return {localChanged:true, remoteChanged:true, winner:'merged', source:result.source};
+}
+
+function stampCanonicalDriveFile(fileId) {
+  if (!fileId) return false;
+  if (!state.meta) state.meta={};
+  const changed=state.meta.canonicalDriveFileId !== fileId || state.meta.driveSyncModel !== 'canonical-drive-v1';
+  state.meta.canonicalDriveFileId=fileId;
+  state.meta.driveSyncModel='canonical-drive-v1';
+  if (changed) state.meta.updatedAt=nowStamp();
+  return changed;
 }
 
 function saveLocalState(opts={}) {
@@ -4893,6 +4959,7 @@ function saveLocalState(opts={}) {
         enabled:state.drive.enabled,
         folderId:state.drive.folderId,
         fileId:state.drive.fileId,
+        canonicalFileId:state.drive.fileId,
         lastConnectedAt:state.drive.lastConnectedAt
       }
     }));
@@ -4922,7 +4989,7 @@ function loadLocalState() {
         state.drive.connected=false;
         state.drive.enabled=!!s.drive.enabled || !!s.drive.fileId;
         state.drive.folderId=s.drive.folderId||'';
-        state.drive.fileId=s.drive.fileId||'';
+        state.drive.fileId=s.drive.canonicalFileId||s.drive.fileId||'';
         state.drive.lastConnectedAt=s.drive.lastConnectedAt||0;
       }
       state.drive.accessToken=getStoredDriveToken()||'';
@@ -5215,76 +5282,84 @@ async function driveFetch(url, opts={}) {
   }
   return resp;
 }
+async function readDriveDataset(fileId) {
+  const response=await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  if (!response.ok) throw new Error(`Drive library read failed (${response.status})`);
+  return normaliseIncomingData(await response.json());
+}
+
 async function findDriveFile() {
   try {
     const q=`name='${DRIVE_FILE}' and trashed=false`;
-    const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&orderBy=modifiedTime%20desc&pageSize=100&fields=files(id,name,modifiedTime)`);
-    if (!resp.ok) throw new Error('Drive file search failed');
-    const listing=await resp.json();
+    const response=await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&orderBy=modifiedTime%20desc&pageSize=100&fields=files(id,name,modifiedTime)`);
+    if (!response.ok) throw new Error('Drive file search failed');
+    const listing=await response.json();
     const files=listing.files || [];
     if (!files.length) return null;
 
-    // A previous broken client can leave behind a second, tiny CineLens file.
-    // Never choose by modified time alone: inspect every same-named JSON file and
-    // use the fullest library first. Modified time is only a tiebreaker.
     const candidates=[];
     for (const file of files) {
       try {
-        const fileResp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`);
-        if (!fileResp.ok) continue;
-        const raw=await fileResp.json();
-        const dataset=normaliseIncomingData(raw);
+        const dataset=await readDriveDataset(file.id);
         candidates.push({
           id:file.id,
+          dataset,
           recordCount:libraryRecordCount(dataset),
-          datasetStamp:Date.parse(dataset?.meta?.updatedAt || '') || 0,
+          marker:String(dataset?.meta?.canonicalDriveFileId || ''),
+          model:String(dataset?.meta?.driveSyncModel || ''),
           modifiedStamp:Date.parse(file.modifiedTime || '') || 0
         });
-      } catch (error) {
+      } catch(error) {
         console.warn('Skipping unreadable CineLens Drive file', file.id, error);
       }
     }
     if (!candidates.length) return null;
-    candidates.sort((a,b) =>
-      b.recordCount - a.recordCount ||
-      b.datasetStamp - a.datasetStamp ||
-      b.modifiedStamp - a.modifiedStamp
-    );
+
+    // Once migration has marked a canonical file, every device follows that
+    // embedded identity. A stale browser fileId and a newer duplicate cannot
+    // redirect the app to another library.
+    const marked=candidates.filter(candidate => candidate.marker === candidate.id && candidate.model === 'canonical-drive-v1');
+    if (marked.length) {
+      marked.sort((a,b)=>b.modifiedStamp-a.modifiedStamp || b.recordCount-a.recordCount);
+      return marked[0].id;
+    }
+
+    // One-time migration only: existing same-name files predate a canonical ID.
+    // Select the fullest recoverable library, then loadFromDrive stamps it so
+    // future runs never use this fallback again.
+    candidates.sort((a,b)=>b.recordCount-a.recordCount || b.modifiedStamp-a.modifiedStamp);
     return candidates[0].id;
-  } catch(e){
-    console.warn('Drive file search failed', e);
+  } catch(error) {
+    console.warn('Drive file search failed', error);
     return null;
   }
 }
+
 async function loadFromDrive(opts={}) {
-  if(!state.drive.fileId)return;
+  if (!state.drive.fileId) return false;
   try {
     setDriveStatus('syncing');
-    const resp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media`);
-    if (!resp.ok) throw new Error('Drive load failed');
-    const d=await resp.json();
-    const remote = normaliseIncomingData(d);
-    // On first-device/startup hydration, the Drive file is the source of truth.
-    // This prevents a locally generated starter pool or a freshly touched local
-    // timestamp from defeating the real library stored in Drive.
-    const merge = opts.preferDrive && libraryRecordCount(remote) > 0
-      ? (replaceStateFromDataset(remote), {localChanged:true, remoteChanged:false, winner:'drive'})
-      : mergeRemoteData(d);
-    const migratedAliases = migrateLegacyTagAliases();
+    const remote=await readDriveDataset(state.drive.fileId);
+    // Drive is the canonical library at restore time. Local storage is a cache,
+    // never a competing whole-library source when opening another device.
+    replaceStateFromDataset(remote);
+    const marked=stampCanonicalDriveFile(state.drive.fileId);
+    const migratedAliases=migrateLegacyTagAliases();
     migrateLegacyPoolItems();
-    const cleaned = cleanContaminatedTags(true);
+    const cleaned=cleanContaminatedTags(true);
+    rebuildTagBrain();
     computeTagWeights();
     saveLocalState({preserveUpdatedAt:true});
     render();
-    showToast(merge.winner === 'drive' ? 'Drive was newer. Local data replaced.' : merge.remoteChanged ? 'Local was newer. Updating Drive.' : 'Local and Drive are identical.', 'success');
     state.drive.connected=true;
     setDriveStatus('connected');
-    if (merge.remoteChanged || cleaned || migratedAliases.rewrites) await uploadDriveData();
+    if (marked || cleaned || migratedAliases.rewrites) await uploadDriveData();
     scheduleTagCloudNormalization(1600);
-  } catch(e){
+    return true;
+  } catch(error) {
     state.drive.connected=false;
     setDriveStatus('');
-    throw e;
+    throw error;
   }
 }
 
@@ -5307,34 +5382,47 @@ async function createDriveFile() {
     const resp=await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',{method:'POST',body:form});
     if (!resp.ok) throw new Error('Drive create failed');
     const d=await resp.json();
-    state.drive.fileId=d.id; saveLocalState({preserveUpdatedAt:true});
+    state.drive.fileId=d.id;
+    stampCanonicalDriveFile(d.id);
+    await uploadDriveData();
+    saveLocalState({preserveUpdatedAt:true});
   } catch(e){showToast('Drive file create failed','error');}
 }
 async function syncDrive(manual=false) {
   if (driveSyncInProgress) {
-    driveSyncQueued = true;
+    driveSyncQueued=true;
     return;
   }
-  const finishSync = () => {
-    driveSyncInProgress = false;
+  const finishSync=() => {
+    driveSyncInProgress=false;
     if (driveSyncQueued) {
-      driveSyncQueued = false;
+      driveSyncQueued=false;
       syncDrive(manual);
     }
   };
-  driveSyncInProgress = true;
-  if(!state.drive.connected&&!state.drive.accessToken){
-    if(state.drive.enabled) {
-      try { await restoreDriveSession(manual); }
-      catch(e) { state.drive.connected=false; state.drive.accessToken=''; }
-    }
-    if(!state.drive.connected&&!state.drive.accessToken){ if(manual) await connectDrive(); finishSync(); return; }
-  }
-  if(!state.drive.fileId){await createDriveFile(); if(!state.drive.fileId){finishSync(); return;}}
-  setDriveStatus('syncing');
+  driveSyncInProgress=true;
   try {
-    const remoteResp=await driveFetch(`https://www.googleapis.com/drive/v3/files/${state.drive.fileId}?alt=media`);
-    const convergence = remoteResp.ok ? mergeRemoteData(await remoteResp.json()) : {winner:'local', remoteChanged:true};
+    if (!state.drive.connected && !state.drive.accessToken) {
+      if (state.drive.enabled) await restoreDriveSession(manual, {preferDrive:true});
+      if (!state.drive.connected && !state.drive.accessToken) {
+        if (manual) await connectDrive();
+        return;
+      }
+    }
+
+    const canonicalId=await findDriveFile();
+    if (canonicalId) state.drive.fileId=canonicalId;
+    if (!state.drive.fileId) {
+      await createDriveFile();
+      if (!state.drive.fileId) return;
+    }
+
+    setDriveStatus('syncing');
+    const remote=await readDriveDataset(state.drive.fileId);
+    const convergence=mergeCanonicalDatasets(exportCinelensData(), remote);
+    replaceStateFromDataset(convergence.dataset);
+    stampCanonicalDriveFile(state.drive.fileId);
+    rebuildTagBrain();
     computeTagWeights();
     await uploadDriveData();
     state.drive.connected=true;
@@ -5342,9 +5430,13 @@ async function syncDrive(manual=false) {
     saveLocalState({preserveUpdatedAt:true});
     render();
     setDriveStatus('connected');
-    showToast(convergence.winner === 'drive' ? 'Drive was newer. Local replaced and synchronized.' : 'Local and Drive synchronized.', 'success');
-  } catch(e){state.drive.connected=false; setDriveStatus(''); showToast(driveErrorMessage(e)||'Drive sync failed','error');}
-  finally {
+    showToast(convergence.source === 'record-merge' ? 'Drive synchronized.' : 'Drive reset synchronized.', 'success');
+  } catch(error) {
+    console.error('Drive sync failed', error);
+    state.drive.connected=false;
+    setDriveStatus('');
+    showToast(driveErrorMessage(error) || 'Drive sync failed', 'error');
+  } finally {
     finishSync();
   }
 }
