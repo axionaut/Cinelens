@@ -544,8 +544,8 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
 /* Taste Story — compact reading card, independent from recommendation and tag tools */
 .taste-story-card {
   display:none;
-  width:min(100%, 980px);
-  margin:0 auto 28px;
+  width:100%;
+  margin:0 0 28px;
   padding:20px 24px 22px;
   border:1px solid rgba(242,193,78,.28);
   border-radius:9px;
