@@ -541,3 +541,60 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
   .maintenance-panel { grid-column:1 / -1; }
 }
 
+/* Taste Story — compact reading card, independent from recommendation and tag tools */
+.taste-story-card {
+  display:none;
+  width:min(100%, 980px);
+  margin:0 auto 28px;
+  padding:20px 24px 22px;
+  border:1px solid rgba(242,193,78,.28);
+  border-radius:9px;
+  background:linear-gradient(135deg,rgba(242,193,78,.08),rgba(36,28,23,.82) 48%,rgba(16,13,11,.95));
+  box-shadow:0 12px 30px rgba(0,0,0,.16);
+}
+.taste-story-head {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:16px;
+  margin-bottom:16px;
+}
+.taste-story-kicker {
+  font-family:'Bebas Neue',sans-serif;
+  font-size:23px;
+  letter-spacing:2px;
+  color:var(--accent);
+  line-height:1;
+}
+.taste-story-meta {
+  margin-top:5px;
+  font-family:'DM Mono',monospace;
+  font-size:10px;
+  line-height:1.45;
+  color:var(--muted);
+}
+.taste-story-refresh { flex:0 0 auto; margin-top:1px; }
+.taste-story-body {
+  max-width:none;
+  color:var(--text);
+  font-size:14px;
+  line-height:1.78;
+}
+.taste-story-title {
+  margin:0 0 13px;
+  font-family:'Bebas Neue',sans-serif;
+  font-size:22px;
+  letter-spacing:1.4px;
+  line-height:1.08;
+  color:var(--text);
+}
+.taste-story-body p { margin:0 0 14px; }
+.taste-story-body p:last-child { margin-bottom:0; }
+@media (max-width:768px) {
+  .taste-story-card { width:100%; margin:0 0 20px; padding:17px 16px 18px; }
+  .taste-story-head { align-items:flex-start; gap:12px; margin-bottom:14px; }
+  .taste-story-kicker { font-size:22px; }
+  .taste-story-refresh { font-size:10px; padding:4px 7px; }
+  .taste-story-body { font-size:14px; line-height:1.72; }
+  .taste-story-title { font-size:21px; }
+}

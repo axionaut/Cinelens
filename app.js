@@ -256,6 +256,9 @@ let poolVisibleLimit = 80;
 let hiddenVisibleLimit = 80;
 let wikiSearchResults = [];
 let wikiSearchQuery = '';
+// A searched title remains visible after adding. Its search is cleared only when
+// that same title is subsequently rated.
+let pendingSearchResetAfterRatingId = '';
 const yearCategoryIndexCache = {};
 const yearCategoryMembersCache = {};
 let state = {
@@ -2427,7 +2430,9 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
         touchRecord(stored);
       }
     }
-    clearUnifiedTitleSearch();
+    // Keep the searched card visible so it can be rated. The matching search
+    // is cleared by rateMovie only after this same title receives a rating.
+    pendingSearchResetAfterRatingId = String(stored.id || '');
     rebuildTagBrain();
     computeTagWeights();
     saveLocalState();
@@ -2469,7 +2474,7 @@ function ratePendingManualMovie(rating) {
   const id = pendingManualRatingId;
   if (!id) return;
   closeManualRatingPrompt();
-  clearUnifiedTitleSearch();
+  pendingSearchResetAfterRatingId = String(id);
   rateMovie(id, rating);
 }
 
@@ -4124,6 +4129,10 @@ function rateMovie(id, rating) {
   touchRecord(movie);
   collapseDuplicateMovies(state.movies);
   computeTagWeights();
+  if (nextRating > 0 && String(id) === pendingSearchResetAfterRatingId) {
+    pendingSearchResetAfterRatingId = '';
+    clearUnifiedTitleSearch();
+  }
   saveLocalState(); syncDrive(); render();
   scheduleTasteStoryUpdate();
   showToast(nextRating ? `"${movie.title}" → ${nextRating}/5` : `Removed rating from "${movie.title}"`, nextRating ? 'success' : '');
@@ -4512,15 +4521,15 @@ function ensureTasteStoryCard() {
   const anchor=document.getElementById('tagBrainSep');
   if (!anchor) return null;
   anchor.insertAdjacentHTML('beforebegin', `
-    <section class="tag-only" id="tasteStoryCard" style="display:none;margin:0 0 26px;padding:18px 20px;border:1px solid var(--border);border-radius:7px;background:linear-gradient(135deg,rgba(242,193,78,.08),rgba(36,28,23,.82) 48%,rgba(16,13,11,.95));box-shadow:0 12px 30px rgba(0,0,0,.16)">
-      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:10px">
+    <section class="tag-only taste-story-card" id="tasteStoryCard">
+      <div class="taste-story-head">
         <div>
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:2px;color:var(--accent)">A Story for You</div>
-          <div id="tasteStoryMeta" style="margin-top:2px;font-family:'DM Mono',monospace;font-size:10px;color:var(--muted)"></div>
+          <div class="taste-story-kicker">A Story for You</div>
+          <div id="tasteStoryMeta" class="taste-story-meta"></div>
         </div>
-        <button class="card-act" id="tasteStoryRefreshBtn" onclick="refreshTasteStory()">write a new story</button>
+        <button class="card-act taste-story-refresh" id="tasteStoryRefreshBtn" onclick="refreshTasteStory()">write a new story</button>
       </div>
-      <div id="tasteStoryBody" style="max-width:900px;font-size:14px;line-height:1.76;color:var(--text)"></div>
+      <div id="tasteStoryBody" class="taste-story-body"></div>
     </section>`);
   return document.getElementById('tasteStoryCard');
 }
@@ -4547,8 +4556,8 @@ function renderTasteStoryCard() {
     button.textContent=tasteStoryInProgress ? 'writing…' : 'write a new story';
   }
   if (story.story) {
-    const title=story.title ? `<div style="font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:1.4px;color:var(--text);margin-bottom:10px">${attrSafe(story.title)}</div>` : '';
-    const paragraphs=attrSafe(story.story).split(/\n{2,}/).map(p => `<p style="margin:0 0 12px">${p.replace(/\n/g,'<br>')}</p>`).join('');
+    const title=story.title ? `<div class="taste-story-title">${attrSafe(story.title)}</div>` : '';
+    const paragraphs=attrSafe(story.story).split(/\n{2,}/).map(p => `<p>${p.replace(/\n/g,'<br>')}</p>`).join('');
     body.innerHTML=title+paragraphs;
     meta.textContent=story.status === 'writing'
       ? 'Your next story is being written from your latest ratings…'
