@@ -26,7 +26,7 @@ const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
 const AI_TAG_MAX_COUNT = 20;
 const AI_TAG_MIGRATION_VERSION = 1;
-const AI_TAG_BATCH_SIZE = 20;
+const AI_TAG_BATCH_SIZE = 3;
 const AI_TAG_RETRY_LIMIT = 3;
 const AI_VOCABULARY_SAMPLE_SIZE = 240;
 const AI_TAG_CLOUD_NORMALIZE_EVERY = 100;
@@ -3068,6 +3068,27 @@ function updateAiTagButton() {
   btn.textContent = remaining ? `Retry ${remaining} pending AI tags` : 'AI tags complete';
 }
 
+function isBlankGeminiResponseError(error) {
+  return /gemini returned no result|gemini returned no usable output|prompt was blocked|finish reason/i.test(
+    String(error?.message || error || '')
+  );
+}
+
+function markAiBatchRetryFailure(movie, error) {
+  const message = String(error?.message || error || 'AI tagging failed');
+  movie.aiTagging = {
+    ...(movie.aiTagging || {}),
+    status:'building',
+    promptVersion:AI_TAG_PROMPT_VERSION,
+    storyHash:aiStoryHash(movie.storyText),
+    error:message,
+    attemptedAt:nowStamp()
+  };
+  movie.retagStatus = 'needs-ai-tags';
+  movie.retagMessage = aiTagFailureMessage(error, movie);
+  touchRecord(movie);
+}
+
 async function tagAllUntagged() {
   // AI tagging owns the same request/abort machinery as pool expansion.
   // Stop the worker itself, wait for it to release, then continue automatically.
@@ -3121,7 +3142,37 @@ async function tagAllUntagged() {
       );
 
       // Tag exactly this queue batch. Do not append unrelated titles from Pool.
-      const result = await requestAiTags(batch);
+      // A blocked or empty Gemini response must not strand the rest of the queue.
+      let result;
+      try {
+        result = await requestAiTags(batch);
+      } catch (batchError) {
+        if (isExternalRateLimitError(batchError)) throw batchError;
+
+        result = {tagged:0, failed:0};
+        if (batch.length > 1 && isBlankGeminiResponseError(batchError)) {
+          showFetchProgress(
+            `AI response was empty · retrying titles individually`,
+            Math.round((index / queue.length) * 100),
+            batch.map(movie => movie.title).join(' · ')
+          );
+          for (const movie of batch) {
+            if (fetchAbortRequested) break;
+            try {
+              const single = await requestAiTags([movie]);
+              result.tagged += Number(single?.tagged || 0);
+              result.failed += Number(single?.failed || 0);
+            } catch (singleError) {
+              if (isExternalRateLimitError(singleError)) throw singleError;
+              markAiBatchRetryFailure(movie, singleError);
+              result.failed++;
+            }
+          }
+        } else {
+          batch.forEach(movie => markAiBatchRetryFailure(movie, batchError));
+          result.failed = batch.length;
+        }
+      }
       tagged += Number(result?.tagged || 0);
       failed += Number(result?.failed || 0);
 
