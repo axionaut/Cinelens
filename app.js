@@ -315,6 +315,7 @@ const USER_AVOID_GENRES = new Set(['documentary']);
 const MAX_RECOMMENDATION_TAG_SHARE = 0.10;
 let tagCorpusStatsCache = null;
 let cardMatchCache = null;
+let tasteModelCache = new Map();
 
 const GENRE_RULES = [
   ['science-fiction', /\b(science fiction|sci-fi)\b/],
@@ -423,6 +424,8 @@ function probableEntityTokens(movie) {
 
 function invalidateTagCaches() {
   tagCorpusStatsCache = null;
+  cardMatchCache = null;
+  tasteModelCache = new Map();
 }
 
 function rebuildTagBrain() {
@@ -3640,7 +3643,7 @@ function renderRecs() {
       document.getElementById('recCount').textContent = fetchStatus.strongCount < STRONG_REC_TARGET
         ? `improving recommendations · ${fetchStatus.strongCount}/${STRONG_REC_TARGET} strong · showing ${top.length} of ${scored.length}`
         : `showing ${top.length} of ${scored.length} matches`;
-      top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore })));
+      top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating })));
       return;
     }
   }
@@ -3740,85 +3743,32 @@ function setSectionVisibility(selector, visible) {
   });
 }
 
+function invalidateTasteModel() {
+  tasteModelCache = new Map();
+  cardMatchCache = null;
+}
+
 function invalidateCardMatchCache() {
   cardMatchCache = null;
 }
 
 function buildCardMatchCache() {
-  computeTagWeights();
   const allTitles = [
     ...Object.values(state.movies || {}),
     ...Object.values(state.hiddenTitles || {})
   ].filter(movie => movie && scoringTags(movie).length > 0);
-
-  const totalPositiveTagWeight = Object.entries(state.tagWeights || {}).reduce(
-    (sum, [tag, weight]) => weight > 0 ? sum + weight * tagSpecificity(tag) : sum,
-    0
-  );
-  const totalPositiveGenreWeight = Object.values(state.genreWeights || {}).reduce(
-    (sum, weight) => weight > 0 ? sum + weight * GENRE_SCORE_FACTOR : sum,
-    0
-  );
-  const totalTasteWeight = totalPositiveTagWeight + totalPositiveGenreWeight;
-
-  const rows = allTitles.map(movie => {
-    let posOverlap = 0;
-    let genreOverlap = 0;
-    let negativeOverlap = 0;
-    let positiveScore = 0;
-    let negativePenalty = 0;
-    const matchedTags = new Set();
-    const matchedGenres = new Set();
-
-    recommendationScoringTags(movie).forEach(tag => {
-      const weight = Number(state.tagWeights[tag] || 0);
-      const specificity = tagSpecificity(tag);
-      if (weight > 0) {
-        posOverlap++;
-        positiveScore += weight * specificity;
-        matchedTags.add(tag);
-      } else if (weight < 0) {
-        negativeOverlap++;
-        negativePenalty += Math.abs(weight) * specificity * 0.5;
-      }
-    });
-
-    movieGenres(movie).forEach(genre => {
-      const weight = Number(state.genreWeights[genre] || 0);
-      if (weight > 0) {
-        genreOverlap++;
-        positiveScore += weight * GENRE_SCORE_FACTOR;
-        matchedGenres.add(genre);
-      } else if (weight < 0) {
-        negativePenalty += Math.abs(weight) * GENRE_SCORE_FACTOR * 0.5;
-      }
-    });
-
-    const score = positiveScore - negativePenalty;
-    const tasteFit = totalTasteWeight
-      ? Math.max(0, Math.min(1, positiveScore / totalTasteWeight))
-      : 0;
-
-    return { movie, score, posOverlap, genreOverlap, negativeOverlap, positiveScore, negativePenalty, tasteFit, matchedTags, matchedGenres };
-  });
-
-  const maxOverlap = Math.max(...rows.map(row => row.posOverlap), 0);
-  const maxScore = Math.max(...rows.map(row => Math.max(0, row.score)), 0);
-  const maxGenreOverlap = Math.max(...rows.map(row => row.genreOverlap), 0);
+  const fullModel = getTasteModel();
   const cache = new Map();
 
-  rows.forEach(row => {
-    const overlapPart = maxOverlap ? row.posOverlap / maxOverlap : 0;
-    const scorePart = maxScore ? Math.max(0, Math.min(1, row.score / maxScore)) : 0;
-    const genrePart = maxGenreOverlap ? row.genreOverlap / maxGenreOverlap : 0;
-    const penalty = Math.min(0.25, row.negativeOverlap * 0.06);
-    row.matchScore = Math.max(0, Math.min(1, overlapPart * 0.7 + scorePart * 0.25 + genrePart * 0.05 - penalty));
-    cache.set(String(row.movie.id), row);
+  allTitles.forEach(movie => {
+    // A rated title is predicted from every other rated title, never from itself.
+    // This is the only honest check of whether the learned model understands it.
+    const model = Number(movie.rating || 0) > 0 ? getTasteModel(String(movie.id)) : fullModel;
+    cache.set(String(movie.id), predictTasteFit(movie, model));
   });
 
   return cache;
 }
-
 function cardMatchData(movie) {
   if (!personalizedEnough() || !movie?.id) return null;
   if (!cardMatchCache) cardMatchCache = buildCardMatchCache();
@@ -3896,11 +3846,11 @@ function restoreManualStars() {
   box.querySelectorAll('.star').forEach(st => st.classList.remove('active'));
 }
 function buildCard(movie, opts={}) {
-  const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag } = opts;
+  const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, predictedRating, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag } = opts;
   const automaticMatch = cardMatchData(movie);
   const hasSuppliedMatch = Number.isFinite(Number(matchScore)) || Number.isFinite(Number(tasteFit));
   const resolvedMatch = hasSuppliedMatch
-    ? { matchScore:Number(matchScore ?? tasteFit) || 0, tasteFit:Number(tasteFit ?? matchScore) || 0, posOverlap:Number(posOverlap || 0), genreOverlap:Number(genreOverlap || 0), negativeOverlap:Number(negativeOverlap || 0), matchedTags:matchedTags || new Set(), matchedGenres:matchedGenres || new Set() }
+    ? { matchScore:Number(matchScore ?? tasteFit) || 0, tasteFit:Number(tasteFit ?? matchScore) || 0, predictedRating:Number(predictedRating || 0), posOverlap:Number(posOverlap || 0), genreOverlap:Number(genreOverlap || 0), negativeOverlap:Number(negativeOverlap || 0), matchedTags:matchedTags || new Set(), matchedGenres:matchedGenres || new Set() }
     : automaticMatch;
   const showMatch = !!resolvedMatch;
   const resolvedMatchScore = Number(resolvedMatch?.matchScore ?? resolvedMatch?.tasteFit ?? 0) || 0;
@@ -3909,12 +3859,13 @@ function buildCard(movie, opts={}) {
   const resolvedNegativeOverlap = Number(resolvedMatch?.negativeOverlap || 0);
   const resolvedMatchedTags = resolvedMatch?.matchedTags || new Set();
   const resolvedMatchedGenres = resolvedMatch?.matchedGenres || new Set();
+  const resolvedPredictedRating = Number(resolvedMatch?.predictedRating || 0);
   const card = document.createElement('div');
   card.className = `movie-card ${isShow(movie) ? 'show-card' : 'film-card'}` + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
   const matchPct = Math.round(resolvedMatchScore * 100);
   const matchSummary = resolvedPosOverlap
-    ? `${resolvedPosOverlap} shared tag${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre match${resolvedGenreOverlap===1?'':'es'}`:''} · ${matchPct}% weighted fit${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} disliked`:''}`
+    ? `${resolvedPosOverlap} learned tag signal${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre signal${resolvedGenreOverlap===1?'':'s'}`:''} · ${matchPct}% predicted fit${resolvedPredictedRating?` · model ${resolvedPredictedRating.toFixed(1)}★`:''}${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} negative`:''}`
     : 'no current positive taste overlap';
   const safeId = movie.id.replace(/'/g,"\\'");
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';
@@ -4104,68 +4055,240 @@ function tasteEvidenceMovies() {
   ];
 }
 
-function computeTagWeights() {
-  const w={}, genres={};
-  tasteEvidenceMovies().forEach(m => {
-    const tags = recommendationScoringTags(m);
-    if (m.rating>0) {
-      const wt = m.rating-3;
-      tags.forEach(t => { w[t]=(w[t]||0)+wt; });
-      movieGenres(m).forEach(genre => { genres[genre]=(genres[genre]||0)+wt; });
+const TASTE_MODEL_TAG_REGULARIZATION = 2.8;
+const TASTE_MODEL_GENRE_REGULARIZATION = 3.5;
+const TASTE_MODEL_PASSES = 9;
+const TASTE_MODEL_TAG_LEARNING_RATE = 0.38;
+const TASTE_MODEL_GENRE_LEARNING_RATE = 0.24;
+const TASTE_MODEL_MANUAL_PREFERENCE_UNIT = 0.16;
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function ratingEvidenceRows(excludeMovieId='') {
+  const excluded = String(excludeMovieId || '');
+  return tasteEvidenceMovies()
+    .filter(movie => Number(movie?.rating || 0) > 0)
+    .filter(movie => !excluded || String(movie.id) !== excluded)
+    .filter(movie => recommendationScoringTags(movie).length > 0)
+    .map(movie => ({
+      movie,
+      rating:Number(movie.rating),
+      tags:recommendationScoringTags(movie),
+      genres:movieGenres(movie)
+    }));
+}
+
+function tagFeatureValue(tag) {
+  // Very common tags remain available to the model, but cannot overwhelm a
+  // personal rating signal simply because they appear everywhere.
+  return Math.max(0.18, tagSpecificity(tag));
+}
+
+function manualTagPreferenceEffect(tag) {
+  const preference = Number(state.settings?.tagPreferences?.[normaliseTagName(tag)] || 0);
+  return clamp(preference, -4, 4) * TASTE_MODEL_MANUAL_PREFERENCE_UNIT;
+}
+
+function trainTasteModel(excludeMovieId='') {
+  const rows = ratingEvidenceRows(excludeMovieId);
+  const fallbackRating = rows.length
+    ? rows.reduce((sum, row) => sum + row.rating, 0) / rows.length
+    : 3;
+  const model = {
+    baseline:fallbackRating,
+    tagEffects:{},
+    genreEffects:{},
+    calibrationSlope:1,
+    calibrationIntercept:0,
+    evidenceCount:rows.length,
+    excludedMovieId:String(excludeMovieId || '')
+  };
+
+  if (rows.length < 3) return model;
+
+  const rawPredictions = rows.map(() => fallbackRating);
+
+  for (let pass = 0; pass < TASTE_MODEL_PASSES; pass++) {
+    const tagStats = {};
+    rows.forEach((row, index) => {
+      const residual = row.rating - rawPredictions[index];
+      row.tags.forEach(tag => {
+        const feature = tagFeatureValue(tag);
+        const stat = tagStats[tag] || (tagStats[tag] = {sum:0, strength:0});
+        stat.sum += residual * feature;
+        stat.strength += feature * feature;
+      });
+    });
+
+    const tagDeltas = {};
+    Object.entries(tagStats).forEach(([tag, stat]) => {
+      const delta = clamp(
+        (stat.sum / (stat.strength + TASTE_MODEL_TAG_REGULARIZATION)) * TASTE_MODEL_TAG_LEARNING_RATE,
+        -0.42,
+        0.42
+      );
+      if (!delta) return;
+      model.tagEffects[tag] = (model.tagEffects[tag] || 0) + delta;
+      tagDeltas[tag] = delta;
+    });
+    rows.forEach((row, index) => {
+      row.tags.forEach(tag => {
+        rawPredictions[index] += (tagDeltas[tag] || 0) * tagFeatureValue(tag);
+      });
+    });
+
+    const genreStats = {};
+    rows.forEach((row, index) => {
+      const residual = row.rating - rawPredictions[index];
+      row.genres.forEach(genre => {
+        const stat = genreStats[genre] || (genreStats[genre] = {sum:0, strength:0});
+        stat.sum += residual * GENRE_SCORE_FACTOR;
+        stat.strength += GENRE_SCORE_FACTOR * GENRE_SCORE_FACTOR;
+      });
+    });
+
+    const genreDeltas = {};
+    Object.entries(genreStats).forEach(([genre, stat]) => {
+      const delta = clamp(
+        (stat.sum / (stat.strength + TASTE_MODEL_GENRE_REGULARIZATION)) * TASTE_MODEL_GENRE_LEARNING_RATE,
+        -0.30,
+        0.30
+      );
+      if (!delta) return;
+      model.genreEffects[genre] = (model.genreEffects[genre] || 0) + delta;
+      genreDeltas[genre] = delta;
+    });
+    rows.forEach((row, index) => {
+      row.genres.forEach(genre => {
+        rawPredictions[index] += (genreDeltas[genre] || 0) * GENRE_SCORE_FACTOR;
+      });
+      rawPredictions[index] = clamp(rawPredictions[index], 1, 5);
+    });
+  }
+
+  // Calibrate the learned raw score against the actual 1–5 ratings. This makes
+  // the displayed percentage a rating prediction rather than a relative overlap
+  // score that merely makes the top title look like 100%.
+  const meanRaw = rawPredictions.reduce((sum, value) => sum + value, 0) / rawPredictions.length;
+  const meanActual = rows.reduce((sum, row) => sum + row.rating, 0) / rows.length;
+  let variance = 0;
+  let covariance = 0;
+  rawPredictions.forEach((value, index) => {
+    const rawDelta = value - meanRaw;
+    variance += rawDelta * rawDelta;
+    covariance += rawDelta * (rows[index].rating - meanActual);
+  });
+  if (variance > 0.001) {
+    model.calibrationSlope = clamp(covariance / variance, 0.45, 2.4);
+    model.calibrationIntercept = meanActual - model.calibrationSlope * meanRaw;
+  }
+
+  return model;
+}
+
+function getTasteModel(excludeMovieId='') {
+  const key = String(excludeMovieId || '__full__');
+  if (!tasteModelCache.has(key)) tasteModelCache.set(key, trainTasteModel(excludeMovieId));
+  return tasteModelCache.get(key);
+}
+
+function predictTasteFit(movie, model=getTasteModel()) {
+  const tags = recommendationScoringTags(movie);
+  const genres = movieGenres(movie);
+  let rawRating = Number(model?.baseline || 3);
+  let posOverlap = 0;
+  let genreOverlap = 0;
+  let negativeOverlap = 0;
+  let positiveScore = 0;
+  let negativePenalty = 0;
+  const matchedTags = new Set();
+  const matchedGenres = new Set();
+
+  tags.forEach(tag => {
+    const contribution = ((Number(model?.tagEffects?.[tag] || 0) + manualTagPreferenceEffect(tag)) * tagFeatureValue(tag));
+    rawRating += contribution;
+    if (contribution > 0.015) {
+      posOverlap++;
+      positiveScore += contribution;
+      matchedTags.add(tag);
+    } else if (contribution < -0.015) {
+      negativeOverlap++;
+      negativePenalty += Math.abs(contribution);
     }
   });
-  Object.entries(state.settings?.tagPreferences || {}).forEach(([tag, preference]) => {
-    const normalised = normaliseTagName(tag);
-    const value = Math.max(-4, Math.min(4, Number(preference || 0)));
-    if (!normalised || !value) return;
-    w[normalised] = (w[normalised] || 0) + value;
+
+  genres.forEach(genre => {
+    const contribution = Number(model?.genreEffects?.[genre] || 0) * GENRE_SCORE_FACTOR;
+    rawRating += contribution;
+    if (contribution > 0.012) {
+      genreOverlap++;
+      positiveScore += contribution;
+      matchedGenres.add(genre);
+    } else if (contribution < -0.012) {
+      negativePenalty += Math.abs(contribution);
+    }
   });
-  state.tagWeights=w;
-  state.genreWeights=genres;
+
+  const predictedRating = clamp(
+    Number(model?.calibrationIntercept || 0) + Number(model?.calibrationSlope || 1) * rawRating,
+    1,
+    5
+  );
+  const matchScore = clamp((predictedRating - 1) / 4, 0, 1);
+
+  return {
+    movie,
+    score:predictedRating,
+    predictedRating,
+    matchScore,
+    tasteFit:matchScore,
+    posOverlap,
+    genreOverlap,
+    negativeOverlap,
+    positiveScore,
+    negativePenalty,
+    matchedTags,
+    matchedGenres
+  };
+}
+
+function computeTagWeights() {
+  const model = getTasteModel();
+  const weights = {};
+  const genres = {};
+  Object.entries(model.tagEffects || {}).forEach(([tag, effect]) => {
+    const value = Number(effect || 0) + manualTagPreferenceEffect(tag);
+    if (Math.abs(value) > 0.001) weights[tag] = value;
+  });
+  Object.entries(model.genreEffects || {}).forEach(([genre, effect]) => {
+    if (Math.abs(Number(effect || 0)) > 0.001) genres[genre] = Number(effect);
+  });
+  state.tagWeights = weights;
+  state.genreWeights = genres;
 }
 
 function scoreMovies() {
+  const model = getTasteModel();
   computeTagWeights();
-  const totalPositiveWeight=Object.entries(state.tagWeights).reduce((sum,[tag,weight])=>weight>0?sum+weight*tagSpecificity(tag):sum,0);
-  const totalPositiveGenreWeight=Object.values(state.genreWeights).reduce((sum,weight)=>weight>0?sum+weight*GENRE_SCORE_FACTOR:sum,0);
   const ranked = Object.values(state.movies)
-    .filter(m => m.rating===0&&scoringTags(m).length>0)
-    .map(m => {
-      let score=0, posOverlap=0, genreOverlap=0, negativeOverlap=0, positiveScore=0, negativePenalty=0;
-      const matched=new Set();
-      const matchedGenres=new Set();
-      const tags = recommendationScoringTags(m);
-      tags.forEach(t => {
-        const w=state.tagWeights[t] || 0;
-        const specificity=tagSpecificity(t);
-        if (w>0) { positiveScore+=w*specificity; matched.add(t); posOverlap++; }
-        else if (w<0) { negativePenalty+=Math.abs(w)*specificity*0.5; negativeOverlap++; }
-      });
-      movieGenres(m).forEach(genre => {
-        const weight=state.genreWeights[genre] || 0;
-        if (weight>0) { positiveScore+=weight*GENRE_SCORE_FACTOR; matchedGenres.add(genre); genreOverlap++; }
-        else if (weight<0) { negativePenalty+=Math.abs(weight)*GENRE_SCORE_FACTOR*0.5; }
-      });
-      score = positiveScore - negativePenalty;
-      const totalTasteWeight=totalPositiveWeight+totalPositiveGenreWeight;
-      const tasteFit=totalTasteWeight?Math.max(0,Math.min(1,positiveScore/totalTasteWeight)):0;
-      return { movie:m, score, matchedTags:matched, matchedGenres, posOverlap, genreOverlap, negativeOverlap, positiveScore, negativePenalty, tasteFit };
-    })
-    .filter(x => x.posOverlap>0&&x.positiveScore>0&&x.score>0);
-  const maxOverlap = Math.max(...ranked.map(item => item.posOverlap || 0), 0);
-  const maxScore = Math.max(...ranked.map(item => item.score || 0), 0);
-  const maxGenreOverlap = Math.max(...ranked.map(item => item.genreOverlap || 0), 0);
-  ranked.forEach(item => {
-    const overlapPart = maxOverlap ? item.posOverlap / maxOverlap : 0;
-    const scorePart = maxScore ? Math.max(0, Math.min(1, item.score / maxScore)) : 0;
-    const genrePart = maxGenreOverlap ? item.genreOverlap / maxGenreOverlap : 0;
-    const penalty = Math.min(0.25, item.negativeOverlap * 0.06);
-    item.matchScore = Math.max(0, Math.min(1, overlapPart * 0.7 + scorePart * 0.25 + genrePart * 0.05 - penalty));
-  });
-  ranked.sort((a,b) => b.matchScore-a.matchScore||b.score-a.score||b.positiveScore-a.positiveScore||b.posOverlap-a.posOverlap||a.negativeOverlap-b.negativeOverlap||b.genreOverlap-a.genreOverlap||a.movie.title.localeCompare(b.movie.title));
+    .filter(movie => movie.rating === 0 && scoringTags(movie).length > 0)
+    .map(movie => predictTasteFit(movie, model))
+    // Discovery still needs some learned positive evidence. We do not fill For
+    // You with neutral baseline guesses merely because every title has a rating.
+    .filter(item => item.posOverlap > 0 && item.predictedRating > Number(model.baseline || 3));
+
+  ranked.sort((a, b) =>
+    b.predictedRating - a.predictedRating ||
+    b.positiveScore - a.positiveScore ||
+    a.negativePenalty - b.negativePenalty ||
+    b.posOverlap - a.posOverlap ||
+    b.genreOverlap - a.genreOverlap ||
+    a.movie.title.localeCompare(b.movie.title)
+  );
   return ranked;
 }
-
 // ─────────────────────────────────────────────
 // RATING
 // ─────────────────────────────────────────────
@@ -4179,6 +4302,7 @@ function rateMovie(id, rating) {
   if (nextRating > 0) movie.watchlist = false;
   touchRecord(movie);
   collapseDuplicateMovies(state.movies);
+  invalidateTasteModel();
   computeTagWeights();
   if (nextRating > 0 && String(id) === pendingSearchResetAfterRatingId) {
     pendingSearchResetAfterRatingId = '';
