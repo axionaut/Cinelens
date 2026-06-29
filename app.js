@@ -226,6 +226,15 @@ const AI_BACKGROUND_RETRY_MS = 2 * 60 * 1000;
 const FETCH_AUTO_ATTEMPT_BUDGET = 55;
 const FETCH_MANUAL_ATTEMPT_BUDGET = 100;
 const FETCH_MAX_ADDED_PER_RUN = 35;
+// The active unseen catalogue is intentionally bounded, but not by one global cap.
+// Ratings, watchlist items, manual additions and hidden records are personal history
+// and are never rotated. Automatic unseen titles compete within their own
+// year × language × format segment so older eras and both movies/shows remain represented.
+const ROLLING_POOL_MIN_PER_SEGMENT = 24;
+const ROLLING_POOL_MAX_PER_SEGMENT = 90;
+const ROLLING_POOL_PENDING_MIN_PER_SEGMENT = 2;
+const ROLLING_POOL_PENDING_MAX_PER_SEGMENT = 8;
+const ROLLING_POOL_EXCLUSION_CAP = 5000;
 const DRIVE_TOKEN_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
 const TASTE_STORY_VERSION = 'cinelens-taste-story-v1';
 const TASTE_STORY_MIN_RATINGS = 3;
@@ -270,6 +279,11 @@ let state = {
   hiddenTitles: {},
   wrongPicks: {},
   deletedMovieRecords: {},
+  unblockedTitleRecords: {},
+  // Lightweight fingerprints for automatically evicted low-value candidates.
+  // This prevents the collector from repeatedly fetching and tagging the same
+  // titles without retaining their plot/tag payloads.
+  rollingPoolExclusions: {},
   legacyTagAliases: {},
   tagStats: { candidates:0, tags:0, rebuiltAt:'' },
   tagNormalization: { version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:'' },
@@ -316,6 +330,14 @@ const MAX_RECOMMENDATION_TAG_SHARE = 0.10;
 let tagCorpusStatsCache = null;
 let cardMatchCache = null;
 let tasteModelCache = new Map();
+// Derived data is versioned in memory. UI-only actions such as changing a
+// filter must not rebuild the rating model or rescore the whole library.
+let tagVocabularyCache = null;
+let scoredMovieCache = null;
+let titleSearchRenderTimer = null;
+let titleSearchPersistTimer = null;
+const TITLE_SEARCH_RENDER_DEBOUNCE_MS = 90;
+const TITLE_SEARCH_PERSIST_DEBOUNCE_MS = 500;
 
 const GENRE_RULES = [
   ['science-fiction', /\b(science fiction|sci-fi)\b/],
@@ -424,7 +446,9 @@ function probableEntityTokens(movie) {
 
 function invalidateTagCaches() {
   tagCorpusStatsCache = null;
+  tagVocabularyCache = null;
   cardMatchCache = null;
+  scoredMovieCache = null;
   tasteModelCache = new Map();
 }
 
@@ -721,25 +745,33 @@ function cleanAiTagResults(result, movie) {
   return {tags:tags.slice(0, AI_TAG_MAX_COUNT), evidence};
 }
 
-function aiTagVocabulary() {
+function buildTagVocabularyCache() {
+  if (tagVocabularyCache) return tagVocabularyCache;
   const frequency = new Map();
   [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(movie => {
     rawScoringTags(movie).forEach(tag => frequency.set(tag, (frequency.get(tag) || 0) + 1));
   });
-  return [...frequency.entries()]
-    .sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, AI_VOCABULARY_SAMPLE_SIZE)
-    .map(([tag, count]) => ({tag, count}));
+  const entries = [...frequency.entries()];
+  tagVocabularyCache = {
+    full: entries
+      .slice()
+      .sort((a,b) => a[1] - b[1] || a[0].localeCompare(b[0]))
+      .map(([tag, count]) => ({tag, count})),
+    sample: entries
+      .slice()
+      .sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, AI_VOCABULARY_SAMPLE_SIZE)
+      .map(([tag, count]) => ({tag, count}))
+  };
+  return tagVocabularyCache;
+}
+
+function aiTagVocabulary() {
+  return buildTagVocabularyCache().sample;
 }
 
 function fullAiTagVocabulary() {
-  const frequency = new Map();
-  [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(movie => {
-    rawScoringTags(movie).forEach(tag => frequency.set(tag, (frequency.get(tag) || 0) + 1));
-  });
-  return [...frequency.entries()]
-    .sort((a,b) => a[1] - b[1] || a[0].localeCompare(b[0]))
-    .map(([tag, count]) => ({tag, count}));
+  return buildTagVocabularyCache().full;
 }
 
 function normaliseRewritePayload(groups={}) {
@@ -946,7 +978,7 @@ async function normalizeTagCloudWithAi(opts={}) {
     rebuildTagBrain();
     computeTagWeights();
     saveLocalState();
-    syncDrive();
+    queueDriveSync();
     render();
     if (opts.toast !== false) showToast(`Gemini rewrote ${result.rewrites} tags across ${result.changedTitles} titles`, 'success');
     return result;
@@ -1266,7 +1298,7 @@ function cleanContaminatedTags(silent=true) {
   const changed = rebuildDescriptorBrain() + rebuildTagBrain() + (purged ? 1 : 0);
   computeTagWeights();
   if (changed) saveLocalState();
-  if (purged) syncDrive();
+  if (purged) queueDriveSync();
   if (changed && !silent) showToast(purged ? 'Cleared legacy tags. AI rebuild ready.' : `Cleaned tag data on ${changed} titles`, 'success');
   return changed;
 }
@@ -1275,7 +1307,12 @@ function runStartupMaintenance() {
   const run = () => {
     try {
       const changed = cleanContaminatedTags(true);
-      if (changed) render();
+      const rotation = pruneRollingCandidatePool({reason:'startup'});
+      if (changed || rotation.evicted) {
+        saveLocalState();
+        queueDriveSync();
+        render();
+      }
     } catch (err) {
       console.error('Startup maintenance failed', err);
     }
@@ -1310,7 +1347,7 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
       rebuildTagBrain();
       computeTagWeights();
       saveLocalState();
-      syncDrive();
+      queueDriveSync();
     }
     runStartupMaintenance();
     scheduleTagCloudNormalization(1800);
@@ -1453,6 +1490,7 @@ function mergeUserState(target, source) {
   if (!target || !source) return target;
   if (!Number(target.rating || 0) && Number(source.rating || 0)) target.rating = Number(source.rating || 0);
   if (source.watchlist) target.watchlist = true;
+  if (source.manualAdded) target.manualAdded = true;
   if (source.skipped) target.skipped = true;
   if (!target.userNotes && source.userNotes) target.userNotes = source.userNotes;
   target.suppressedTags = [...new Set([...(target.suppressedTags || []), ...(source.suppressedTags || [])])];
@@ -1759,6 +1797,9 @@ function unblockTitleForManualSearch(value) {
   const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
   if (!key) return false;
   let changed = false;
+  const stamp = nowStamp();
+  state.unblockedTitleRecords = state.unblockedTitleRecords || {};
+  state.unblockedTitleRecords[key] = { key, at:stamp, updatedAt:stamp };
   Object.entries(state.wrongPicks || {}).forEach(([recordKey, item]) => {
     const matches = [item.title, item.wikiTitle, item.pageTitle]
       .some(title => normaliseTitleKey(title) === key);
@@ -1796,6 +1837,265 @@ function isMovieHidden(movie) {
   if (wrongPickMatches(movie)) return true;
   if (movie.id && state.hiddenTitles?.[movie.id]) return true;
   return [movie.title, movie.wikiTitle, movie.pageTitle].some(title => hiddenTitleMatches(title));
+}
+
+function rollingPoolExclusionMatches(value) {
+  const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
+  if (!key) return false;
+  return Object.values(state.rollingPoolExclusions || {}).some(record =>
+    [record?.title, record?.wikiTitle, record?.pageTitle]
+      .some(title => normaliseTitleKey(title) === key)
+  );
+}
+
+function isRollingPoolExcluded(movie) {
+  if (!movie) return false;
+  if (movie.id && state.rollingPoolExclusions?.[movie.id]) return true;
+  return [movie.title, movie.wikiTitle, movie.pageTitle].some(title => rollingPoolExclusionMatches(title));
+}
+
+function releaseRollingPoolExclusion(value) {
+  const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
+  if (!key || !state.rollingPoolExclusions) return false;
+  let changed = false;
+  Object.entries(state.rollingPoolExclusions).forEach(([recordKey, record]) => {
+    const matches = [record?.title, record?.wikiTitle, record?.pageTitle]
+      .some(title => normaliseTitleKey(title) === key);
+    if (!matches) return;
+    delete state.rollingPoolExclusions[recordKey];
+    changed = true;
+  });
+  return changed;
+}
+
+function isReplaceableRollingCandidate(movie) {
+  return !!movie
+    && Number(movie.rating || 0) === 0
+    && !movie.watchlist
+    && !movie.manualAdded;
+}
+
+function trimRollingPoolExclusions() {
+  const records = Object.entries(state.rollingPoolExclusions || {});
+  if (records.length <= ROLLING_POOL_EXCLUSION_CAP) return 0;
+  records
+    .sort(([, a], [, b]) => recordTimestamp(a) - recordTimestamp(b))
+    .slice(0, records.length - ROLLING_POOL_EXCLUSION_CAP)
+    .forEach(([key]) => delete state.rollingPoolExclusions[key]);
+  return Math.max(0, records.length - ROLLING_POOL_EXCLUSION_CAP);
+}
+
+function rollingPoolSegmentYear(movie) {
+  const year = Number(movie?.year);
+  return Number.isFinite(year) && year >= 1900 ? year : 'unknown';
+}
+
+function rollingPoolSegmentKey(movie) {
+  const year = rollingPoolSegmentYear(movie);
+  const language = String(movie?.language || 'Unknown').trim() || 'Unknown';
+  const format = movie?.format ? 'show' : 'movie';
+  return [year, language, format].join('│');
+}
+
+function rollingPoolSegmentStats(segmentKey, items) {
+  const pool = Array.isArray(items) ? items : [];
+  const count = pool.length;
+  const taggedCount = pool.filter(item => item.type === 'tagged').length;
+  const pendingCount = count - taggedCount;
+  const strongCount = pool.filter(item => item.type === 'tagged' && item.predictedRating >= 4 && item.posOverlap >= STRONG_REC_MIN_OVERLAP).length;
+  const avgPredicted = taggedCount ? pool.filter(item => item.type === 'tagged').reduce((sum, item) => sum + item.predictedRating, 0) / taggedCount : 3;
+
+  const history = [
+    ...Object.values(state.movies || {}),
+    ...Object.values(state.hiddenTitles || {})
+  ].filter(movie => Number(movie?.rating || 0) > 0 && rollingPoolSegmentKey(movie) === segmentKey);
+
+  const ratingCount = history.length;
+  const avgRating = ratingCount ? history.reduce((sum, movie) => sum + Number(movie.rating || 0), 0) / ratingCount : 0;
+  const ratingAffinity = ratingCount ? Math.max(0, Math.min(1, (avgRating - 2.5) / 2.5)) : 0;
+  const engagement = Math.max(0, Math.min(1, ratingCount / 12));
+  const strongShare = taggedCount ? strongCount / taggedCount : 0;
+  const quality = Math.max(0, Math.min(1,
+    0.45 * ((avgPredicted - 1) / 4) +
+    0.30 * strongShare +
+    0.15 * ratingAffinity +
+    0.10 * engagement
+  ));
+  const year = pool[0]?.yearValue ?? rollingPoolSegmentYear(pool[0]?.movie || {});
+  const currentYear = new Date().getFullYear();
+  const recency = typeof year === 'number' ? Math.max(0, Math.min(1, (year - 1970) / Math.max(1, currentYear - 1970))) : 0.35;
+  const supply = Math.max(0, Math.min(1, Math.log(count + 1) / Math.log(90)));
+
+  const keepRatio = Math.max(0.58, Math.min(0.95,
+    0.66 +
+    0.16 * quality +
+    0.07 * engagement +
+    0.06 * recency +
+    0.03 * supply
+  ));
+
+  const minKeep = Math.max(
+    ROLLING_POOL_MIN_PER_SEGMENT,
+    Math.min(
+      ROLLING_POOL_MAX_PER_SEGMENT,
+      Math.round(ROLLING_POOL_MIN_PER_SEGMENT + 12 * quality + 8 * engagement + 4 * recency)
+    )
+  );
+
+  const pendingAllowance = Math.max(
+    ROLLING_POOL_PENDING_MIN_PER_SEGMENT,
+    Math.min(
+      ROLLING_POOL_PENDING_MAX_PER_SEGMENT,
+      Math.round(ROLLING_POOL_PENDING_MIN_PER_SEGMENT + 4 * quality + 2 * engagement)
+    )
+  );
+
+  return {
+    count,
+    taggedCount,
+    pendingCount,
+    strongCount,
+    avgPredicted,
+    ratingCount,
+    avgRating,
+    ratingAffinity,
+    engagement,
+    quality,
+    recency,
+    supply,
+    keepRatio,
+    minKeep,
+    pendingAllowance
+  };
+}
+
+function pruneRollingCandidatePool({reason='rotation'}={}) {
+  const replaceable = Object.values(state.movies || {}).filter(isReplaceableRollingCandidate);
+  if (!replaceable.length) return {evicted:0, retained:0, pending:0, reason};
+
+  const model = personalizedEnough() ? getTasteModel() : null;
+  const segments = new Map();
+  const pendingBySegment = new Map();
+
+  replaceable.forEach(movie => {
+    const segmentKey = rollingPoolSegmentKey(movie);
+    if (!segments.has(segmentKey)) segments.set(segmentKey, []);
+    if (!pendingBySegment.has(segmentKey)) pendingBySegment.set(segmentKey, []);
+    const yearValue = rollingPoolSegmentYear(movie);
+    const tagCount = rawScoringTags(movie).length;
+
+    if (!tagCount) {
+      pendingBySegment.get(segmentKey).push({movie, type:'pending', yearValue, updatedAt:recordTimestamp(movie)});
+      return;
+    }
+
+    const fit = model ? predictTasteFit(movie, model) : null;
+    segments.get(segmentKey).push({
+      movie,
+      type:'tagged',
+      yearValue,
+      predictedRating:Number(fit?.predictedRating || 3),
+      positiveScore:Number(fit?.positiveScore || 0),
+      negativePenalty:Number(fit?.negativePenalty || 0),
+      posOverlap:Number(fit?.posOverlap || 0),
+      updatedAt:recordTimestamp(movie)
+    });
+  });
+
+  const keepIds = new Set();
+  let retainedTagged = 0;
+  let retainedPending = 0;
+  const poolStats = [];
+
+  const taggedSorter = (a, b) =>
+    b.predictedRating - a.predictedRating ||
+    b.positiveScore - a.positiveScore ||
+    a.negativePenalty - b.negativePenalty ||
+    b.posOverlap - a.posOverlap ||
+    b.updatedAt - a.updatedAt ||
+    String(a.movie.title || '').localeCompare(String(b.movie.title || ''));
+
+  const pendingSorter = (a, b) =>
+    b.updatedAt - a.updatedAt ||
+    String(a.movie.title || '').localeCompare(String(b.movie.title || ''));
+
+  const segmentKeys = new Set([...segments.keys(), ...pendingBySegment.keys()]);
+  [...segmentKeys].sort().forEach(segmentKey => {
+    const tagged = (segments.get(segmentKey) || []).sort(taggedSorter);
+    const pending = (pendingBySegment.get(segmentKey) || []).sort(pendingSorter);
+    const stats = rollingPoolSegmentStats(segmentKey, [...tagged, ...pending]);
+    const keepTagged = Math.min(
+      tagged.length,
+      Math.max(stats.minKeep, Math.ceil(tagged.length * stats.keepRatio))
+    );
+    const keepPending = Math.min(pending.length, stats.pendingAllowance);
+
+    tagged.slice(0, keepTagged).forEach(item => keepIds.add(String(item.movie.id)));
+    pending.slice(0, keepPending).forEach(item => keepIds.add(String(item.movie.id)));
+    retainedTagged += keepTagged;
+    retainedPending += keepPending;
+    poolStats.push({segmentKey, keepTagged, keepPending, ...stats});
+  });
+
+  const evicted = replaceable.filter(movie => !keepIds.has(String(movie.id)));
+  if (!evicted.length) {
+    trimRollingPoolExclusions();
+    state.meta = state.meta || {};
+    state.meta.rollingPool = {
+      policy:'adaptive-segmented',
+      segmentCount:poolStats.length,
+      retainedTagged,
+      retainedPending,
+      lastRotatedAt:nowStamp(),
+      lastEvicted:0,
+      reason
+    };
+    return {evicted:0, retained:keepIds.size, pending:retainedPending, segmentCount:poolStats.length, reason};
+  }
+
+  const stamp = nowStamp();
+  state.rollingPoolExclusions = state.rollingPoolExclusions || {};
+  evicted.forEach(movie => {
+    const key = normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title) || String(movie.id);
+    state.rollingPoolExclusions[key] = {
+      id:String(movie.id || ''),
+      title:movie.title || '',
+      wikiTitle:movie.wikiTitle || '',
+      pageTitle:movie.pageTitle || '',
+      wikiPageId:movie.wikiPageId || wikiPageIdFromMovie(movie),
+      reason:'rolling-pool',
+      at:stamp,
+      updatedAt:stamp
+    };
+    delete state.movies[movie.id];
+  });
+  trimRollingPoolExclusions();
+  state.meta = state.meta || {};
+  state.meta.rollingPool = {
+    policy:'adaptive-segmented',
+    segmentCount:poolStats.length,
+    retainedTagged,
+    retainedPending,
+    lastRotatedAt:stamp,
+    lastEvicted:evicted.length,
+    reason,
+    sample: poolStats.slice(0, 12).map(item => ({
+      segment:item.segmentKey,
+      keepTagged:item.keepTagged,
+      keepPending:item.keepPending,
+      tagged:item.taggedCount,
+      pending:item.pendingCount,
+      avgPredicted:Number(item.avgPredicted.toFixed(2)),
+      strong:item.strongCount,
+      rated:item.ratingCount,
+      ratio:Number(item.keepRatio.toFixed(2))
+    }))
+  };
+  invalidateTagCaches();
+  invalidateTasteModel();
+  rebuildTagBrain();
+  computeTagWeights();
+  return {evicted:evicted.length, retained:keepIds.size, pending:retainedPending, segmentCount:poolStats.length, reason};
 }
 
 function stopOrExpandPool() {
@@ -2160,9 +2460,11 @@ async function expandPool(manual=true) {
     try {
       const result = await requestAiTags(movies);
       outcomes.ai += Number(result?.failed || 0);
+      const rotation = pruneRollingCandidatePool({reason:'collection'});
       rebuildTagBrain();
       computeTagWeights();
       saveLocalState();
+      if (rotation.evicted) console.info('CineLens rolling pool rotated', rotation);
       if (!manual && !shouldRunBackgroundCollection()) collectionSatisfied = true;
     } catch (error) {
       const message = String(error?.message || error);
@@ -2231,7 +2533,7 @@ async function expandPool(manual=true) {
             ? await fetchWikiMovieByPageId(pageId, fetchMode, {ai:false, diagnostics, trustedLane:lane})
             : await fetchWikiMovie(title, fetchMode, diagnostics, {ai:false, trustedLane:lane});
 
-          if (movie && isMovieHidden(movie)) {
+          if (movie && (isMovieHidden(movie) || isRollingPoolExcluded(movie))) {
             outcomes.hidden++;
           } else if (movie && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
             const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
@@ -2286,10 +2588,12 @@ async function expandPool(manual=true) {
     }
 
     hideFetchProgress();
+    const finalRotation = pruneRollingCandidatePool({reason:'collection-finalize'});
     rebuildTagBrain();
     computeTagWeights();
     saveLocalState();
-    syncDrive();
+    if (finalRotation.evicted) console.info('CineLens rolling pool rotated', finalRotation);
+    queueDriveSync();
     scheduleTagCloudNormalization(1500);
     render();
 
@@ -2411,6 +2715,7 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
     return;
   }
   unblockTitleForManualSearch(title);
+  releaseRollingPoolExclusion(title);
   if (btn) { btn.disabled = true; btn.textContent = 'fetching...'; }
   showFetchProgress('Fetching from Wikipedia...', 12, title);
   try {
@@ -2424,6 +2729,8 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
     const stored = existing
       ? applyFreshWikiMovie(existing.id, movie, existing)
       : upsertMoviePreservingUserState(movie);
+    stored.manualAdded = true;
+    touchRecord(stored);
     if (!hasCurrentAiTags(stored)) {
       try {
         await applyAiTags(stored, {force:true});
@@ -2439,7 +2746,7 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
     rebuildTagBrain();
     computeTagWeights();
     saveLocalState();
-    syncDrive();
+    queueDriveSync();
     scheduleTagCloudNormalization(1200);
     render();
     showToast(existing ? `Refreshed "${stored.title}"` : `Added "${stored.title}"`, 'success');
@@ -2549,7 +2856,7 @@ function saveManualTagChoices() {
   rebuildTagBrain();
   computeTagWeights();
   saveLocalState();
-  syncDrive();
+  queueDriveSync();
   closeManualTagChooser();
   render();
   showToast(`Saved ${tags.length} tags for "${movie.title}"`, 'success');
@@ -3186,7 +3493,7 @@ async function tagAllUntagged() {
       await nextPaint();
     }
 
-    syncDrive();
+    queueDriveSync();
     scheduleTagCloudNormalization(1200);
     showToast(
       `AI tagged ${tagged} titles${failed ? ` · ${failed} need retry` : ''}`,
@@ -3194,7 +3501,7 @@ async function tagAllUntagged() {
     );
   } catch (error) {
     saveLocalState();
-    syncDrive();
+    queueDriveSync();
     const message = String(error?.message || error);
     showToast(`AI tagging stopped: ${message}`, 'error');
   } finally {
@@ -3228,7 +3535,6 @@ function matchesTab(m) {
 // RENDER
 // ─────────────────────────────────────────────
 function render() {
-  invalidateCardMatchCache();
   updateStats();
   updateAiTagButton();
   updateVisibleSections();
@@ -3313,8 +3619,17 @@ function updateTitleSearch(value) {
   recVisibleLimit = Math.max(parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
   poolVisibleLimit = 80;
   hiddenVisibleLimit = 80;
-  saveSettingsState();
-  renderActiveCards();
+
+  // Typing must never serialize the entire catalogue or rescore it on every
+  // keystroke. Persist and repaint after the user pauses briefly instead.
+  touchSettings();
+  clearTimeout(titleSearchPersistTimer);
+  titleSearchPersistTimer = setTimeout(() => {
+    saveLocalState();
+    queueSettingsSync();
+  }, TITLE_SEARCH_PERSIST_DEBOUNCE_MS);
+  clearTimeout(titleSearchRenderTimer);
+  titleSearchRenderTimer = setTimeout(() => renderActiveCards(), TITLE_SEARCH_RENDER_DEBOUNCE_MS);
 }
 
 function toggleControlDeck() {
@@ -3324,11 +3639,14 @@ function toggleControlDeck() {
 }
 
 function toggleMobileNav() {
-  document.querySelector('.tab-bar')?.classList.toggle('open');
+  const bar=document.querySelector('.tab-bar');
+  const header=document.querySelector('header');
+  if (!bar) return;
+  const open=bar.classList.toggle('open');
+  header?.classList.toggle('nav-open', open);
 }
 
 function renderActiveCards() {
-  invalidateCardMatchCache();
   if (activeTab === 'pool') renderPoolGrid();
   else if (activeTab === 'hidden') renderHiddenGrid();
   else if (activeTab === 'tags') renderTagBrain();
@@ -3643,7 +3961,9 @@ function renderRecs() {
       document.getElementById('recCount').textContent = fetchStatus.strongCount < STRONG_REC_TARGET
         ? `improving recommendations · ${fetchStatus.strongCount}/${STRONG_REC_TARGET} strong · showing ${top.length} of ${scored.length}`
         : `showing ${top.length} of ${scored.length} matches`;
-      top.forEach((item, i) => grid.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating })));
+      const fragment = document.createDocumentFragment();
+      top.forEach((item, i) => fragment.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating })));
+      grid.appendChild(fragment);
       return;
     }
   }
@@ -3652,7 +3972,9 @@ function renderRecs() {
   const batch = sortMovies(discoveryPool(), 'title-asc').slice(0, browseLimit);
   document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building recommendation pool · showing ${batch.length} unrated`;
   if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expanding the pool in the background.</p></div>`; return; }
-  batch.forEach(m => grid.appendChild(buildCard(m, {})));
+  const fragment = document.createDocumentFragment();
+  batch.forEach(m => fragment.appendChild(buildCard(m, {})));
+  grid.appendChild(fragment);
 }
 
 function renderGlobalTitleSearch(grid) {
@@ -3666,10 +3988,12 @@ function renderGlobalTitleSearch(grid) {
     grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Title Matches</h3></div>`;
     return;
   }
+  const fragment = document.createDocumentFragment();
   results.slice(0, limit).forEach(movie => {
     const contextLabel = movie.rating > 0 ? 'Rated' : movie.watchlist ? 'Watchlist' : 'In Pool';
-    grid.appendChild(buildCard(movie, {showEdit:movie.rating > 0, watchlistView:!!movie.watchlist, poolView:!movie.rating && !movie.watchlist, contextLabel}));
+    fragment.appendChild(buildCard(movie, {showEdit:movie.rating > 0, watchlistView:!!movie.watchlist, poolView:!movie.rating && !movie.watchlist, contextLabel}));
   });
+  grid.appendChild(fragment);
   if (results.length > limit) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreSearchResults()">Show ${Math.min(REC_INFINITE_PAGE_SIZE, results.length-limit)} more · ${results.length-limit} remaining</button></div>`);
 }
 
@@ -3687,7 +4011,9 @@ function renderRatedGrid() {
   if (count) count.textContent = rated.length ? `${rated.length} titles` : 'none yet';
   grid.innerHTML = '';
   if (!rated.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">★</div><h3>Nothing Rated Yet</h3></div>`; return; }
-  rated.forEach(m => grid.appendChild(buildCard(m, { showEdit:true })));
+  const fragment = document.createDocumentFragment();
+  rated.forEach(m => fragment.appendChild(buildCard(m, { showEdit:true })));
+  grid.appendChild(fragment);
 }
 
 function renderWatchlist() {
@@ -3696,7 +4022,9 @@ function renderWatchlist() {
   document.getElementById('watchlistCount').textContent = watchlist.length ? `${watchlist.length} saved` : 'nothing saved yet';
   grid.innerHTML = '';
   if (!watchlist.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">+</div><h3>Nothing Saved Yet</h3></div>`; return; }
-  watchlist.forEach(m => grid.appendChild(buildCard(m, { watchlistView:true })));
+  const fragment = document.createDocumentFragment();
+  watchlist.forEach(m => fragment.appendChild(buildCard(m, { watchlistView:true })));
+  grid.appendChild(fragment);
 }
 
 
@@ -3746,6 +4074,7 @@ function setSectionVisibility(selector, visible) {
 function invalidateTasteModel() {
   tasteModelCache = new Map();
   cardMatchCache = null;
+  scoredMovieCache = null;
 }
 
 function invalidateCardMatchCache() {
@@ -3753,26 +4082,20 @@ function invalidateCardMatchCache() {
 }
 
 function buildCardMatchCache() {
-  const allTitles = [
-    ...Object.values(state.movies || {}),
-    ...Object.values(state.hiddenTitles || {})
-  ].filter(movie => movie && scoringTags(movie).length > 0);
-  const fullModel = getTasteModel();
-  const cache = new Map();
-
-  allTitles.forEach(movie => {
-    // A rated title is predicted from every other rated title, never from itself.
-    // This is the only honest check of whether the learned model understands it.
-    const model = Number(movie.rating || 0) > 0 ? getTasteModel(String(movie.id)) : fullModel;
-    cache.set(String(movie.id), predictTasteFit(movie, model));
-  });
-
-  return cache;
+  // Card fits are intentionally lazy. Building leave-one-out models for every
+  // rated title during every render was the largest UI freeze at a few thousand
+  // titles. Visible cards populate this cache on demand instead.
+  return new Map();
 }
 function cardMatchData(movie) {
   if (!personalizedEnough() || !movie?.id) return null;
   if (!cardMatchCache) cardMatchCache = buildCardMatchCache();
-  return cardMatchCache.get(String(movie.id)) || {
+  const id = String(movie.id);
+  if (!cardMatchCache.has(id)) {
+    const model = Number(movie.rating || 0) > 0 ? getTasteModel(id) : getTasteModel();
+    cardMatchCache.set(id, predictTasteFit(movie, model));
+  }
+  return cardMatchCache.get(id) || {
     movie,
     matchScore: 0,
     tasteFit: 0,
@@ -3792,7 +4115,9 @@ function renderPoolGrid() {
   document.getElementById('poolCount').textContent = rows.length ? `showing ${visible.length} of ${rows.length} titles` : 'nothing loaded';
   grid.innerHTML = '';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>Pool Empty</h3></div>`; return; }
-  visible.forEach(m => grid.appendChild(buildCard(m, { poolView:true })));
+  const fragment = document.createDocumentFragment();
+  visible.forEach(m => fragment.appendChild(buildCard(m, { poolView:true })));
+  grid.appendChild(fragment);
   if (rows.length > visible.length) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMorePoolTitles()">Show ${Math.min(80, rows.length-visible.length)} more · ${rows.length-visible.length} remaining</button></div>`);
 }
 
@@ -3804,7 +4129,9 @@ function renderHiddenGrid() {
   document.getElementById('hiddenCount').textContent = rows.length ? `showing ${visible.length} of ${rows.length} hidden` : 'nothing hidden';
   grid.innerHTML = '';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">x</div><h3>Nothing Hidden</h3></div>`; return; }
-  visible.forEach(m => grid.appendChild(buildCard({ ...m, _expanded:true }, { hiddenView:true })));
+  const fragment = document.createDocumentFragment();
+  visible.forEach(m => fragment.appendChild(buildCard({ ...m, _expanded:true }, { hiddenView:true })));
+  grid.appendChild(fragment);
   if (rows.length > visible.length) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreHiddenTitles()">Show ${Math.min(80, rows.length-visible.length)} more · ${rows.length-visible.length} remaining</button></div>`);
 }
 
@@ -3847,8 +4174,8 @@ function restoreManualStars() {
 }
 function buildCard(movie, opts={}) {
   const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, predictedRating, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag } = opts;
-  const automaticMatch = cardMatchData(movie);
   const hasSuppliedMatch = Number.isFinite(Number(matchScore)) || Number.isFinite(Number(tasteFit));
+  const automaticMatch = hasSuppliedMatch ? null : cardMatchData(movie);
   const resolvedMatch = hasSuppliedMatch
     ? { matchScore:Number(matchScore ?? tasteFit) || 0, tasteFit:Number(tasteFit ?? matchScore) || 0, predictedRating:Number(predictedRating || 0), posOverlap:Number(posOverlap || 0), genreOverlap:Number(genreOverlap || 0), negativeOverlap:Number(negativeOverlap || 0), matchedTags:matchedTags || new Set(), matchedGenres:matchedGenres || new Set() }
     : automaticMatch;
@@ -4005,7 +4332,7 @@ function removeTagFromMovie(id, tag, event) {
   suppressTagOnMovie(movie, tag);
   computeTagWeights();
   saveLocalState();
-  syncDrive();
+  queueDriveSync();
   render();
   showToast(`Removed tag from "${movie.title}": ${tag}`, 'success');
 }
@@ -4035,7 +4362,7 @@ function removeRawTagFromMovie(id, tag, event) {
   invalidateTagCaches();
   computeTagWeights();
   saveLocalState();
-  syncDrive();
+  queueDriveSync();
   render();
   showToast(`Removed raw tag from "${movie.title}": ${tag}`, 'success');
 }
@@ -4270,6 +4597,7 @@ function computeTagWeights() {
 }
 
 function scoreMovies() {
+  if (scoredMovieCache) return scoredMovieCache;
   const model = getTasteModel();
   computeTagWeights();
   const ranked = Object.values(state.movies)
@@ -4287,7 +4615,8 @@ function scoreMovies() {
     b.genreOverlap - a.genreOverlap ||
     a.movie.title.localeCompare(b.movie.title)
   );
-  return ranked;
+  scoredMovieCache = ranked;
+  return scoredMovieCache;
 }
 // ─────────────────────────────────────────────
 // RATING
@@ -4308,7 +4637,7 @@ function rateMovie(id, rating) {
     pendingSearchResetAfterRatingId = '';
     clearUnifiedTitleSearch();
   }
-  saveLocalState(); syncDrive(); render();
+  saveLocalState(); queueDriveSync(); render();
   scheduleTasteStoryUpdate();
   showToast(nextRating ? `"${movie.title}" → ${nextRating}/5` : `Removed rating from "${movie.title}"`, nextRating ? 'success' : '');
 }
@@ -4323,8 +4652,9 @@ function deleteMovie(id, e) {
   const stamp = nowStamp();
   state.hiddenTitles[id] = touchRecord({ ...m, hiddenAt: stamp }, stamp);
   delete state.movies[id];
+  invalidateTagCaches();
   computeTagWeights();
-  saveLocalState(); syncDrive(); render();
+  saveLocalState(); queueDriveSync(); render();
   showToast(`Hidden "${m.title}"`, '');
 }
 
@@ -4345,12 +4675,15 @@ function removeTitlePermanently(id, e) {
     updatedAt:stamp
   };
   state.deletedMovieRecords = state.deletedMovieRecords || {};
-  state.deletedMovieRecords[id] = { id, reason:'removed', at:stamp, updatedAt:stamp };
+  state.unblockedTitleRecords = state.unblockedTitleRecords || {};
+  delete state.unblockedTitleRecords[key];
+  state.deletedMovieRecords[id] = { id, titleKey:key, reason:'removed', at:stamp, updatedAt:stamp };
   delete state.movies[id];
   delete state.hiddenTitles[id];
+  invalidateTagCaches();
   rebuildTagBrain();
   computeTagWeights();
-  saveLocalState(); syncDrive(); render();
+  saveLocalState(); queueDriveSync(); render();
   showToast(`Removed "${m.title}"`, 'success');
 }
 
@@ -4363,8 +4696,9 @@ function restoreHiddenMovie(id, e) {
   state.movies[id] = restored;
   delete state.hiddenTitles[id];
   if (state.deletedMovieRecords) delete state.deletedMovieRecords[id];
+  invalidateTagCaches();
   computeTagWeights();
-  saveLocalState(); syncDrive(); render();
+  saveLocalState(); queueDriveSync(); render();
   showToast(`Restored "${movie.title}"`, 'success');
 }
 function forgetHiddenMovie(id, e) {
@@ -4380,7 +4714,7 @@ function toggleWatchlist(id, e) {
   m.watchlist = !m.watchlist;
   m.skipped = false;
   touchRecord(m);
-  saveLocalState(); syncDrive(); render();
+  saveLocalState(); queueDriveSync(); render();
   showToast(m.watchlist?`Added "${m.title}" to watchlist`:`Removed "${m.title}" from watchlist`, m.watchlist?'success':'');
 }
 function skipMovie(id, e) { toggleWatchlist(id, e); }
@@ -4549,7 +4883,7 @@ async function retagFromStoredData(id, opts={}) {
     rebuildTagBrain();
     computeTagWeights();
     saveLocalState();
-    syncDrive();
+    queueDriveSync();
     scheduleTagCloudNormalization(1200);
     render();
     if (opts.successToast !== false) {
@@ -4624,7 +4958,7 @@ function runHousekeeping(manual=true, deferCanonical=false) {
   }
   if (manual) {
     saveLocalState();
-    syncDrive();
+    queueDriveSync();
     showToast('Tags cleaned', 'success');
   }
   updateHKStatus(tagStatusText());
@@ -4784,7 +5118,7 @@ async function generateTasteStory({force=false}={}) {
       ratingCount:profile.ratingCount
     };
     saveLocalState();
-    syncDrive();
+    queueDriveSync();
     renderTasteStoryCard();
     return true;
   } catch(error) {
@@ -4886,7 +5220,7 @@ function removeTagFromBrain(tag) {
   rebuildTagBrain();
   computeTagWeights();
   saveLocalState();
-  syncDrive();
+  queueDriveSync();
   render();
   showToast(`Removed "${tag}" from ${affected.length} ${affected.length === 1 ? 'title' : 'titles'}`, 'success');
 }
@@ -5031,6 +5365,8 @@ async function resetAllData() {
   state.hiddenTitles = {};
   state.wrongPicks = {};
   state.deletedMovieRecords = {};
+  state.rollingPoolExclusions = {};
+  state.unblockedTitleRecords = {};
   state.legacyTagAliases = {};
   invalidateTagCaches();
   state.tagStats = { candidates:0, tags:0, rebuiltAt:'' };
@@ -5085,7 +5421,8 @@ function dataTimestamp(data) {
     ...Object.values(data?.movies || {}),
     ...Object.values(data?.hiddenTitles || {}),
     ...Object.values(data?.wrongPicks || {}),
-    ...Object.values(data?.deletedMovieRecords || {})
+    ...Object.values(data?.deletedMovieRecords || {}),
+    ...Object.values(data?.rollingPoolExclusions || {})
   ].map(recordTimestamp);
   return Math.max(
     Date.parse(data?.meta?.updatedAt || data?.updatedAt || '') || 0,
@@ -5107,10 +5444,35 @@ function touchSettings(stamp=nowStamp()) {
   state.meta.settingsUpdatedAt = stamp;
 }
 
+
+function syncMustWaitForForegroundWork() {
+  return !!(
+    poolExpansionInProgress ||
+    backgroundAiTaggingInProgress ||
+    tagCloudNormalizationInProgress ||
+    tasteStoryInProgress
+  );
+}
+
+function queueDriveSync(delay=DRIVE_SYNC_DEBOUNCE_MS) {
+  if (!state.drive?.enabled && !state.drive?.connected && !state.drive?.accessToken) return;
+  driveSyncDeferred=true;
+  clearTimeout(driveSyncTimer);
+  driveSyncTimer=setTimeout(() => {
+    driveSyncTimer=null;
+    if (syncMustWaitForForegroundWork()) {
+      queueDriveSync(Math.max(1000, delay));
+      return;
+    }
+    driveSyncDeferred=false;
+    syncDrive(false);
+  }, Math.max(0, Number(delay) || DRIVE_SYNC_DEBOUNCE_MS));
+}
+
 function queueSettingsSync() {
   if (!state.drive?.enabled && !state.drive?.connected && !state.drive?.accessToken) return;
   clearTimeout(settingsSyncTimer);
-  settingsSyncTimer = setTimeout(() => syncDrive(false), 900);
+  settingsSyncTimer = setTimeout(() => queueDriveSync(900), 900);
 }
 
 function saveSettingsState() {
@@ -5130,7 +5492,13 @@ function ensureSyncMetadata({touchDataset=false}={}) {
   Object.values(state.deletedMovieRecords || {}).forEach(record => {
     if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
   });
+  Object.values(state.unblockedTitleRecords || {}).forEach(record => {
+    if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
+  });
   Object.values(state.wrongPicks || {}).forEach(record => {
+    if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
+  });
+  Object.values(state.rollingPoolExclusions || {}).forEach(record => {
     if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
   });
   if (!state.meta) state.meta = {};
@@ -5149,6 +5517,8 @@ function exportCinelensData() {
     hiddenTitles: state.hiddenTitles,
     wrongPicks: state.wrongPicks,
     deletedMovieRecords: state.deletedMovieRecords,
+    rollingPoolExclusions: state.rollingPoolExclusions,
+    unblockedTitleRecords: state.unblockedTitleRecords,
     tagStats: state.tagStats,
     tagNormalization: state.tagNormalization,
     tasteStory: state.tasteStory,
@@ -5208,6 +5578,8 @@ function normaliseIncomingData(d={}) {
     hiddenTitles: d.hiddenTitles || {},
     wrongPicks: d.wrongPicks || {},
     deletedMovieRecords: d.deletedMovieRecords || {},
+    rollingPoolExclusions: d.rollingPoolExclusions || {},
+    unblockedTitleRecords: d.unblockedTitleRecords || {},
     legacyTagAliases: d.tagAliases || d.legacyTagAliases || {},
     tagStats,
     tagNormalization: d.tagNormalization || {version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:''},
@@ -5224,6 +5596,8 @@ function replaceStateFromDataset(dataset) {
   state.hiddenTitles = incoming.hiddenTitles;
   state.wrongPicks = incoming.wrongPicks;
   state.deletedMovieRecords = incoming.deletedMovieRecords;
+  state.rollingPoolExclusions = incoming.rollingPoolExclusions || {};
+  state.unblockedTitleRecords = incoming.unblockedTitleRecords || {};
   state.legacyTagAliases = incoming.legacyTagAliases;
   state.tagStats = incoming.tagStats;
   state.tagNormalization = incoming.tagNormalization;
@@ -5281,6 +5655,49 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
 
   const movies={...mergeRecordMap(local.movies, remote.movies)};
   const hiddenTitles={...mergeRecordMap(local.hiddenTitles, remote.hiddenTitles)};
+  const unblockedTitleRecords=mergeRecordMap(local.unblockedTitleRecords, remote.unblockedTitleRecords);
+  const wrongPicks=mergeRecordMap(local.wrongPicks, remote.wrongPicks);
+  const deletedMovieRecords=mergeRecordMap(local.deletedMovieRecords, remote.deletedMovieRecords);
+  const rollingPoolExclusions=mergeRecordMap(local.rollingPoolExclusions, remote.rollingPoolExclusions);
+
+  // A deliberate manual re-add is also synchronized. It clears an older wrong-pick
+  // block across devices instead of letting an old Drive tombstone undo the re-add.
+  Object.entries(wrongPicks).forEach(([key, record]) => {
+    const titleKey=normaliseTitleKey(record?.wikiTitle || record?.pageTitle || record?.title || key);
+    const release=unblockedTitleRecords[titleKey];
+    if (release && recordTimestamp(release) >= recordTimestamp(record)) delete wrongPicks[key];
+  });
+
+  // Permanent removal/forget must win over any stale active or hidden copy on
+  // another device. A title is allowed back only after an explicit manual re-add.
+  const removalBlocksMovie = movie => {
+    if (!movie) return false;
+    const titleKey=normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title);
+    const release=unblockedTitleRecords[titleKey];
+    const idRecord=deletedMovieRecords[movie.id];
+    const titleRecord=Object.values(wrongPicks).find(record =>
+      [record?.title, record?.wikiTitle, record?.pageTitle].some(title => normaliseTitleKey(title) === titleKey)
+    );
+    const tombstone=[idRecord,titleRecord].filter(Boolean).sort((a,b)=>recordTimestamp(b)-recordTimestamp(a))[0];
+    if (!tombstone) return false;
+    if (release && recordTimestamp(release) > recordTimestamp(tombstone)) return false;
+    return recordTimestamp(tombstone) >= recordTimestamp(movie);
+  };
+  Object.keys(movies).forEach(id => { if (removalBlocksMovie(movies[id])) delete movies[id]; });
+  Object.keys(hiddenTitles).forEach(id => { if (removalBlocksMovie(hiddenTitles[id])) delete hiddenTitles[id]; });
+
+  // Rolling-pool exclusions are not user rejections. They only suppress stale,
+  // replaceable unseen candidates from another device; rated, watchlisted and
+  // manual titles always survive.
+  const rollingBlocksMovie = movie => {
+    if (!isReplaceableRollingCandidate(movie)) return false;
+    const titleKey=normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title);
+    const record=rollingPoolExclusions[movie.id] || Object.values(rollingPoolExclusions).find(item =>
+      [item?.title, item?.wikiTitle, item?.pageTitle].some(title => normaliseTitleKey(title) === titleKey)
+    );
+    return !!record && recordTimestamp(record) >= recordTimestamp(movie);
+  };
+  Object.keys(movies).forEach(id => { if (rollingBlocksMovie(movies[id])) delete movies[id]; });
 
   // A title cannot be active and hidden at once. Newer state wins; on an exact
   // timestamp tie, hidden wins so an old active cache cannot resurrect it.
@@ -5309,8 +5726,10 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
     movies,
     settings,
     hiddenTitles,
-    wrongPicks:mergeRecordMap(local.wrongPicks, remote.wrongPicks),
-    deletedMovieRecords:mergeRecordMap(local.deletedMovieRecords, remote.deletedMovieRecords),
+    wrongPicks,
+    deletedMovieRecords,
+    rollingPoolExclusions,
+    unblockedTitleRecords,
     legacyTagAliases:{...remote.legacyTagAliases, ...local.legacyTagAliases},
     tagStats:{candidates:0, tags:0, rebuiltAt:''},
     tagNormalization:dataTimestamp(remote) > dataTimestamp(local) ? remote.tagNormalization : local.tagNormalization,
@@ -5367,6 +5786,7 @@ function loadLocalState() {
       if (s.hiddenTitles) state.hiddenTitles=s.hiddenTitles;
       if (s.wrongPicks) state.wrongPicks=s.wrongPicks;
       if (s.deletedMovieRecords) state.deletedMovieRecords=s.deletedMovieRecords;
+      if (s.unblockedTitleRecords) state.unblockedTitleRecords=s.unblockedTitleRecords;
       if (s.tagAliases || s.legacyTagAliases) state.legacyTagAliases=s.tagAliases || s.legacyTagAliases;
       if (s.tagStats) state.tagStats=s.tagStats;
       else if (s.canonicalTagStats) state.tagStats={candidates:s.canonicalTagStats.raw||0,tags:s.canonicalTagStats.canonical||0,rebuiltAt:s.canonicalTagStats.rebuiltAt||''};
@@ -5413,6 +5833,9 @@ let driveRestoreInProgress=false;
 let gisScriptLoading=false;
 let driveSyncInProgress=false;
 let driveSyncQueued=false;
+let driveSyncTimer=null;
+let driveSyncDeferred=false;
+const DRIVE_SYNC_DEBOUNCE_MS=1200;
 const DRIVE_TOKEN_KEY='cinelens_drive_token_v1';
 const DRIVE_TOKEN_EXPIRY_KEY='cinelens_drive_token_expiry_v1';
 
@@ -5780,6 +6203,10 @@ async function createDriveFile() {
   } catch(e){showToast('Drive file create failed','error');}
 }
 async function syncDrive(manual=false) {
+  if (!manual && syncMustWaitForForegroundWork()) {
+    queueDriveSync(1200);
+    return;
+  }
   if (driveSyncInProgress) {
     driveSyncQueued=true;
     return;
@@ -5788,7 +6215,7 @@ async function syncDrive(manual=false) {
     driveSyncInProgress=false;
     if (driveSyncQueued) {
       driveSyncQueued=false;
-      syncDrive(manual);
+      queueDriveSync(350);
     }
   };
   driveSyncInProgress=true;
@@ -5801,8 +6228,13 @@ async function syncDrive(manual=false) {
       }
     }
 
-    const canonicalId=await findDriveFile();
-    if (canonicalId) state.drive.fileId=canonicalId;
+    // The canonical Drive file ID is already persisted. Re-scanning and
+    // downloading every same-named Drive file on each small save grows linearly
+    // with duplicates and is unnecessary once migration is complete.
+    if (!state.drive.fileId) {
+      const canonicalId=await findDriveFile();
+      if (canonicalId) state.drive.fileId=canonicalId;
+    }
     if (!state.drive.fileId) {
       await createDriveFile();
       if (!state.drive.fileId) return;
@@ -5821,7 +6253,7 @@ async function syncDrive(manual=false) {
     saveLocalState({preserveUpdatedAt:true});
     render();
     setDriveStatus('connected');
-    showToast(convergence.source === 'record-merge' ? 'Drive synchronized.' : 'Drive reset synchronized.', 'success');
+    if (manual) showToast(convergence.source === 'record-merge' ? 'Drive synchronized.' : 'Drive reset synchronized.', 'success');
   } catch(error) {
     console.error('Drive sync failed', error);
     state.drive.connected=false;

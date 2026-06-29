@@ -598,3 +598,43 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
   .taste-story-body { font-size:14px; line-height:1.72; }
   .taste-story-title { font-size:21px; }
 }
+
+
+/* Mobile control-deck flow: menu and maintenance stay in normal layout, never over cards. */
+@media (max-width:768px) {
+  header.nav-open > div:first-child {
+    grid-column:1 / -1;
+    flex-wrap:wrap;
+  }
+  header.nav-open .tab-bar.open {
+    position:static;
+    inset:auto;
+    flex:0 0 100%;
+    width:100%;
+    margin-top:2px;
+  }
+  header.nav-open .header-right { grid-column:1 / -1; }
+  header.nav-open + main .control-deck { position:static; top:auto; }
+
+  /* Keep Library maintenance reachable even when filters & tools are collapsed. */
+  .control-content > .maintenance-panel { order:-1; }
+  .control-deck.collapsed .control-content {
+    display:flex;
+    flex-direction:column;
+    gap:0;
+  }
+  .control-deck.collapsed .control-content > :not(.maintenance-panel) { display:none; }
+  .control-deck.collapsed .maintenance-panel {
+    display:block;
+    margin:8px 0 0;
+    padding:8px 0 0;
+  }
+  .control-deck:not(.collapsed) {
+    position:static;
+    top:auto;
+  }
+  .control-deck:not(.collapsed) .maintenance-panel { margin:0 0 8px; }
+  .maintenance-panel > summary { min-height:30px; align-items:center; }
+  .maintenance-health { margin:6px 0; }
+  .maintenance-actions { gap:6px; }
+}
