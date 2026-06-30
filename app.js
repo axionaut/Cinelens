@@ -1329,6 +1329,10 @@ function libraryRecordCount(dataset=state) {
   return Object.keys(dataset?.movies || {}).length + Object.keys(dataset?.hiddenTitles || {}).length;
 }
 
+function ratedTitleCount(dataset=state) {
+  return Object.values(dataset?.movies || {}).filter(movie => Number(movie?.rating || 0) > 0).length;
+}
+
 function finalizeStartupAfterDrive({allowCollection=false}={}) {
   if (startupFinalized) return;
   startupFinalized = true;
@@ -1366,7 +1370,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (startupRemovedHindiShows) saveLocalState({preserveUpdatedAt:true});
   startupInitialLibraryPresent = libraryRecordCount() > 0;
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
-  render();
+  // A Drive-enabled device must not treat a catalogue-only cache as a usable
+  // personal library. The authoritative profile is restored before normal UI
+  // work and collection are unlocked below.
+  if (!state.drive.enabled || ratedTitleCount() > 0) render();
 
   // A previously connected browser may restore silently. A new browser remains
   // read-only until the user taps Drive, so it cannot manufacture a newer local
@@ -6511,7 +6518,10 @@ function personalMovieState(movie) {
     rating:Number(movie?.rating || 0),
     watchlist:!!movie?.watchlist,
     manualAdded:!!movie?.manualAdded,
-    updatedAt:movie?._updatedAt || nowStamp()
+    // Catalogue chunks intentionally omit _updatedAt. Never manufacture a
+    // fresh timestamp for that blank personal overlay: doing so can beat a
+    // real Drive rating during restore and reset it to zero.
+    updatedAt:movie?._updatedAt || ''
   };
 }
 
@@ -6551,10 +6561,10 @@ function exportDriveProfile() {
   };
 }
 
-function applyDriveProfile(profile,{merge=true}={}) {
-  if (!profile) return;
-  const local=exportDriveProfile();
-  const source=merge ? profile : {};
+function applyDriveProfile(profile,{merge=true,preferDrive=false}={}) {
+  if (!profile || !profile.personalTitles || typeof profile.personalTitles !== 'object') {
+    throw new Error('Drive profile is missing personal title data');
+  }
   const chosenSettings=settingsTimestamp(profile) >= settingsTimestamp({settings:state.settings,meta:state.meta}) ? profile.settings : state.settings;
   state.settings={...state.settings,...(chosenSettings || {})};
   state.hiddenTitles=merge ? mergeRecordMap(state.hiddenTitles,profile.hiddenTitles || {}) : (profile.hiddenTitles || {});
@@ -6571,7 +6581,11 @@ function applyDriveProfile(profile,{merge=true}={}) {
     const movie=state.movies?.[id];
     if (!movie) return;
     const localPersonal=personalMovieState(movie);
-    const chosen=recordTimestamp({_updatedAt:remotePersonal.updatedAt}) >= recordTimestamp({_updatedAt:localPersonal.updatedAt}) ? remotePersonal : localPersonal;
+    const remoteStamp=recordTimestamp({_updatedAt:remotePersonal.updatedAt});
+    const localStamp=recordTimestamp({_updatedAt:localPersonal.updatedAt});
+    // During startup restore, Drive is the canonical personal profile. On
+    // later background convergence, retain the newer genuine personal edit.
+    const chosen=preferDrive || remoteStamp >= localStamp ? remotePersonal : localPersonal;
     movie.rating=Number(chosen.rating || 0);
     movie.watchlist=!!chosen.watchlist;
     movie.manualAdded=!!chosen.manualAdded;
@@ -6651,8 +6665,11 @@ async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
   const needsFullLoad=!Object.keys(state.movies || {}).length;
   const changedKeys=Object.keys(remoteChunks).filter(key => needsFullLoad || localHashes[key] !== remoteChunks[key].hash);
   const profileChanged=needsFullLoad || localProfileHash !== manifest.profile?.hash;
-
-  const incomingProfile=profileChanged && manifest.profile?.id ? await readDriveJson(manifest.profile.id) : null;
+  // The profile is intentionally small. On a Drive-authoritative startup,
+  // always read it even when a stale local hash claims it is current.
+  const mustReadProfile=!!preferDrive || profileChanged;
+  if (!manifest.profile?.id) throw new Error('Drive manifest has no profile');
+  const incomingProfile=mustReadProfile ? await readDriveJson(manifest.profile.id) : null;
   for (const key of changedKeys) {
     const info=remoteChunks[key];
     const payload=await readDriveJson(info.id);
@@ -6662,12 +6679,14 @@ async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
     Object.keys(state.movies || {}).forEach(id => { if (driveChunkKey(state.movies[id]) === key) delete state.movies[id]; });
     Object.assign(state.movies,incoming);
   }
-  if (incomingProfile) applyDriveProfile(incomingProfile,{merge:!preferDrive});
+  if (incomingProfile) applyDriveProfile(incomingProfile,{merge:!preferDrive,preferDrive:!!preferDrive});
+  else if (preferDrive) throw new Error('Drive profile did not load');
   state.drive.manifestFileId=state.drive.manifestFileId || state.meta?.driveManifestFileId || '';
   state.meta=state.meta || {};
   state.meta.driveSyncModel=DRIVE_SYNC_MODEL_V2;
   state.meta.driveChunkHashes=Object.fromEntries(Object.entries(remoteChunks).map(([key,info])=>[key,info.hash]));
   state.meta.driveProfileHash=manifest.profile?.hash || '';
+  state.meta.driveProfileReadyAt=nowStamp();
   state.meta.driveManifestFileId=state.drive.manifestFileId || state.meta.driveManifestFileId || '';
   Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
   invalidateTagCaches();
