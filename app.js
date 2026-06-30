@@ -17,8 +17,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
     'Category:Australian_television_series_debuts_by_year',
     'Category:New_Zealand_television_series_debuts_by_year',
     'Category:Irish_television_series_debuts_by_year'
-  ],
-  hindiShows: 'Category:Indian_television_series_debuts_by_year'
+  ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
@@ -34,23 +33,20 @@ const AI_TAG_CLOUD_NORMALIZE_VERSION = 'cinelens-tag-cloud-v2';
 const AI_REQUEST_DELAY_MS = 12000;
 const WIKI_LIST_SOURCES = {
   showsIndex: 'Lists of television programs',
-  englishShows: ['List of television programs: A','List of television programs: B','List of television programs: C','List of British television programmes','List of Netflix original programming','List of Amazon Prime Video original programming'],
-  hindiShows: ['List of Indian television series','List of Hindi-language television shows']
+  englishShows: ['List of television programs: A','List of television programs: B','List of television programs: C','List of British television programmes','List of Netflix original programming','List of Amazon Prime Video original programming']
 };
 
 const WIKI_NAVIGATION_LISTS = {
   englishMovies: ['Lists of English-language films','List of American films of the 2020s','List of British films of 2020','List of films considered the best'],
   hindiMovies: ['Lists of Hindi films','List of Hindi films of 2024','List of Hindi films of 2023','List of Hindi films of 2022','List of Bollywood films of 2021'],
   topicMovies: ['List of films considered the best','List of cult films','List of films based on actual events','List of films based on awards','List of films with a 100% rating on Rotten Tomatoes'],
-  englishShows: ['List of Netflix original programming','List of Amazon Prime Video original programming','List of British television programmes'],
-  hindiShows: ['List of Hindi-language television shows','List of Indian television series']
+  englishShows: ['List of Netflix original programming','List of Amazon Prime Video original programming','List of British television programmes']
 };
 
 const COLLECTION_LANES = [
   { key:'englishMovies', label:'English movies', mode:'movies', language:'English', weight:4 },
   { key:'hindiMovies', label:'Hindi movies', mode:'movies', language:'Hindi', weight:3 },
-  { key:'englishShows', label:'English shows', mode:'shows', language:'English', weight:2 },
-  { key:'hindiShows', label:'Hindi shows', mode:'shows', language:'Hindi', weight:1 }
+  { key:'englishShows', label:'English shows', mode:'shows', language:'English', weight:2 }
 ];
 
 
@@ -1306,9 +1302,10 @@ function cleanContaminatedTags(silent=true) {
 function runStartupMaintenance() {
   const run = () => {
     try {
+      const removedHindiShows = purgeDisallowedHindiShows({recordWrongPicks:true});
       const changed = cleanContaminatedTags(true);
       const rotation = pruneRollingCandidatePool({reason:'startup'});
-      if (changed || rotation.evicted) {
+      if (removedHindiShows || changed || rotation.evicted) {
         saveLocalState();
         queueDriveSync();
         render();
@@ -1365,6 +1362,8 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Import a legacy localStorage library once, then remove its large payload only
   // after the IndexedDB write has been queued.
   if (libraryRecordCount() > 0) queueIndexedDbSave(0);
+  const startupRemovedHindiShows = purgeDisallowedHindiShows({recordWrongPicks:true});
+  if (startupRemovedHindiShows) saveLocalState({preserveUpdatedAt:true});
   startupInitialLibraryPresent = libraryRecordCount() > 0;
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   render();
@@ -1831,7 +1830,6 @@ function curatedTitlesForMode(mode) {
   if (mode === 'englishMovies') return [...HIGH_CONFIDENCE_ENGLISH, ...EXPANSION_ENGLISH].map(title => ({title, lane:COLLECTION_LANES.find(l => l.key === 'englishMovies'), tier:0}));
   if (mode === 'hindiMovies') return [...HIGH_CONFIDENCE_HINDI, ...EXPANSION_HINDI].map(title => ({title, lane:COLLECTION_LANES.find(l => l.key === 'hindiMovies'), tier:0}));
   if (mode === 'englishShows') return [...HIGH_CONFIDENCE_SHOWS, ...EXPANSION_SHOWS].map(title => ({title, lane:COLLECTION_LANES.find(l => l.key === 'englishShows'), tier:0}));
-  if (mode === 'hindiShows') return [...HIGH_CONFIDENCE_SHOWS, ...EXPANSION_SHOWS].map(title => ({title, lane:COLLECTION_LANES.find(l => l.key === 'hindiShows'), tier:0}));
   return collectionLanesForMode(mode).flatMap(lane => curatedTitlesForMode(lane.key));
 }
 
@@ -1902,6 +1900,48 @@ function wrongPickMatches(value) {
   if (!key) return false;
   return Object.values(state.wrongPicks || {}).some(item => [item.title, item.wikiTitle, item.pageTitle]
     .some(title => normaliseTitleKey(title) === key));
+}
+
+function isHindiShowRecord(movie) {
+  if (!movie || !movie.format) return false;
+  return String(movie.language || '').trim().toLowerCase() === 'hindi';
+}
+
+function purgeDisallowedHindiShows(opts={}) {
+  const { recordWrongPicks=true } = opts;
+  let removed = 0;
+  const stamp = nowStamp();
+  state.wrongPicks = state.wrongPicks || {};
+  state.deletedMovieRecords = state.deletedMovieRecords || {};
+  const purgeMap = (mapName) => {
+    Object.entries(state[mapName] || {}).forEach(([id, movie]) => {
+      if (!isHindiShowRecord(movie)) return;
+      if (recordWrongPicks) {
+        const key = normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title) || id;
+        state.wrongPicks[key] = {
+          id,
+          title:movie.title || '',
+          wikiTitle:movie.wikiTitle || '',
+          pageTitle:movie.pageTitle || '',
+          wikiPageId:movie.wikiPageId || wikiPageIdFromMovie(movie),
+          reason:'hindi-show-excluded',
+          at:stamp,
+          updatedAt:stamp
+        };
+        state.deletedMovieRecords[id] = { id, titleKey:key, reason:'hindi-show-excluded', at:stamp, updatedAt:stamp };
+      }
+      delete state[mapName][id];
+      removed++;
+    });
+  };
+  purgeMap('movies');
+  purgeMap('hiddenTitles');
+  if (removed) {
+    invalidateTagCaches();
+    rebuildTagBrain();
+    computeTagWeights();
+  }
+  return removed;
 }
 
 function unblockTitleForManualSearch(value) {
@@ -3078,12 +3118,13 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   const year = deriveReleaseYear(leadText, extract, cats, format);
 
   if (language !== 'English' && language !== 'Hindi') return rejectWikiParse(diagnostics, 'English or Hindi language evidence missing');
+  if (format && language === 'Hindi') return rejectWikiParse(diagnostics, 'Hindi shows are excluded');
 
   let country = language === 'Other' ? 'Unknown' : 'USA';
   if (language === 'Hindi') country = 'India';
-  else if (mode === 'shows' && (cats.some(c => c.includes('indian television') || c.includes('indian web series')) || /\bindian\b/i.test(leadText))) { country = 'India'; language = 'Hindi'; }
+  else if (mode === 'shows' && (cats.some(c => c.includes('indian television') || c.includes('indian web series')) || /\bindian\b/i.test(leadText))) country = 'India';
   else if (cats.some(c => c.includes('british film') || c.includes('united kingdom') || c.includes('british television'))) country = 'UK';
-  else if (cats.some(c => c.includes('indian film') || c.includes('indian television'))) { country = 'India'; language = language || 'Hindi'; }
+  else if (cats.some(c => c.includes('indian film') || c.includes('indian television'))) country = 'India';
 
   const dirMatch = leadText.match(/directed by ([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,3})/);
   const creatorMatch = leadText.match(/created by ([A-Z][a-zA-Z.'-]+(?:\s+[A-Z][a-zA-Z.'-]+){0,3})/);
@@ -6791,6 +6832,7 @@ async function loadFromDrive(opts={}) {
     const marked=stampCanonicalDriveFile(state.drive.fileId);
     const migratedAliases=migrateLegacyTagAliases();
     migrateLegacyPoolItems();
+    const removedHindiShows = purgeDisallowedHindiShows({recordWrongPicks:true});
     const cleaned=cleanContaminatedTags(true);
     rebuildTagBrain();
     computeTagWeights();
@@ -6798,7 +6840,7 @@ async function loadFromDrive(opts={}) {
     render();
     state.drive.connected=true;
     setDriveStatus('connected');
-    if (marked || cleaned || migratedAliases.rewrites) await uploadDriveData();
+    if (marked || cleaned || migratedAliases.rewrites || removedHindiShows) await uploadDriveData();
     scheduleTagCloudNormalization(1600);
     return true;
   } catch(error) {
