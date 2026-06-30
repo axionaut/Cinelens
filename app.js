@@ -1664,15 +1664,28 @@ function isPersonOrOrganizationPage(pageTitle, leadText, cats=[]) {
 }
 
 function stripWikiMarkup(value='') {
-  return String(value || '')
+  let text = String(value || '')
     .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<ref[\s\S]*?<\/ref\s*>/gi, ' ')
     .replace(/<ref[^>]*\/>/gi, ' ')
-    .replace(/\{\{[^{}]*\}\}/g, ' ')
+    // Preserve content from common multiline infobox wrappers.
+    .replace(/\{\{\s*(?:plainlist|flatlist|ubl|unbulleted list|hlist|nowrap)\s*\|/gi, ' ')
+    .replace(/\{\{\s*lang(?:ue)?\s*\|[^|{}]+\|([^{}]+)\}\}/gi, '$1')
+    .replace(/\{\{\s*(?:small|nowrap|nobr|color|flagicon)\s*\|([^{}]+)\}\}/gi, '$1');
+
+  let previous = '';
+  while (previous !== text) {
+    previous = text;
+    text = text.replace(/\{\{[^{}]*\}\}/g, ' ');
+  }
+
+  return text
     .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2')
     .replace(/\[\[([^\]]+)\]\]/g, '$1')
     .replace(/'''[^']*'''/g, '')
     .replace(/<[^>]+>/g, ' ')
+    .replace(/[{}]/g, ' ')
+    .replace(/^\s*[*•]+\s*/gm, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -1680,8 +1693,26 @@ function stripWikiMarkup(value='') {
 function infoboxField(wikitext='', fieldName='') {
   const text = String(wikitext || '');
   if (!text || !fieldName) return '';
-  const match = text.match(new RegExp(`\\|\\s*${fieldName.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')}\\s*=\\s*([^\\n]+)`, 'i'));
-  return match ? stripWikiMarkup(match[1]) : '';
+  const escaped = fieldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = new RegExp(`\\|\\s*${escaped}\\s*=`, 'i').exec(text);
+  if (!match) return '';
+
+  // Fields such as Language are often {{plainlist}} blocks spanning multiple
+  // lines. Stop only at the next top-level infobox parameter.
+  let i = match.index + match[0].length;
+  let templateDepth = 0;
+  let linkDepth = 0;
+  let value = '';
+  for (; i < text.length; i++) {
+    const pair = text.slice(i, i + 2);
+    if (pair === '{{') { templateDepth++; value += pair; i++; continue; }
+    if (pair === '}}' && templateDepth > 0) { templateDepth--; value += pair; i++; continue; }
+    if (pair === '[[') { linkDepth++; value += pair; i++; continue; }
+    if (pair === ']]' && linkDepth > 0) { linkDepth--; value += pair; i++; continue; }
+    if (text[i] === '\n' && templateDepth === 0 && linkDepth === 0 && /^\s*\|\s*[A-Za-z][^=\n]{0,80}=/.test(text.slice(i + 1))) break;
+    value += text[i];
+  }
+  return stripWikiMarkup(value);
 }
 
 function infoboxMediaInfo(wikitext='') {
@@ -1706,11 +1737,14 @@ function explicitDisallowedLanguageEvidence(cats=[], leadText='', infoboxLanguag
 }
 
 function languageFromInfobox(info) {
-  const value = String(info?.language || '').toLowerCase();
+  const value = String(info?.language || '').toLowerCase().trim();
   if (!value) return '';
   if (/\bhindi\b/.test(value)) return 'Hindi';
-  if (/\benglish\b/.test(value)) return 'English';
-  return 'Other';
+  if (/\benglish\b|\ben\b/.test(value)) return 'English';
+  // Do not turn malformed template residue into a fake \"Other\" language.
+  // Only a named non-supported language is disqualifying here.
+  if (/\b(?:afrikaans|arabic|bengali|cantonese|chinese|danish|dutch|french|german|greek|gujarati|hebrew|italian|japanese|kannada|korean|malayalam|mandarin|marathi|persian|polish|portuguese|punjabi|russian|spanish|tamil|telugu|thai|turkish|urdu|vietnamese)\b/.test(value)) return 'Other';
+  return '';
 }
 
 function hasAllowedLanguageEvidence(cats, leadText) {
