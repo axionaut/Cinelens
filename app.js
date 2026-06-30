@@ -1730,10 +1730,26 @@ function infoboxMediaInfo(wikitext='') {
 
 function explicitDisallowedLanguageEvidence(cats=[], leadText='', infoboxLanguage='') {
   const other = '(?:afrikaans|arabic|bengali|cantonese|chinese|danish|dutch|french|german|greek|gujarati|hebrew|italian|japanese|kannada|korean|malayalam|mandarin|marathi|persian|polish|portuguese|punjabi|russian|spanish|tamil|telugu|thai|turkish|urdu|vietnamese)';
-  const categoryAndInfobox = `${(cats || []).join(' ')} ${infoboxLanguage || ''}`.toLowerCase();
-  const explicitLead = String(leadText || '').toLowerCase();
-  return new RegExp(`\\b${other}(?:[-\\s]language)?\\b`, 'i').test(categoryAndInfobox)
-    || new RegExp(`\\b${other}-language\\s+(?:film|television|tv|web|series|show|miniseries)\\b`, 'i').test(explicitLead);
+  const categoryText = (cats || []).join(' ').toLowerCase();
+  const infoboxText = String(infoboxLanguage || '').toLowerCase();
+  const lead = String(leadText || '').toLowerCase();
+
+  // Do not scan every Wikipedia category for a bare language word. Article
+  // pages often carry hidden citation/maintenance categories such as
+  // “CS1 Italian-language sources”, which describe a reference, not the title.
+  const languageCategory = new RegExp(
+    `\bcategory:(?:\d{4} )?${other}-language (?:films?|television|tv|web|series|shows?|miniseries)\b`,
+    'i'
+  );
+  const languageLead = new RegExp(
+    `\b${other}-language (?:film|television series|tv series|web series|miniseries|show)\b`,
+    'i'
+  );
+  const namedInfoboxLanguage = new RegExp(`\b${other}\b`, 'i');
+
+  return languageCategory.test(categoryText)
+    || languageLead.test(lead)
+    || namedInfoboxLanguage.test(infoboxText);
 }
 
 function languageFromInfobox(info) {
@@ -3041,8 +3057,14 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   const languageEvidence = hasAllowedLanguageEvidence(cats, leadText);
   const englishEvidence = languageEvidence.english;
   const hindiEvidence = languageEvidence.hindi;
-  if (explicitDisallowedLanguageEvidence(cats, leadText, infobox.language)) return rejectWikiParse(diagnostics, 'title language is not Hindi or English');
+
+  // A clear media-infobox language is the primary source. It must win over
+  // unrelated maintenance/citation categories or incidental foreign-language
+  // words elsewhere in the page metadata.
   if (language === 'Other') return rejectWikiParse(diagnostics, 'title language is not Hindi or English');
+  if (!language && explicitDisallowedLanguageEvidence(cats, leadText, infobox.language)) {
+    return rejectWikiParse(diagnostics, 'title language is not Hindi or English');
+  }
   if (!language && hindiEvidence) language = 'Hindi';
   else if (!language && englishEvidence) language = 'English';
   else if (!language && trustedLane?.language) language = trustedLane.language;
