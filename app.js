@@ -275,7 +275,7 @@ let state = {
   tagWeights: {},
   genreWeights: {},
   settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{} },
-  drive: { connected: false, accessToken: '', folderId: '', fileId: '', enabled: false, lastConnectedAt: 0 },
+  drive: { connected: false, accessToken: '', folderId: '', fileId: '', manifestFileId:'', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   wrongPicks: {},
   deletedMovieRecords: {},
@@ -1361,6 +1361,10 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
 
 window.addEventListener('DOMContentLoaded', async () => {
   loadLocalState();
+  await loadIndexedDbState();
+  // Import a legacy localStorage library once, then remove its large payload only
+  // after the IndexedDB write has been queued.
+  if (libraryRecordCount() > 0) queueIndexedDbSave(0);
   startupInitialLibraryPresent = libraryRecordCount() > 0;
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   render();
@@ -5399,6 +5403,159 @@ async function resetAllData() {
 }
 
 // ─────────────────────────────────────────────
+// LOCAL DATABASE — IndexedDB record cache
+// ─────────────────────────────────────────────
+const LOCAL_DB_NAME='cinelens_local_v3';
+const LOCAL_DB_VERSION=1;
+const LOCAL_DB_PROFILE_KEY='profile';
+let localDbPromise=null;
+let localDbSaveTimer=null;
+let localDbSaveInProgress=false;
+let localDbSaveQueued=false;
+let localDbMovieSignatureCache=new Map();
+let localDbHiddenSignatureCache=new Map();
+let localDbProfileSignature='';
+
+function openLocalDatabase() {
+  if (localDbPromise) return localDbPromise;
+  localDbPromise=new Promise((resolve,reject) => {
+    if (!('indexedDB' in window)) { reject(new Error('IndexedDB unavailable')); return; }
+    const request=indexedDB.open(LOCAL_DB_NAME, LOCAL_DB_VERSION);
+    request.onupgradeneeded=() => {
+      const db=request.result;
+      if (!db.objectStoreNames.contains('movies')) db.createObjectStore('movies',{keyPath:'id'});
+      if (!db.objectStoreNames.contains('hidden')) db.createObjectStore('hidden',{keyPath:'id'});
+      if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
+    };
+    request.onsuccess=()=>resolve(request.result);
+    request.onerror=()=>reject(request.error || new Error('IndexedDB open failed'));
+  });
+  return localDbPromise;
+}
+
+function idbRequest(request) {
+  return new Promise((resolve,reject) => {
+    request.onsuccess=()=>resolve(request.result);
+    request.onerror=()=>reject(request.error || new Error('IndexedDB request failed'));
+  });
+}
+
+function idbTransactionDone(transaction) {
+  return new Promise((resolve,reject) => {
+    transaction.oncomplete=()=>resolve();
+    transaction.onerror=()=>reject(transaction.error || new Error('IndexedDB transaction failed'));
+    transaction.onabort=()=>reject(transaction.error || new Error('IndexedDB transaction aborted'));
+  });
+}
+
+function localProfilePayload() {
+  return {
+    meta:state.meta,
+    settings:state.settings,
+    wrongPicks:state.wrongPicks,
+    deletedMovieRecords:state.deletedMovieRecords,
+    rollingPoolExclusions:state.rollingPoolExclusions,
+    unblockedTitleRecords:state.unblockedTitleRecords,
+    legacyTagAliases:state.legacyTagAliases,
+    tagStats:state.tagStats,
+    tagNormalization:state.tagNormalization,
+    tasteStory:state.tasteStory,
+    discoveryCursor:state.discoveryCursor,
+    poolFetched:state.poolFetched,
+    drive:{
+      enabled:state.drive.enabled,
+      folderId:state.drive.folderId,
+      fileId:state.drive.fileId,
+      manifestFileId:state.drive.manifestFileId || '',
+      lastConnectedAt:state.drive.lastConnectedAt
+    }
+  };
+}
+
+function queueIndexedDbSave(delay=450) {
+  clearTimeout(localDbSaveTimer);
+  localDbSaveTimer=setTimeout(() => persistStateToIndexedDb(), Math.max(0, Number(delay)||0));
+}
+
+async function persistStateToIndexedDb() {
+  if (localDbSaveInProgress) { localDbSaveQueued=true; return; }
+  localDbSaveInProgress=true;
+  try {
+    const db=await openLocalDatabase();
+    const tx=db.transaction(['movies','hidden','meta'],'readwrite');
+    const moviesStore=tx.objectStore('movies');
+    const hiddenStore=tx.objectStore('hidden');
+    const nextMovies=new Map();
+    const nextHidden=new Map();
+
+    Object.entries(state.movies || {}).forEach(([id,movie]) => {
+      const signature=JSON.stringify(movie);
+      nextMovies.set(String(id),signature);
+      if (localDbMovieSignatureCache.get(String(id)) !== signature) moviesStore.put({...movie,id:String(movie.id || id)});
+    });
+    Object.entries(state.hiddenTitles || {}).forEach(([id,movie]) => {
+      const signature=JSON.stringify(movie);
+      nextHidden.set(String(id),signature);
+      if (localDbHiddenSignatureCache.get(String(id)) !== signature) hiddenStore.put({...movie,id:String(movie.id || id)});
+    });
+    localDbMovieSignatureCache.forEach((_,id) => { if (!nextMovies.has(id)) moviesStore.delete(id); });
+    localDbHiddenSignatureCache.forEach((_,id) => { if (!nextHidden.has(id)) hiddenStore.delete(id); });
+
+    const profile=localProfilePayload();
+    const profileSignature=JSON.stringify(profile);
+    if (profileSignature !== localDbProfileSignature) tx.objectStore('meta').put(profile,LOCAL_DB_PROFILE_KEY);
+    await idbTransactionDone(tx);
+    localDbMovieSignatureCache=nextMovies;
+    localDbHiddenSignatureCache=nextHidden;
+    localDbProfileSignature=profileSignature;
+    try { localStorage.removeItem('cinelens_v2'); } catch(_) {}
+  } catch(error) {
+    console.warn('IndexedDB local save failed',error);
+  } finally {
+    localDbSaveInProgress=false;
+    if (localDbSaveQueued) { localDbSaveQueued=false; queueIndexedDbSave(200); }
+  }
+}
+
+async function loadIndexedDbState() {
+  try {
+    const db=await openLocalDatabase();
+    const tx=db.transaction(['movies','hidden','meta'],'readonly');
+    const [movies,hidden,profile]=await Promise.all([
+      idbRequest(tx.objectStore('movies').getAll()),
+      idbRequest(tx.objectStore('hidden').getAll()),
+      idbRequest(tx.objectStore('meta').get(LOCAL_DB_PROFILE_KEY))
+    ]);
+    await idbTransactionDone(tx);
+    if (!profile && !movies.length && !hidden.length) return false;
+    const incoming={
+      ...(profile || {}),
+      movies:Object.fromEntries(movies.map(movie=>[String(movie.id),movie])),
+      hiddenTitles:Object.fromEntries(hidden.map(movie=>[String(movie.id),movie]))
+    };
+    const indexedStamp=dataTimestamp(incoming);
+    const currentStamp=dataTimestamp(exportCinelensData());
+    if (indexedStamp >= currentStamp || !Object.keys(state.movies || {}).length) {
+      replaceStateFromDataset(incoming);
+      if (profile?.drive) {
+        state.drive.enabled=!!profile.drive.enabled || !!profile.drive.fileId || !!profile.drive.manifestFileId;
+        state.drive.folderId=profile.drive.folderId || '';
+        state.drive.fileId=profile.drive.fileId || '';
+        state.drive.manifestFileId=profile.drive.manifestFileId || '';
+        state.drive.lastConnectedAt=profile.drive.lastConnectedAt || 0;
+      }
+    }
+    localDbMovieSignatureCache=new Map(movies.map(movie=>[String(movie.id),JSON.stringify(movie)]));
+    localDbHiddenSignatureCache=new Map(hidden.map(movie=>[String(movie.id),JSON.stringify(movie)]));
+    localDbProfileSignature=JSON.stringify(localProfilePayload());
+    return true;
+  } catch(error) {
+    console.warn('IndexedDB local load failed',error);
+    return false;
+  }
+}
+
+// ─────────────────────────────────────────────
 // PERSISTENCE
 // ─────────────────────────────────────────────
 function nowStamp() {
@@ -5760,24 +5917,26 @@ function stampCanonicalDriveFile(fileId) {
 
 function saveLocalState(opts={}) {
   ensureSyncMetadata({touchDataset:!opts.preserveUpdatedAt});
+  // localStorage now carries only the tiny bootstrap needed before IndexedDB opens.
+  // The title library itself is record-based IndexedDB, so a rating does not rewrite
+  // a multi-megabyte JSON string or silently fail on mobile storage limits.
   try {
-    const data = exportCinelensData();
-    localStorage.setItem('cinelens_v2',JSON.stringify({
-      ...data,
-      drive:{
-        enabled:state.drive.enabled,
-        folderId:state.drive.folderId,
-        fileId:state.drive.fileId,
-        canonicalFileId:state.drive.fileId,
-        lastConnectedAt:state.drive.lastConnectedAt
-      }
+    localStorage.setItem('cinelens_v2_bootstrap',JSON.stringify({
+      schema:'cinelens-local-v3',
+      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,sortMode:state.settings?.sortMode,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
+      drive:{enabled:state.drive.enabled,folderId:state.drive.folderId,fileId:state.drive.fileId,manifestFileId:state.drive.manifestFileId||'',lastConnectedAt:state.drive.lastConnectedAt},
+      updatedAt:state.meta?.updatedAt || nowStamp()
     }));
-  } catch(e) {}
+  } catch(e) { console.warn('Local bootstrap save failed',e); }
+  queueIndexedDbSave();
   updateStats();
 }
 function loadLocalState() {
   try {
-    const raw=localStorage.getItem('cinelens_v2');
+    // First run after this migration may still have a legacy full localStorage
+    // snapshot. Once IndexedDB has persisted it, startup reads only the tiny
+    // bootstrap and does not parse the old multi-megabyte JSON again.
+    const raw=localStorage.getItem('cinelens_v2_bootstrap') || localStorage.getItem('cinelens_v2');
     if (raw) {
       const s=JSON.parse(raw);
       if (s.movies) state.movies=s.movies;
@@ -5798,7 +5957,7 @@ function loadLocalState() {
       ensureDiscoveryCursor();
       if (s.drive) {
         state.drive.connected=false;
-        state.drive.enabled=!!s.drive.enabled || !!s.drive.fileId;
+        state.drive.enabled=!!s.drive.enabled || !!s.drive.fileId || !!s.drive.manifestFileId;
         state.drive.folderId=s.drive.folderId||'';
         state.drive.fileId=s.drive.canonicalFileId||s.drive.fileId||'';
         state.drive.lastConnectedAt=s.drive.lastConnectedAt||0;
@@ -5825,7 +5984,12 @@ function loadLocalState() {
 // ─────────────────────────────────────────────
 // GOOGLE DRIVE
 // ─────────────────────────────────────────────
-const DRIVE_FILE='cinelens_data.json';
+const DRIVE_FILE='cinelens_data.json'; // legacy monolithic backup; never deleted by v2 migration
+const DRIVE_MANIFEST_FILE='cinelens_manifest_v2.json';
+const DRIVE_PROFILE_FILE='cinelens_profile_v2.json';
+const DRIVE_CHUNK_PREFIX='cinelens_catalog_v2_';
+const DRIVE_SYNC_MODEL_V2='chunked-drive-v2';
+const DRIVE_CHUNK_SPAN_YEARS=5;
 const GOOGLE_CLIENT_ID='984899607223-h5oadg1cfb7o7ksfb4400vhidknk9soc.apps.googleusercontent.com';
 const DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
 let driveTokenClient=null;
@@ -5960,16 +6124,20 @@ async function connectDrive() {
       await requestDriveTokenInteractive();
     }
     state.drive.enabled=true;
-    // Always rescan after sign-in. A stale fileId can point to a small library
-    // created by an earlier broken mobile session.
-    const fileId=await findDriveFile();
-    if (fileId) {
-      state.drive.fileId=fileId;
-      // A browser being connected for the first time must hydrate from Drive
-      // before any local starter/partial records are allowed to participate.
-      await loadFromDrive({preferDrive: !startupFinalized || !libraryWritesUnlocked});
+    const manifest=await findDriveManifest();
+    if (manifest) {
+      state.drive.manifestFileId=manifest.id;
+      await loadFromChunkedDrive(await readDriveJson(manifest.id),{preferDrive: !startupFinalized || !libraryWritesUnlocked});
+    } else {
+      // Legacy data is read once only so it can be split into v2 chunks. The old
+      // monolithic file remains untouched as a recovery backup.
+      const fileId=await findDriveFile();
+      if (fileId) {
+        state.drive.fileId=fileId;
+        await loadFromDrive({preferDrive: !startupFinalized || !libraryWritesUnlocked});
+      }
+      await syncChunkedDrive(false);
     }
-    else await createDriveFile();
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
     saveLocalState({preserveUpdatedAt:true});
@@ -5991,15 +6159,28 @@ async function connectDrive() {
 
 async function restoreDriveSession(showFailure=false, opts={}) {
   if (driveRestoreInProgress) return false;
-  if (!state.drive.enabled || (!state.drive.fileId && !state.drive.accessToken)) return false;
+  if (!state.drive.enabled || (!state.drive.fileId && !state.drive.manifestFileId && !state.drive.accessToken)) return false;
   driveRestoreInProgress=true;
   setDriveStatus('syncing');
   try {
     await requestDriveTokenSilent();
-    // Always resolve the canonical Drive library after authentication. Do not
-    // trust a browser-stored fileId because it may identify an old tiny duplicate.
-    state.drive.fileId=await findDriveFile();
-    if (state.drive.fileId) await loadFromDrive({preferDrive: !!opts.preferDrive});
+    // V2 checks a tiny manifest first. It never downloads the catalogue merely
+    // to discover whether another device changed anything.
+    const manifest=await findDriveManifest();
+    if (manifest) {
+      state.drive.manifestFileId=manifest.id;
+      const data=await readDriveJson(manifest.id);
+      await loadFromChunkedDrive(data,{preferDrive:!!opts.preferDrive});
+    } else {
+      // One legacy full-file read is retained only for migration/recovery.
+      state.drive.fileId=await findDriveFile();
+      if (state.drive.fileId) {
+        await loadFromDrive({preferDrive: !!opts.preferDrive});
+        // One-time migration happens immediately while the canonical legacy data
+        // is already in memory. Subsequent opens use the manifest path only.
+        await syncChunkedDrive(false);
+      }
+    }
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
     saveLocalState({preserveUpdatedAt:true});
@@ -6096,6 +6277,295 @@ async function driveFetch(url, opts={}) {
   }
   return resp;
 }
+function driveChunkKey(movie) {
+  const year=Number(movie?.year);
+  const start=Number.isFinite(year) && year >= 1900 ? Math.floor(year / DRIVE_CHUNK_SPAN_YEARS) * DRIVE_CHUNK_SPAN_YEARS : 'unknown';
+  const range=typeof start === 'number' ? `${start}-${start + DRIVE_CHUNK_SPAN_YEARS - 1}` : 'unknown';
+  const language=String(movie?.language || 'Unknown').replace(/[^A-Za-z0-9]+/g,'_');
+  const format=movie?.format ? 'show' : 'movie';
+  return `${range}_${language}_${format}`;
+}
+
+function driveHash(value) {
+  const text=typeof value === 'string' ? value : JSON.stringify(value);
+  let hash=2166136261;
+  for (let i=0;i<text.length;i++) { hash^=text.charCodeAt(i); hash=Math.imul(hash,16777619); }
+  return `${(hash>>>0).toString(36)}-${text.length}`;
+}
+
+function catalogueMovieForDrive(movie) {
+  const copy={...movie};
+  // Personal state syncs in profile. It must not cause a catalogue-chunk upload.
+  delete copy.rating;
+  delete copy.watchlist;
+  delete copy.manualAdded;
+  delete copy.hiddenAt;
+  delete copy._updatedAt;
+  return copy;
+}
+
+function personalMovieState(movie) {
+  return {
+    rating:Number(movie?.rating || 0),
+    watchlist:!!movie?.watchlist,
+    manualAdded:!!movie?.manualAdded,
+    updatedAt:movie?._updatedAt || nowStamp()
+  };
+}
+
+function buildDriveChunks() {
+  const chunks={};
+  Object.values(state.movies || {}).forEach(movie => {
+    const key=driveChunkKey(movie);
+    if (!chunks[key]) chunks[key]={};
+    chunks[key][String(movie.id)]=catalogueMovieForDrive(movie);
+  });
+  return chunks;
+}
+
+function exportDriveProfile() {
+  const personalTitles={};
+  Object.values(state.movies || {}).forEach(movie => { personalTitles[String(movie.id)]=personalMovieState(movie); });
+  const profileMeta={...(state.meta || {}), driveSyncModel:DRIVE_SYNC_MODEL_V2};
+  delete profileMeta.driveChunkHashes;
+  delete profileMeta.driveProfileHash;
+  delete profileMeta.driveManifestFileId;
+  return {
+    schema:DRIVE_SYNC_MODEL_V2,
+    updatedAt:profileMeta.updatedAt || nowStamp(),
+    meta:profileMeta,
+    settings:state.settings,
+    personalTitles,
+    hiddenTitles:state.hiddenTitles,
+    wrongPicks:state.wrongPicks,
+    deletedMovieRecords:state.deletedMovieRecords,
+    rollingPoolExclusions:state.rollingPoolExclusions,
+    unblockedTitleRecords:state.unblockedTitleRecords,
+    legacyTagAliases:state.legacyTagAliases,
+    tagStats:state.tagStats,
+    tagNormalization:state.tagNormalization,
+    tasteStory:state.tasteStory,
+    discoveryCursor:state.discoveryCursor
+  };
+}
+
+function applyDriveProfile(profile,{merge=true}={}) {
+  if (!profile) return;
+  const local=exportDriveProfile();
+  const source=merge ? profile : {};
+  const chosenSettings=settingsTimestamp(profile) >= settingsTimestamp({settings:state.settings,meta:state.meta}) ? profile.settings : state.settings;
+  state.settings={...state.settings,...(chosenSettings || {})};
+  state.hiddenTitles=merge ? mergeRecordMap(state.hiddenTitles,profile.hiddenTitles || {}) : (profile.hiddenTitles || {});
+  state.wrongPicks=merge ? mergeRecordMap(state.wrongPicks,profile.wrongPicks || {}) : (profile.wrongPicks || {});
+  state.deletedMovieRecords=merge ? mergeRecordMap(state.deletedMovieRecords,profile.deletedMovieRecords || {}) : (profile.deletedMovieRecords || {});
+  state.rollingPoolExclusions=merge ? mergeRecordMap(state.rollingPoolExclusions,profile.rollingPoolExclusions || {}) : (profile.rollingPoolExclusions || {});
+  state.unblockedTitleRecords=merge ? mergeRecordMap(state.unblockedTitleRecords,profile.unblockedTitleRecords || {}) : (profile.unblockedTitleRecords || {});
+  state.legacyTagAliases={...(profile.legacyTagAliases || {}),...(state.legacyTagAliases || {})};
+  state.tagStats=profile.tagStats || state.tagStats;
+  state.tagNormalization=profile.tagNormalization || state.tagNormalization;
+  state.tasteStory=newestTasteStory(state.tasteStory,profile.tasteStory || {});
+  state.discoveryCursor=mergeDiscoveryCursor(state.discoveryCursor,profile.discoveryCursor || {}).merged;
+  Object.entries(profile.personalTitles || {}).forEach(([id,remotePersonal]) => {
+    const movie=state.movies?.[id];
+    if (!movie) return;
+    const localPersonal=personalMovieState(movie);
+    const chosen=recordTimestamp({_updatedAt:remotePersonal.updatedAt}) >= recordTimestamp({_updatedAt:localPersonal.updatedAt}) ? remotePersonal : localPersonal;
+    movie.rating=Number(chosen.rating || 0);
+    movie.watchlist=!!chosen.watchlist;
+    movie.manualAdded=!!chosen.manualAdded;
+    if (chosen.updatedAt) movie._updatedAt=chosen.updatedAt;
+  });
+  if (profile.meta) state.meta={...state.meta,...profile.meta};
+  invalidateTagCaches();
+}
+
+async function driveListByName(name) {
+  const q=`name='${name.replace(/'/g,"\\'")}' and trashed=false`;
+  const response=await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&orderBy=modifiedTime%20desc&pageSize=20&fields=files(id,name,modifiedTime,description)`);
+  if (!response.ok) throw new Error(`Drive file search failed (${response.status})`);
+  return (await response.json()).files || [];
+}
+
+async function readDriveJson(fileId) {
+  const response=await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+  if (!response.ok) throw new Error(`Drive JSON read failed (${response.status})`);
+  return response.json();
+}
+
+async function uploadDriveJson(fileId,data) {
+  const response=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  if (!response.ok) throw new Error(`Drive JSON upload failed (${response.status})`);
+  return response.json().catch(()=>({id:fileId}));
+}
+
+async function createDriveJson(name,data) {
+  const form=new FormData();
+  form.append('metadata',new Blob([JSON.stringify({name,mimeType:'application/json'})],{type:'application/json'}));
+  form.append('file',new Blob([JSON.stringify(data)],{type:'application/json'}));
+  const response=await driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime',{method:'POST',body:form});
+  if (!response.ok) throw new Error(`Drive JSON create failed (${response.status})`);
+  return response.json();
+}
+
+async function findDriveManifest() {
+  const files=await driveListByName(DRIVE_MANIFEST_FILE);
+  return files[0] || null;
+}
+
+async function readChunkedDriveState(manifest) {
+  const profile=await readDriveJson(manifest.profile.id);
+  const chunkEntries=Object.entries(manifest.chunks || {});
+  const chunks=await Promise.all(chunkEntries.map(async ([key,info]) => [key,await readDriveJson(info.id)]));
+  const movies={};
+  chunks.forEach(([,chunk]) => Object.assign(movies,chunk.movies || chunk));
+  return {profile,movies};
+}
+
+async function migrateLegacyDriveToChunked() {
+  const chunks=buildDriveChunks();
+  const manifest={schema:DRIVE_SYNC_MODEL_V2,version:2,updatedAt:nowStamp(),profile:null,chunks:{},legacyBackupFileId:state.drive.fileId || ''};
+  const profile=exportDriveProfile();
+  const profileFile=await createDriveJson(DRIVE_PROFILE_FILE,profile);
+  manifest.profile={id:profileFile.id,hash:driveHash(profile),updatedAt:profile.updatedAt};
+  for (const [key,movies] of Object.entries(chunks)) {
+    const payload={schema:DRIVE_SYNC_MODEL_V2,chunk:key,movies};
+    const file=await createDriveJson(`${DRIVE_CHUNK_PREFIX}${key}.json`,payload);
+    manifest.chunks[key]={id:file.id,hash:driveHash(payload),updatedAt:nowStamp(),count:Object.keys(movies).length};
+  }
+  const manifestFile=await createDriveJson(DRIVE_MANIFEST_FILE,manifest);
+  state.drive.manifestFileId=manifestFile.id;
+  state.meta=state.meta || {};
+  state.meta.driveSyncModel=DRIVE_SYNC_MODEL_V2;
+  state.meta.driveManifestFileId=manifestFile.id;
+  state.meta.driveChunkHashes=Object.fromEntries(Object.entries(manifest.chunks).map(([key,info])=>[key,info.hash]));
+  state.meta.driveProfileHash=manifest.profile.hash;
+  return manifest;
+}
+
+async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
+  const localHashes=state.meta?.driveChunkHashes || {};
+  const localProfileHash=state.meta?.driveProfileHash || '';
+  const remoteChunks=manifest.chunks || {};
+  const needsFullLoad=!Object.keys(state.movies || {}).length;
+  const changedKeys=Object.keys(remoteChunks).filter(key => needsFullLoad || localHashes[key] !== remoteChunks[key].hash);
+  const profileChanged=needsFullLoad || localProfileHash !== manifest.profile?.hash;
+
+  const incomingProfile=profileChanged && manifest.profile?.id ? await readDriveJson(manifest.profile.id) : null;
+  for (const key of changedKeys) {
+    const info=remoteChunks[key];
+    const payload=await readDriveJson(info.id);
+    const incoming=payload.movies || payload || {};
+    // A stable chunk is authoritative only for that segment. Replace records in
+    // that segment, then apply personal overlays after all required chunks exist.
+    Object.keys(state.movies || {}).forEach(id => { if (driveChunkKey(state.movies[id]) === key) delete state.movies[id]; });
+    Object.assign(state.movies,incoming);
+  }
+  if (incomingProfile) applyDriveProfile(incomingProfile,{merge:!preferDrive});
+  state.drive.manifestFileId=state.drive.manifestFileId || state.meta?.driveManifestFileId || '';
+  state.meta=state.meta || {};
+  state.meta.driveSyncModel=DRIVE_SYNC_MODEL_V2;
+  state.meta.driveChunkHashes=Object.fromEntries(Object.entries(remoteChunks).map(([key,info])=>[key,info.hash]));
+  state.meta.driveProfileHash=manifest.profile?.hash || '';
+  state.meta.driveManifestFileId=state.drive.manifestFileId || state.meta.driveManifestFileId || '';
+  Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
+  invalidateTagCaches();
+  rebuildTagBrain();
+  computeTagWeights();
+  saveLocalState({preserveUpdatedAt:true});
+  render();
+  return {changedKeys,profileChanged};
+}
+
+async function syncChunkedDrive(manual=false) {
+  let manifestFile=state.drive.manifestFileId ? {id:state.drive.manifestFileId} : await findDriveManifest();
+  if (!manifestFile) {
+    await migrateLegacyDriveToChunked();
+    return;
+  }
+  state.drive.manifestFileId=manifestFile.id;
+  let manifest=await readDriveJson(manifestFile.id);
+  if (manifest.schema !== DRIVE_SYNC_MODEL_V2) throw new Error('Unsupported CineLens Drive manifest');
+  const chunks=buildDriveChunks();
+  const cachedHashes=state.meta?.driveChunkHashes || {};
+  const remoteChunks=manifest.chunks || {};
+  const nextChunks={...remoteChunks};
+
+  for (const key of new Set([...Object.keys(chunks),...Object.keys(remoteChunks)])) {
+    const localPayload={schema:DRIVE_SYNC_MODEL_V2,chunk:key,movies:chunks[key] || {}};
+    const localHash=driveHash(localPayload);
+    const remote=remoteChunks[key];
+    const cached=cachedHashes[key] || '';
+    const localChanged=localHash !== cached;
+    const remoteChanged=!!remote && remote.hash !== cached;
+    if (!remote) {
+      const file=await createDriveJson(`${DRIVE_CHUNK_PREFIX}${key}.json`,localPayload);
+      nextChunks[key]={id:file.id,hash:localHash,updatedAt:nowStamp(),count:Object.keys(localPayload.movies).length};
+      continue;
+    }
+    if (!localChanged && remoteChanged) {
+      const payload=await readDriveJson(remote.id);
+      Object.keys(state.movies || {}).forEach(id => { if (driveChunkKey(state.movies[id]) === key) delete state.movies[id]; });
+      Object.assign(state.movies,payload.movies || {});
+      nextChunks[key]=remote;
+      continue;
+    }
+    if (localChanged && remoteChanged && localHash !== remote.hash) {
+      const remotePayload=await readDriveJson(remote.id);
+      const merged=mergeRecordMap(localPayload.movies,remotePayload.movies || {});
+      const mergedPayload={schema:DRIVE_SYNC_MODEL_V2,chunk:key,movies:merged};
+      const mergedHash=driveHash(mergedPayload);
+      if (mergedHash !== remote.hash) await uploadDriveJson(remote.id,mergedPayload);
+      Object.keys(state.movies || {}).forEach(id => { if (driveChunkKey(state.movies[id]) === key) delete state.movies[id]; });
+      Object.assign(state.movies,merged);
+      nextChunks[key]={...remote,hash:mergedHash,updatedAt:nowStamp(),count:Object.keys(merged).length};
+      continue;
+    }
+    if (localChanged && localHash !== remote.hash) {
+      await uploadDriveJson(remote.id,localPayload);
+      nextChunks[key]={...remote,hash:localHash,updatedAt:nowStamp(),count:Object.keys(localPayload.movies).length};
+    }
+  }
+
+  const localProfile=exportDriveProfile();
+  const localProfileHash=driveHash(localProfile);
+  const cachedProfileHash=state.meta?.driveProfileHash || '';
+  const remoteProfile=manifest.profile;
+  if (!remoteProfile) {
+    const file=await createDriveJson(DRIVE_PROFILE_FILE,localProfile);
+    manifest.profile={id:file.id,hash:localProfileHash,updatedAt:nowStamp()};
+  } else {
+    const localChanged=localProfileHash !== cachedProfileHash;
+    const remoteChanged=remoteProfile.hash !== cachedProfileHash;
+    if (!localChanged && remoteChanged) {
+      applyDriveProfile(await readDriveJson(remoteProfile.id),{merge:true});
+    } else if (localChanged && remoteChanged && localProfileHash !== remoteProfile.hash) {
+      const remote=await readDriveJson(remoteProfile.id);
+      applyDriveProfile(remote,{merge:true});
+      const merged=exportDriveProfile();
+      const mergedHash=driveHash(merged);
+      await uploadDriveJson(remoteProfile.id,merged);
+      manifest.profile={...remoteProfile,hash:mergedHash,updatedAt:nowStamp()};
+    } else if (localChanged && localProfileHash !== remoteProfile.hash) {
+      await uploadDriveJson(remoteProfile.id,localProfile);
+      manifest.profile={...remoteProfile,hash:localProfileHash,updatedAt:nowStamp()};
+    }
+  }
+  manifest.schema=DRIVE_SYNC_MODEL_V2;
+  manifest.version=2;
+  manifest.updatedAt=nowStamp();
+  manifest.chunks=nextChunks;
+  await uploadDriveJson(manifestFile.id,manifest);
+  state.meta=state.meta || {};
+  state.meta.driveSyncModel=DRIVE_SYNC_MODEL_V2;
+  state.meta.driveManifestFileId=manifestFile.id;
+  state.meta.driveChunkHashes=Object.fromEntries(Object.entries(nextChunks).map(([key,info])=>[key,info.hash]));
+  state.meta.driveProfileHash=manifest.profile?.hash || driveHash(exportDriveProfile());
+  rebuildTagBrain();
+  computeTagWeights();
+  saveLocalState({preserveUpdatedAt:true});
+  if (manual) showToast('Drive synchronized.', 'success');
+}
+
 async function readDriveDataset(fileId) {
   const response=await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
   if (!response.ok) throw new Error(`Drive library read failed (${response.status})`);
@@ -6228,32 +6698,16 @@ async function syncDrive(manual=false) {
       }
     }
 
-    // The canonical Drive file ID is already persisted. Re-scanning and
-    // downloading every same-named Drive file on each small save grows linearly
-    // with duplicates and is unnecessary once migration is complete.
-    if (!state.drive.fileId) {
-      const canonicalId=await findDriveFile();
-      if (canonicalId) state.drive.fileId=canonicalId;
-    }
-    if (!state.drive.fileId) {
-      await createDriveFile();
-      if (!state.drive.fileId) return;
-    }
-
     setDriveStatus('syncing');
-    const remote=await readDriveDataset(state.drive.fileId);
-    const convergence=mergeCanonicalDatasets(exportCinelensData(), remote);
-    replaceStateFromDataset(convergence.dataset);
-    stampCanonicalDriveFile(state.drive.fileId);
-    rebuildTagBrain();
-    computeTagWeights();
-    await uploadDriveData();
+    // The first sync after installing v2 performs a one-time split from the
+    // legacy file. All later syncs read one tiny manifest and transfer only the
+    // profile and catalogue chunks whose hashes changed.
+    await syncChunkedDrive(manual);
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
     saveLocalState({preserveUpdatedAt:true});
     render();
     setDriveStatus('connected');
-    if (manual) showToast(convergence.source === 'record-merge' ? 'Drive synchronized.' : 'Drive reset synchronized.', 'success');
   } catch(error) {
     console.error('Drive sync failed', error);
     state.drive.connected=false;
