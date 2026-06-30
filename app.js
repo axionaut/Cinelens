@@ -1624,14 +1624,21 @@ function collapseDuplicateMovies(collection=state.movies) {
 }
 
 function obviousNonMovieTitle(title) {
-  return /^(list of|category:|template:|wikipedia:|portal:)/i.test(title)
-    || /\b(film series|media franchise|franchise|universe|timeline|soundtrack|discography|filmography|list)\b/i.test(title);
+  const value = String(title || '').trim();
+  // Treat only actual Wikipedia list/namespace pages as non-title pages.
+  // A normal title may legitimately contain words such as “List”, “Timeline”
+  // or “Universe” (for example, The Bucket List) and must not be rejected.
+  return /^(?:list of|category:|template:|wikipedia:|portal:)/i.test(value)
+    || /^(?:filmography|discography|soundtrack)\s*(?:of|:)\b/i.test(value);
 }
 
-function isFranchiseOverviewPage(pageTitle, extract, cats=[]) {
-  if (obviousNonMovieTitle(pageTitle)) return true;
+function isFranchiseOverviewPage(pageTitle, extract, cats=[], opts={}) {
+  // A pasted Wikipedia URL is an explicit request for that page. Keep the
+  // actual content/type/language checks below, but do not reject it merely
+  // because a broad title heuristic thinks a word in its title looks generic.
+  if (!opts.directLink && obviousNonMovieTitle(pageTitle)) return true;
   const lead = String(extract || '').slice(0, 700);
-  if (/\b(film series|media franchise|shared universe)\b/i.test(pageTitle)) return true;
+  if (!opts.directLink && /\b(film series|media franchise|shared universe)\b/i.test(pageTitle)) return true;
   if ((cats || []).some(categoryMarksOverviewPage)) return true;
   return /^\s*.+\s+is an? (?:American |British |Indian |English-language |Hindi-language )?(?:media franchise|film series|shared universe)\b/i.test(lead);
 }
@@ -2794,7 +2801,11 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
   try {
     const diagnostics = {};
     const movie = opts.preloaded || (opts.pageId
-      ? await fetchWikiPageIdAcrossModes(opts.pageId, mode === 'all' ? ['all'] : [mode, 'all'], {ai:false, diagnostics})
+      ? await fetchWikiPageIdAcrossModes(opts.pageId, mode === 'all' ? ['all'] : [mode, 'all'], {
+          ai:false,
+          diagnostics,
+          directLink:!!opts.directUrl
+        })
       : rawUrl
         ? await refreshTitleFromWikipedia(existing, {url:rawUrl, mode, diagnostics, acceptDifferentTitle:true, ai:false})
         : await fetchWikiTitleAcrossModes(title, mode === 'all' ? ['all'] : [mode, 'all'], diagnostics, {ai:false}));
@@ -2976,7 +2987,8 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   const cats = (page.categories || []).map(c => c.title.toLowerCase());
   const wikitext = page.revisions?.[0]?.slots?.main?.content || page.revisions?.[0]?.['*'] || '';
   const infobox = infoboxMediaInfo(wikitext);
-  if (isFranchiseOverviewPage(pageTitle, extract, cats)) return rejectWikiParse(diagnostics, 'franchise or overview page, not one title');
+  const directLink = !!opts.directLink;
+  if (isFranchiseOverviewPage(pageTitle, extract, cats, {directLink})) return rejectWikiParse(diagnostics, 'franchise or overview page, not one title');
   const catText = cats.join(' ');
   const leadText = extract.slice(0, 1400);
   const mediaEvidence = pageMediaEvidence(leadText, cats);
@@ -4905,7 +4917,11 @@ async function refreshTitleFromWikipedia(movie=null, opts={}) {
   }
 
   if (urlTitle) {
-    const fresh = await fetchWikiTitleAcrossModes(urlTitle, modes, diagnostics, {ai:opts.ai !== false, manualLanguageOverride:!!opts.manualLanguageOverride});
+    const fresh = await fetchWikiTitleAcrossModes(urlTitle, modes, diagnostics, {
+      ai:opts.ai !== false,
+      manualLanguageOverride:!!opts.manualLanguageOverride,
+      directLink:!!rawUrl
+    });
     if (fresh && (acceptDifferentTitle || freshMatchesTitleRecord(fresh, movie, urlTitle))) return fresh;
   }
 
