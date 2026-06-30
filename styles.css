@@ -638,3 +638,45 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
   .maintenance-health { margin:6px 0; }
   .maintenance-actions { gap:6px; }
 }
+
+
+/* Unified title search: an explicit clear control works on desktop and mobile.
+   Do not rely on the browser-specific native type=search cancel icon. */
+.title-search-wrap{
+  position:relative;
+  display:inline-flex;
+  align-items:center;
+  min-width:0;
+}
+.title-search-wrap .title-search-input{
+  width:100%;
+  padding-right:30px;
+}
+.title-search-clear{
+  position:absolute;
+  right:4px;
+  top:50%;
+  transform:translateY(-50%);
+  width:24px;
+  height:24px;
+  border:0;
+  border-radius:50%;
+  padding:0;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  background:transparent;
+  color:var(--muted);
+  font-family:Arial,sans-serif;
+  font-size:20px;
+  line-height:1;
+  cursor:pointer;
+}
+.title-search-clear:hover,
+.title-search-clear:focus-visible{color:var(--accent);background:rgba(255,204,51,.10);outline:none}
+.title-search-clear[hidden]{display:none!important}
+@media(max-width:768px){
+  .settings-bar .title-search-wrap{width:100%;min-width:0}
+  .title-search-wrap .title-search-input{width:100%}
+  .title-search-clear{width:28px;height:28px;font-size:22px;right:3px}
+}

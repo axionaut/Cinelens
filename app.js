@@ -1656,6 +1656,56 @@ function isPersonOrOrganizationPage(pageTitle, leadText, cats=[]) {
   return false;
 }
 
+function stripWikiMarkup(value='') {
+  return String(value || '')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<ref[\s\S]*?<\/ref\s*>/gi, ' ')
+    .replace(/<ref[^>]*\/>/gi, ' ')
+    .replace(/\{\{[^{}]*\}\}/g, ' ')
+    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2')
+    .replace(/\[\[([^\]]+)\]\]/g, '$1')
+    .replace(/'''[^']*'''/g, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function infoboxField(wikitext='', fieldName='') {
+  const text = String(wikitext || '');
+  if (!text || !fieldName) return '';
+  const match = text.match(new RegExp(`\\|\\s*${fieldName.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')}\\s*=\\s*([^\\n]+)`, 'i'));
+  return match ? stripWikiMarkup(match[1]) : '';
+}
+
+function infoboxMediaInfo(wikitext='') {
+  const text = String(wikitext || '');
+  const head = text.slice(0, 18000);
+  const kind = (head.match(/\{\{\s*infobox\s*([^\n|}]+)/i) || [])[1] || '';
+  const normalizedKind = stripWikiMarkup(kind).toLowerCase();
+  const language = infoboxField(head, 'language');
+  const country = infoboxField(head, 'country');
+  const type = /\b(film|movie)\b/.test(normalizedKind) ? 'film'
+    : /\b(television|tv|web series|series|miniseries|show|program)\b/.test(normalizedKind) ? 'show'
+    : '';
+  return {type, language, country, rawKind:normalizedKind};
+}
+
+function explicitDisallowedLanguageEvidence(cats=[], leadText='', infoboxLanguage='') {
+  const other = '(?:afrikaans|arabic|bengali|cantonese|chinese|danish|dutch|french|german|greek|gujarati|hebrew|italian|japanese|kannada|korean|malayalam|mandarin|marathi|persian|polish|portuguese|punjabi|russian|spanish|tamil|telugu|thai|turkish|urdu|vietnamese)';
+  const categoryAndInfobox = `${(cats || []).join(' ')} ${infoboxLanguage || ''}`.toLowerCase();
+  const explicitLead = String(leadText || '').toLowerCase();
+  return new RegExp(`\\b${other}(?:[-\\s]language)?\\b`, 'i').test(categoryAndInfobox)
+    || new RegExp(`\\b${other}-language\\s+(?:film|television|tv|web|series|show|miniseries)\\b`, 'i').test(explicitLead);
+}
+
+function languageFromInfobox(info) {
+  const value = String(info?.language || '').toLowerCase();
+  if (!value) return '';
+  if (/\bhindi\b/.test(value)) return 'Hindi';
+  if (/\benglish\b/.test(value)) return 'English';
+  return 'Other';
+}
+
 function hasAllowedLanguageEvidence(cats, leadText) {
   const catText = (cats || []).join(' ');
   return {
@@ -2202,17 +2252,26 @@ async function fetchShowSourceTitles(laneKey='englishShows') {
   return newestTitleFirst([...new Set(titles)]);
 }
 
-async function fetchWikiSearchTitles(query, opts={}) {
+async function fetchWikiSearchResults(query, opts={}) {
   const q = (query || '').trim();
   if (!q) return [];
   try {
     const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&srlimit=8&format=json&origin=*`;
     const data = await wikiApiJson(url);
-    return (data.query?.search || []).map(item => item.title);
+    return (data.query?.search || []).map(item => ({
+      title:item.title,
+      pageId:String(item.pageid || ''),
+      snippet:stripWikiMarkup(item.snippet || '')
+    }));
   } catch(e) {
     if (opts.throwOnError) throw e;
     return [];
   }
+}
+
+async function fetchWikiSearchTitles(query, opts={}) {
+  const results = await fetchWikiSearchResults(query, opts);
+  return results.map(item => item.title);
 }
 
 
@@ -2660,7 +2719,11 @@ async function addWikiSearchResult(index) {
   const result = wikiSearchResults[index];
   if (!result) return false;
   const title = typeof result === 'string' ? result : result.title;
-  return fetchUnifiedWikiResult(title, '', {preloaded:result.preloaded || null, manualLanguageOverride:true});
+  return fetchUnifiedWikiResult(title, '', {
+    preloaded:result.preloaded || null,
+    pageId:result.pageId || '',
+    directUrl:result.wikiUrl || ''
+  });
 }
 
 async function searchWikipediaFromUnifiedInput() {
@@ -2680,19 +2743,25 @@ async function searchWikipediaFromUnifiedInput() {
     wikiSearchQuery = query;
     const diagnostics = {};
     const exactTitle = urlTitle || query;
-    const exactMovie = await fetchWikiTitleAcrossModes(exactTitle, ['all'], diagnostics, {ai:false, manualLanguageOverride:true});
+    if (urlTitle) {
+      // A pasted Wikipedia link is an add request, not merely a text search.
+      await fetchUnifiedWikiResult(urlTitle, query, {directUrl:query});
+      return;
+    }
+    const exactMovie = await fetchWikiTitleAcrossModes(exactTitle, ['all'], diagnostics, {ai:false});
     if (exactMovie) {
       wikiSearchResults = [{
         title:exactMovie.wikiTitle || exactMovie.pageTitle || exactTitle,
         wikiUrl:exactMovie.wikiUrl || wikiUrlFromTitle(exactMovie.wikiTitle || exactTitle),
+        pageId:exactMovie.wikiPageId || '',
         preloaded:exactMovie
       }];
       renderWikiSearchResults();
       return;
     }
-    wikiSearchResults = (await fetchWikiSearchTitles(exactTitle, {throwOnError:true}))
-      .filter(title => !obviousNonMovieTitle(title))
-      .map(title => ({title, wikiUrl:wikiUrlFromTitle(title)}))
+    wikiSearchResults = (await fetchWikiSearchResults(exactTitle, {throwOnError:true}))
+      .filter(result => !obviousNonMovieTitle(result.title))
+      .map(result => ({...result, wikiUrl:wikiUrlFromTitle(result.title)}))
       .slice(0, 8);
     renderWikiSearchResults();
     if (!wikiSearchResults.length) showToast(`Wikipedia returned no matching title for "${query}".`, '');
@@ -2724,9 +2793,11 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
   showFetchProgress('Fetching from Wikipedia...', 12, title);
   try {
     const diagnostics = {};
-    const movie = opts.preloaded || (rawUrl
-      ? await refreshTitleFromWikipedia(existing, {url:rawUrl, mode, diagnostics, acceptDifferentTitle:true, manualLanguageOverride:true})
-      : await fetchWikiTitleAcrossModes(title, mode === 'all' ? ['all'] : [mode, 'all'], diagnostics, {manualLanguageOverride:opts.manualLanguageOverride !== false}));
+    const movie = opts.preloaded || (opts.pageId
+      ? await fetchWikiPageIdAcrossModes(opts.pageId, mode === 'all' ? ['all'] : [mode, 'all'], {ai:false, diagnostics})
+      : rawUrl
+        ? await refreshTitleFromWikipedia(existing, {url:rawUrl, mode, diagnostics, acceptDifferentTitle:true, ai:false})
+        : await fetchWikiTitleAcrossModes(title, mode === 'all' ? ['all'] : [mode, 'all'], diagnostics, {ai:false}));
     if (!movie) throw new Error(diagnostics.reason || 'Wikipedia page is not a usable movie or show');
     if (isMovieHidden(movie)) throw new Error('Title is hidden or blocked');
     existing = existing || state.movies[movie.id] || findExistingMovieByIdentity(movie);
@@ -2867,7 +2938,7 @@ function saveManualTagChoices() {
 }
 
 async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) {
-  const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&format=json&origin=*`;
+  const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages|revisions&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&rvprop=content&rvslots=main&pithumbsize=360&formatversion=2&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, wikiTitle, mode, diagnostics, opts);
   if (movie && opts.ai !== false) await applyAiTags(movie);
@@ -2877,7 +2948,7 @@ async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) 
 async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
   const clean = String(pageId || '').replace(/^wiki_/, '');
   if (!clean) return null;
-  const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&format=json&origin=*`;
+  const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages|revisions&explaintext=1&exlimit=1&cllimit=80&rvprop=content&rvslots=main&pithumbsize=360&formatversion=2&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, clean, mode, opts.diagnostics || null, opts);
   if (movie && opts.ai !== false) await applyAiTags(movie);
@@ -2903,35 +2974,42 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   const id = 'wiki_' + wikiPageId;
 
   const cats = (page.categories || []).map(c => c.title.toLowerCase());
+  const wikitext = page.revisions?.[0]?.slots?.main?.content || page.revisions?.[0]?.['*'] || '';
+  const infobox = infoboxMediaInfo(wikitext);
   if (isFranchiseOverviewPage(pageTitle, extract, cats)) return rejectWikiParse(diagnostics, 'franchise or overview page, not one title');
   const catText = cats.join(' ');
   const leadText = extract.slice(0, 1400);
-  if (isPersonOrOrganizationPage(pageTitle, leadText, cats)) return rejectWikiParse(diagnostics, 'person or organization page, not a movie/show');
   const mediaEvidence = pageMediaEvidence(leadText, cats);
   const preliminaryFormat = inferPageFormat(pageTitle, leadText, cats, mediaEvidence);
+  const infoboxMedia = infobox.type === 'film' || infobox.type === 'show';
+  // A genuine film/show infobox is stronger evidence than a loose lead sentence.
+  // This prevents an ambiguous film title from being rejected merely because the
+  // page also names its creator or production company in the first sentence.
+  if (isPersonOrOrganizationPage(pageTitle, leadText, cats) && !infoboxMedia && !mediaEvidence.film && !mediaEvidence.show && !preliminaryFormat.strong) return rejectWikiParse(diagnostics, 'person or organization page, not a movie/show');
   const trustedLane = opts.trustedLane || null;
-  if (!mediaEvidence.film && !mediaEvidence.show && !preliminaryFormat.strong && !trustedLane) return rejectWikiParse(diagnostics, 'no film/show evidence');
+  if (!mediaEvidence.film && !mediaEvidence.show && !preliminaryFormat.strong && !infoboxMedia && !trustedLane) return rejectWikiParse(diagnostics, 'no film/show evidence');
   const storyText = extractNarrativeSection(extract);
   if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return rejectWikiParse(diagnostics, 'no usable narrative section');
 
-  let language = '';
+  let language = languageFromInfobox(infobox);
   const languageEvidence = hasAllowedLanguageEvidence(cats, leadText);
   const englishEvidence = languageEvidence.english;
   const hindiEvidence = languageEvidence.hindi;
-  if (hindiEvidence) language = 'Hindi';
-  else if (englishEvidence) language = 'English';
-  else if (trustedLane?.language) language = trustedLane.language;
-  else if (opts.manualLanguageOverride) language = 'Other';
+  if (explicitDisallowedLanguageEvidence(cats, leadText, infobox.language)) return rejectWikiParse(diagnostics, 'title language is not Hindi or English');
+  if (language === 'Other') return rejectWikiParse(diagnostics, 'title language is not Hindi or English');
+  if (!language && hindiEvidence) language = 'Hindi';
+  else if (!language && englishEvidence) language = 'English';
+  else if (!language && trustedLane?.language) language = trustedLane.language;
 
   const formatDecision = preliminaryFormat;
-  const format = formatDecision.strong ? formatDecision.format : (trustedLane ? (trustedLane.mode === 'shows' ? 'series' : null) : formatDecision.format);
+  const format = formatDecision.strong ? formatDecision.format : (infobox.type === 'show' ? 'series' : (trustedLane ? (trustedLane.mode === 'shows' ? 'series' : null) : formatDecision.format));
   if (!format && !mediaEvidence.film && trustedLane?.mode !== 'movies' && !(formatDecision.strong && formatDecision.format === null)) return rejectWikiParse(diagnostics, 'not a movie page');
   if (mode === 'movies' && format) return rejectWikiParse(diagnostics, 'title is a show, not a movie');
   if (mode === 'shows' && !format) return rejectWikiParse(diagnostics, 'title is a movie, not a show');
 
   const year = deriveReleaseYear(leadText, extract, cats, format);
 
-  if (language !== 'English' && language !== 'Hindi' && !opts.manualLanguageOverride) return rejectWikiParse(diagnostics, 'English or Hindi language evidence missing');
+  if (language !== 'English' && language !== 'Hindi') return rejectWikiParse(diagnostics, 'English or Hindi language evidence missing');
 
   let country = language === 'Other' ? 'Unknown' : 'USA';
   if (language === 'Hindi') country = 'India';
@@ -3569,6 +3647,7 @@ function updateControlDeck() {
   if (shuffleBtn) shuffleBtn.hidden = (state.settings.sortMode || 'recommended') !== 'random';
   const titleSearch=document.getElementById('titleSearch');
   if (titleSearch && titleSearch.value !== (state.settings.titleSearch || '')) titleSearch.value=state.settings.titleSearch || '';
+  syncUnifiedSearchClearButton();
   const deck=document.querySelector('.control-deck');
   if (deck) deck.classList.toggle('collapsed', !!state.settings.controlDeckCollapsed);
   const toggle=document.getElementById('controlToggle');
@@ -3604,18 +3683,28 @@ function shuffleAgain() {
   updateControlDeck();
 }
 
+function syncUnifiedSearchClearButton() {
+  const button = document.getElementById('clearUnifiedSearchBtn');
+  if (!button) return;
+  const value = String(document.getElementById('titleSearch')?.value || state.settings?.titleSearch || '').trim();
+  button.hidden = !value;
+}
+
 function clearUnifiedTitleSearch() {
   state.settings.titleSearch = '';
   wikiSearchQuery = '';
   wikiSearchResults = [];
   const input = document.getElementById('titleSearch');
   if (input) input.value = '';
+  syncUnifiedSearchClearButton();
   renderWikiSearchResults();
   saveSettingsState();
+  renderActiveCards();
 }
 
 function updateTitleSearch(value) {
   state.settings.titleSearch = String(value || '').trim();
+  syncUnifiedSearchClearButton();
   if (!state.settings.titleSearch || state.settings.titleSearch !== wikiSearchQuery) {
     wikiSearchResults = [];
     renderWikiSearchResults();
