@@ -55,7 +55,7 @@
       <button class="tab-btn" onclick="setTab('movie',this)">Movies</button>
       <button class="tab-btn" onclick="setTab('show',this)">Shows</button>
       <button class="tab-btn" onclick="setTab('rated',this)">Rated</button>
-      <button class="tab-btn" onclick="setTab('watchlist',this)">Watchlist</button>
+      <button class="tab-btn" onclick="setTab('recent',this)">Recently Added</button>
       <button class="tab-btn" onclick="setTab('tags',this)">Tags</button>
       <button class="tab-btn" onclick="setTab('pool',this)">Pool</button>
       <button class="tab-btn" onclick="setTab('hidden',this)">Hidden</button>
@@ -135,7 +135,7 @@
     </select>
     <button class="tb-filter-btn" id="shuffleAgainBtn" onclick="shuffleAgain()" hidden>Shuffle again</button>
     <label>Search</label>
-    <span class="title-search-wrap"><input class="title-search-input" id="titleSearch" type="search" placeholder="search title or paste Wikipedia link" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)"><button class="title-search-clear" id="clearUnifiedSearchBtn" type="button" onclick="clearUnifiedTitleSearch()" aria-label="Clear search" hidden>×</button></span>
+    <input class="title-search-input" id="titleSearch" type="search" placeholder="search local + Wikipedia" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)">
     <button class="tb-filter-btn" id="unifiedSearchBtn" onclick="searchWikipediaFromUnifiedInput()">search wiki</button>
     <button class="tb-filter-btn tag-delete-mode" id="tagDeleteModeBtn" onclick="toggleTagDeleteMode()">Tag clicks: explore</button>
   </div>
@@ -179,13 +179,13 @@
   </div>
   <div class="movies-grid rated-only" id="ratedGrid"></div>
 
-  <hr class="sep watchlist-only" id="watchlistSep">
+  <hr class="sep watchlist-only" id="recentSep">
 
-  <div class="section-header watchlist-only" id="watchlistHeader">
-    <div class="section-title">Watchlist</div>
-    <div class="section-count" id="watchlistCount">nothing saved yet</div>
+  <div class="section-header watchlist-only" id="recentHeader">
+    <div class="section-title">Recently Added</div>
+    <div class="section-count" id="recentCount">nothing added yet</div>
   </div>
-  <div class="movies-grid watchlist-only" id="watchlistGrid"></div>
+  <div class="movies-grid watchlist-only" id="recentGrid"></div>
 
 
   <hr class="sep audit-only" id="poolSep">

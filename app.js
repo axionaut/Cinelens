@@ -1303,9 +1303,11 @@ function runStartupMaintenance() {
   const run = () => {
     try {
       const removedHindiShows = purgeDisallowedHindiShows({recordWrongPicks:true});
+      const addedAtMigrated = ensureAddedAtMetadata();
+      const retiredWatchlist = retireWatchlistForRecentlyAdded();
       const changed = cleanContaminatedTags(true);
       const rotation = pruneRollingCandidatePool({reason:'startup'});
-      if (removedHindiShows || changed || rotation.evicted) {
+      if (removedHindiShows || addedAtMigrated || retiredWatchlist || changed || rotation.evicted) {
         saveLocalState();
         queueDriveSync();
         render();
@@ -1367,7 +1369,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   // after the IndexedDB write has been queued.
   if (libraryRecordCount() > 0) queueIndexedDbSave(0);
   const startupRemovedHindiShows = purgeDisallowedHindiShows({recordWrongPicks:true});
-  if (startupRemovedHindiShows) saveLocalState({preserveUpdatedAt:true});
+  const startupAddedAtMigrated = ensureAddedAtMetadata();
+  const startupRetiredWatchlist = retireWatchlistForRecentlyAdded();
+  if (startupRemovedHindiShows || startupAddedAtMigrated || startupRetiredWatchlist) saveLocalState({preserveUpdatedAt:true});
   startupInitialLibraryPresent = libraryRecordCount() > 0;
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   // A Drive-enabled device must not treat a catalogue-only cache as a usable
@@ -1508,9 +1512,39 @@ function mergeUserState(target, source) {
   return target;
 }
 
+function movieAddedTime(movie) {
+  return Date.parse(movie?.addedAt || movie?.fetchedAt || movie?.createdAt || movie?._updatedAt || movie?.updatedAt || '') || 0;
+}
+
+function ensureAddedAtMetadata() {
+  let changed = 0;
+  const stamp = nowStamp();
+  Object.values(state.movies || {}).forEach(movie => {
+    if (movie?.addedAt) return;
+    movie.addedAt = movie?.fetchedAt || movie?.createdAt || movie?._updatedAt || movie?.updatedAt || stamp;
+    changed++;
+  });
+  return changed;
+}
+
+function retireWatchlistForRecentlyAdded() {
+  let changed = 0;
+  Object.values(state.movies || {}).forEach(movie => {
+    if (!movie?.watchlist) return;
+    // The old watchlist becomes a normal retained title rather than being lost.
+    // manualAdded protects it from rolling-pool eviction after its watchlist flag is retired.
+    movie.watchlist = false;
+    movie.manualAdded = true;
+    touchRecord(movie);
+    changed++;
+  });
+  return changed;
+}
+
 function normaliseFetchedWikiMovie(movie, previous=null) {
   if (!movie) return null;
   const next = { ...movie };
+  next.addedAt = previous?.addedAt || next.addedAt || next.fetchedAt || next.createdAt || nowStamp();
   next.source = 'wikipedia';
   next.wikiVerified = true;
   next.needsManualUrl = false;
@@ -2396,10 +2430,25 @@ async function fetchNavigationLaneTitles(mode, limitPerPage=180) {
   return newestTitleFirst([...new Set(titles)]);
 }
 
+function collectionMinYear() {
+  return Math.max(1900, Math.min(new Date().getFullYear(), Number(state.settings?.minYear) || 1970));
+}
+
+function resetYearBoundedDiscovery() {
+  Object.keys(yearCategoryIndexCache).forEach(key => delete yearCategoryIndexCache[key]);
+  Object.keys(yearCategoryMembersCache).forEach(key => delete yearCategoryMembersCache[key]);
+  if (!state.discoveryCursor || typeof state.discoveryCursor !== 'object') state.discoveryCursor = {};
+  COLLECTION_LANES.forEach(lane => {
+    state.discoveryCursor[lane.key] = {categoryIndex:0, categoryTitle:'', offset:0, cycles:0};
+  });
+}
+
 async function fetchYearCategoryIndex(laneKey) {
   const source = WIKI_YEAR_INDEX_SOURCES[laneKey];
   if (!source) return [];
-  if (yearCategoryIndexCache[laneKey]) return yearCategoryIndexCache[laneKey];
+  const minYear = collectionMinYear();
+  const cacheKey = `${laneKey}:${minYear}`;
+  if (yearCategoryIndexCache[cacheKey]) return yearCategoryIndexCache[cacheKey];
   const roots = Array.isArray(source) ? source : [source];
   const categories = [];
   for (const [rootIndex, root] of roots.entries()) {
@@ -2412,16 +2461,16 @@ async function fetchYearCategoryIndex(laneKey) {
         (data.query?.categorymembers || []).forEach(item => {
           const title = item.title || '';
           const year = Number((title.match(/\b(19\d{2}|20\d{2})\b/) || [])[1] || 0);
-          if (year) categories.push({title, year, rootIndex});
+          if (year >= minYear) categories.push({title, year, rootIndex});
         });
         cmcontinue = data.continue?.cmcontinue || '';
       } while (cmcontinue && !fetchAbortRequested);
     } catch(e) {}
   }
-  yearCategoryIndexCache[laneKey] = categories
+  yearCategoryIndexCache[cacheKey] = categories
     .sort((a,b)=>b.year-a.year||a.rootIndex-b.rootIndex||a.title.localeCompare(b.title))
     .map(item=>item.title);
-  return yearCategoryIndexCache[laneKey];
+  return yearCategoryIndexCache[cacheKey];
 }
 
 function ensureDiscoveryCursor() {
@@ -2488,7 +2537,7 @@ async function nextLaneDiscoveryCandidates(lane, limit, existing, seenThisRun) {
       cursor.categoryTitle = '';
       cursor.offset = 0;
       cursor.cycles += 1;
-      delete yearCategoryIndexCache[lane.key];
+      Object.keys(yearCategoryIndexCache).filter(key => key.startsWith(`${lane.key}:`)).forEach(key => delete yearCategoryIndexCache[key]);
       clearYearMemberCacheForCategories(categories);
       break;
     }
@@ -3723,7 +3772,7 @@ function setTab(tab, btn) {
 }
 function isShow(m) { return !!m.format; }
 function matchesTab(m) {
-  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return true;
+  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rated' || activeTab === 'recent' || activeTab === 'tags') return true;
   if (activeTab === 'show') return isShow(m);
   if (activeTab === 'movie') return !isShow(m);
   return true;
@@ -3738,7 +3787,7 @@ function render() {
   updateVisibleSections();
   updateControlDeck();
   if (activeTab === 'rated') renderRatedGrid();
-  else if (activeTab === 'watchlist') renderWatchlist();
+  else if (activeTab === 'recent') renderRecentlyAdded();
   else if (activeTab === 'tags') renderTagBrain();
   else if (activeTab === 'pool') renderPoolGrid();
   else if (activeTab === 'hidden') renderHiddenGrid();
@@ -3860,7 +3909,7 @@ function renderActiveCards() {
   else if (activeTab === 'hidden') renderHiddenGrid();
   else if (activeTab === 'tags') renderTagBrain();
   else if (activeTab === 'rated') renderRatedGrid();
-  else if (activeTab === 'watchlist') renderWatchlist();
+  else if (activeTab === 'recent') renderRecentlyAdded();
   else renderRecs();
 }
 
@@ -4149,7 +4198,7 @@ function scheduleAutoExpand(delay = 2500) {
 }
 
 function renderRecs() {
-  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rated' || activeTab === 'watchlist' || activeTab === 'tags') return;
+  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rated' || activeTab === 'recent' || activeTab === 'tags') return;
   const grid = document.getElementById('recsGrid');
   if (titleSearchActive()) {
     renderGlobalTitleSearch(grid);
@@ -4225,14 +4274,18 @@ function renderRatedGrid() {
   grid.appendChild(fragment);
 }
 
-function renderWatchlist() {
-  const grid = document.getElementById('watchlistGrid');
-  const watchlist = sortMovies(Object.values(state.movies).filter(m => m.watchlist && matchesTab(m) && matchesGlobalFilters(m)), 'title-asc');
-  document.getElementById('watchlistCount').textContent = watchlist.length ? `${watchlist.length} saved` : 'nothing saved yet';
+function renderRecentlyAdded() {
+  const grid = document.getElementById('recentGrid');
+  if (!grid) return;
+  const recent = Object.values(state.movies || {})
+    .filter(m => matchesGlobalFilters(m))
+    .sort((a, b) => movieAddedTime(b) - movieAddedTime(a) || movieTime(b) - movieTime(a) || titleSortKey(a).localeCompare(titleSortKey(b)));
+  const count = document.getElementById('recentCount');
+  if (count) count.textContent = recent.length ? `${recent.length} titles · newest first` : 'nothing added yet';
   grid.innerHTML = '';
-  if (!watchlist.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">+</div><h3>Nothing Saved Yet</h3></div>`; return; }
+  if (!recent.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">+</div><h3>Nothing Added Yet</h3></div>`; return; }
   const fragment = document.createDocumentFragment();
-  watchlist.forEach(m => fragment.appendChild(buildCard(m, { watchlistView:true })));
+  recent.forEach(m => fragment.appendChild(buildCard(m, { showEdit:Number(m.rating || 0) > 0, poolView:Number(m.rating || 0) === 0, contextLabel:'Added' })));
   grid.appendChild(fragment);
 }
 
@@ -4240,12 +4293,12 @@ function renderWatchlist() {
 function updateVisibleSections() {
   const recMode = activeTab === 'all' || activeTab === 'movie' || activeTab === 'show';
   const ratedMode = activeTab === 'rated';
-  const watchlistMode = activeTab === 'watchlist';
+  const recentMode = activeTab === 'recent';
   const tagMode = activeTab === 'tags';
 
   setSectionVisibility('.normal-only', recMode);
   setSectionVisibility('.rated-only', ratedMode);
-  setSectionVisibility('.watchlist-only', watchlistMode);
+  setSectionVisibility('.watchlist-only', recentMode);
   setSectionVisibility('.tag-only', tagMode);
   document.querySelectorAll('.audit-only').forEach(el => el.style.display = 'none');
   document.querySelectorAll('.control-deck').forEach(el => el.style.display = '');
@@ -4435,7 +4488,6 @@ function buildCard(movie, opts={}) {
       <div class="card-actions">
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
         ${!hiddenView && movie.storyText && !hasCurrentAiTags(movie) ? `<button class="card-act" onclick="openManualTagChooser('${safeId}',event)">choose tags</button>` : ''}
-        ${!showEdit?`<button class="card-act" onclick="toggleWatchlist('${safeId}',event)">${watchlistView?'remove':'watchlist'}</button>`:''}
         ${!hiddenView?`<button class="card-act" onclick="deleteMovie('${safeId}',event)">hide</button>`:''}
         <button class="card-act del" onclick="removeTitlePermanently('${safeId}',event)">remove</button>
       </div>
@@ -4943,6 +4995,7 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
   const next = {
     ...normalisedFresh,
     ...preserved,
+    addedAt: previous.addedAt || normalisedFresh.addedAt || previous.fetchedAt || previous.createdAt || stamp,
     wikiPageId: normalisedFresh.wikiPageId || previous.wikiPageId,
     wikiTitle: normalisedFresh.wikiTitle || previous.wikiTitle,
     pageTitle: normalisedFresh.pageTitle || previous.pageTitle,
@@ -5554,9 +5607,11 @@ function updateStats() {
 function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveSettingsState(); renderRecs(); }
 function updateMinYear(val) {
   const year = Math.max(1900, Math.min(new Date().getFullYear(), parseInt(val, 10) || 1970));
+  const changed = Number(state.settings.minYear) !== year;
   state.settings.minYear = year;
   const input = document.getElementById('minYear');
   if (input) input.value = year;
+  if (changed) resetYearBoundedDiscovery();
   saveSettingsState();
   renderActiveCards();
 }
@@ -6852,6 +6907,8 @@ async function loadFromDrive(opts={}) {
     const migratedAliases=migrateLegacyTagAliases();
     migrateLegacyPoolItems();
     const removedHindiShows = purgeDisallowedHindiShows({recordWrongPicks:true});
+    const addedAtMigrated = ensureAddedAtMetadata();
+    const retiredWatchlist = retireWatchlistForRecentlyAdded();
     const cleaned=cleanContaminatedTags(true);
     rebuildTagBrain();
     computeTagWeights();
@@ -6859,7 +6916,7 @@ async function loadFromDrive(opts={}) {
     render();
     state.drive.connected=true;
     setDriveStatus('connected');
-    if (marked || cleaned || migratedAliases.rewrites || removedHindiShows) await uploadDriveData();
+    if (marked || cleaned || migratedAliases.rewrites || removedHindiShows || addedAtMigrated || retiredWatchlist) await uploadDriveData();
     scheduleTagCloudNormalization(1600);
     return true;
   } catch(error) {
