@@ -1118,6 +1118,59 @@ function aiTagFailureMessage(error, movie=null) {
   return `${reason} · choose tags or retry`;
 }
 
+function isAiSensitiveContentBlock(error) {
+  return !!error?.cinelensSensitiveContentBlock || /PROHIBITED_CONTENT/i.test(String(error?.message || error || ''));
+}
+
+function makeAiSensitiveContentError(message='Title excluded after Gemini safety block') {
+  const error = new Error(message);
+  error.cinelensSensitiveContentBlock = true;
+  error.cinelensTitleExcluded = true;
+  return error;
+}
+
+function excludeTitleForAiSensitiveContent(movie, error) {
+  if (!movie?.id || movie._aiSensitiveContentExcluded) return false;
+  const stamp = nowStamp();
+  const id = String(movie.id);
+  const key = normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title) || id;
+  state.wrongPicks = state.wrongPicks || {};
+  state.deletedMovieRecords = state.deletedMovieRecords || {};
+  state.unblockedTitleRecords = state.unblockedTitleRecords || {};
+  delete state.unblockedTitleRecords[key];
+  state.wrongPicks[key] = {
+    id, title:movie.title || '', wikiTitle:movie.wikiTitle || '', pageTitle:movie.pageTitle || '',
+    wikiPageId:movie.wikiPageId || wikiPageIdFromMovie(movie),
+    reason:'ai-sensitive-content-excluded', at:stamp, updatedAt:stamp
+  };
+  state.deletedMovieRecords[id] = { id, titleKey:key, reason:'ai-sensitive-content-excluded', at:stamp, updatedAt:stamp };
+  delete state.movies[id];
+  delete state.hiddenTitles?.[id];
+  movie._aiSensitiveContentExcluded = true;
+  movie.aiTagging = {
+    ...(movie.aiTagging || {}),
+    status:'excluded',
+    error:String(error?.message || error || 'Gemini safety block: PROHIBITED_CONTENT'),
+    excludedAt:stamp
+  };
+  invalidateTagCaches();
+  invalidateTasteModel();
+  rebuildTagBrain();
+  computeTagWeights();
+  saveLocalState();
+  queueDriveSync();
+  return true;
+}
+
+function purgeAiSensitiveContentExclusions() {
+  let removed = 0;
+  [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(movie => {
+    const errorText = String(movie?.aiTagging?.error || movie?.retagMessage || '');
+    if (/PROHIBITED_CONTENT/i.test(errorText) && excludeTitleForAiSensitiveContent(movie, errorText)) removed++;
+  });
+  return removed;
+}
+
 async function requestAiTags(movies, opts={}) {
   const items = (movies || []).filter(movie => movie?.storyText).slice(0, AI_TAG_BATCH_SIZE);
   if (!items.length) return {tagged:0, failed:0};
@@ -1165,10 +1218,34 @@ async function requestAiTags(movies, opts={}) {
   });
   if (!response.ok) throw new Error(`AI tagger HTTP ${response.status}`);
   const payload = await response.json();
-  if (!payload.ok) throw new Error(payload.error || 'AI tagging failed');
+  if (!payload.ok) {
+    const error = new Error(payload.error || 'AI tagging failed');
+    if (String(payload.code || '').toUpperCase() === 'PROHIBITED_CONTENT' || isAiSensitiveContentBlock(error)) {
+      error.cinelensSensitiveContentBlock = true;
+      if (items.length > 1) {
+        let tagged = 0;
+        let failed = 0;
+        let excluded = 0;
+        for (const movie of items) {
+          const single = await requestAiTags([movie], {
+            ...opts,
+            partials:partials[String(movie.id)] ? {[String(movie.id)]:partials[String(movie.id)]} : {}
+          });
+          tagged += Number(single?.tagged || 0);
+          failed += Number(single?.failed || 0);
+          excluded += Number(single?.excluded || 0);
+        }
+        return {tagged, failed, excluded};
+      }
+      excludeTitleForAiSensitiveContent(items[0], error);
+      return {tagged:0, failed:0, excluded:1};
+    }
+    throw error;
+  }
   const byId = new Map((payload.results || []).map(result => [String(result.id), result]));
   let tagged = 0;
   let failed = 0;
+  let excluded = 0;
   const retryItems = [];
   const retryPartials = {};
   items.forEach(movie => {
@@ -1214,7 +1291,7 @@ async function requestAiTags(movies, opts={}) {
     tagged += retryResult.tagged;
     failed = Math.max(0, failed - retryResult.tagged);
   }
-  return {tagged, failed};
+  return {tagged, failed, excluded};
 }
 
 async function applyAiTags(movie, opts={}) {
@@ -1222,6 +1299,7 @@ async function applyAiTags(movie, opts={}) {
   if (!opts.force && hasCurrentAiTags(movie)) return movie;
   if (opts.force) delete movie.aiTagPartial;
   await requestAiTags([movie]);
+  if (movie._aiSensitiveContentExcluded) throw makeAiSensitiveContentError();
   if (!hasCurrentAiTags(movie)) throw new Error(movie.aiTagging?.error || 'AI returned no usable tags');
   return movie;
 }
@@ -1303,11 +1381,12 @@ function runStartupMaintenance() {
   const run = () => {
     try {
       const removedHindiShows = purgeDisallowedHindiShows({recordWrongPicks:true});
+      const excludedSensitiveTitles = purgeAiSensitiveContentExclusions();
       const addedAtMigrated = ensureAddedAtMetadata();
       const retiredWatchlist = retireWatchlistForRecentlyAdded();
       const changed = cleanContaminatedTags(true);
       const rotation = pruneRollingCandidatePool({reason:'startup'});
-      if (removedHindiShows || addedAtMigrated || retiredWatchlist || changed || rotation.evicted) {
+      if (removedHindiShows || excludedSensitiveTitles || addedAtMigrated || retiredWatchlist || changed || rotation.evicted) {
         saveLocalState();
         queueDriveSync();
         render();
@@ -1995,7 +2074,7 @@ function unblockTitleForManualSearch(value) {
   Object.entries(state.wrongPicks || {}).forEach(([recordKey, item]) => {
     const matches = [item.title, item.wikiTitle, item.pageTitle]
       .some(title => normaliseTitleKey(title) === key);
-    if (!matches) return;
+    if (!matches || item?.reason === 'ai-sensitive-content-excluded') return;
     delete state.wrongPicks[recordKey];
     if (item.id && state.deletedMovieRecords?.[item.id]) delete state.deletedMovieRecords[item.id];
     changed = true;
@@ -2984,6 +3063,13 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
     showToast(existing ? `Refreshed "${stored.title}"` : `Added "${stored.title}"`, 'success');
     return true;
   } catch(e) {
+    if (e?.cinelensTitleExcluded || isAiSensitiveContentBlock(e)) {
+      saveLocalState();
+      queueDriveSync();
+      render();
+      showToast(`Skipped "${title}" because its subject triggered the content exclusion rule.`, '');
+      return false;
+    }
     showToast(`Could not fetch "${title}": ${e.message || e}`, 'error');
     return false;
   } finally {
@@ -5158,6 +5244,13 @@ async function retagFromStoredData(id, opts={}) {
     }
     return updated;
   } catch(err) {
+    if (err?.cinelensTitleExcluded || isAiSensitiveContentBlock(err)) {
+      saveLocalState();
+      queueDriveSync();
+      render();
+      if (opts.errorToast !== false) showToast(`Removed "${movie.title}" because its subject triggered the content exclusion rule.`, '');
+      return null;
+    }
     const current = state.movies[id] || movie;
     current.needsManualUrl = false;
     current.retagStatus = 'needs-ai-tags';
