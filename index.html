@@ -123,6 +123,16 @@
       <option value="war">War</option>
       <option value="western">Western</option>
     </select>
+    <label>Rating</label>
+    <select class="platform-select" id="ratingFilter" onchange="updateRatingFilter(this.value)">
+      <option value="all">All titles</option>
+      <option value="unrated">Hide rated</option>
+      <option value="5">5 stars</option>
+      <option value="4">4 stars</option>
+      <option value="3">3 stars</option>
+      <option value="2">2 stars</option>
+      <option value="1">1 star</option>
+    </select>
     <label>Sort</label>
     <select class="platform-select" id="sortMode" onchange="updateSortMode(this.value)">
       <option value="recommended">Recommended</option>
