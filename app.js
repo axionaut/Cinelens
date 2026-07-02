@@ -348,7 +348,7 @@ const GENRE_RULES = [
   ['family', /\bfamily(?:-|\s)(?:film|drama|series|comedy)\b/],
   ['fantasy', /\bfantasy(?:-|\s)(?:film|drama|series|comedy)\b/],
   ['historical', /\bhistorical(?:-|\s)(?:film|drama|series|fiction)\b/],
-  ['horror', /\bhorror(?:-|\s)(?:films?|movies?|comedy|drama|series|television)\b|\b(?:slasher|supernatural|psychological|science fiction|sci-fi) horror\b|\b(?:slasher|splatter|gore|ghost|haunted|demonic|possession|monster)\s+(?:films?|movies?|series)\b/],
+  ['horror', /\bhorror(?:-|\s)(?:films?|movies?|comedy|drama|series|television)\b|\b(?:slasher|supernatural|psychological|science fiction|sci-fi) horror\b|\b(?:slasher|splatter|gore|ghost|haunted|demonic|possession)\s+(?:films?|movies?|series)\b/],
   ['musical', /\bmusical(?:-|\s)(?:film|comedy|drama|series)\b/],
   ['mystery', /\bmystery(?:-|\s)(?:film|drama|series|thriller)\b/],
   ['romance', /\bromance(?:-|\s)(?:film|drama|series)\b|\bromantic(?:-|\s)(?:film|drama|thriller)\b/],
@@ -2042,8 +2042,10 @@ function horrorSourceText(movie) {
 
 function isConventionalHorrorTitle(movie) {
   const source = horrorSourceText(movie);
-  const horrorSignal = movieGenres(movie).includes('horror') || /\b(?:horror|slasher|splatter|gore|haunted|possession|exorcism|demon(?:ic)?|ghost)\b/.test(source);
-  if (!horrorSignal) return false;
+  // Monster/creature adventure is not horror by itself. Exclude only titles
+  // whose metadata or narrative carries an actual conventional-horror signal.
+  const explicitHorror = /\b(?:horror|slasher|splatter|gore|haunted|haunting|possession|exorcism|demon(?:ic)?|ghost|paranormal)\b/.test(source);
+  if (!explicitHorror) return false;
   const hybridHorror = /\b(?:psychological|science[ -]?fiction|sci[ -]?fi|comedy|satirical|dark comedy)\s+(?:horror|thriller)\b|\b(?:horror[- ]comedy|psychological-horror|science-fiction-horror)\b/.test(source);
   return !hybridHorror;
 }
@@ -3457,7 +3459,7 @@ function deriveTagsFromText(text, meta) {
   if (leadHas(/\bcomedy\b/) || catHas(/\bcomedy (films|television series)\b/) || storyHas(/\b(comic misunderstanding|farce|satirical comedy|dark comedy)\b/)) add('comedy');
   if (leadHas(/\bdrama\b/) || catHas(/\bdrama (films|television series)\b/)) add('drama');
   if (leadHas(/\bromantic\b/) || has(/\b(falls in love|love affair|romantic relationship|heartbreak|wedding|marriage proposal)\b/)) add('romance');
-  if (leadHas(/\bhorror\b/) || catHas(/\bhorror films\b/) || has(/\b(terrifying|monster attacks|slasher|haunting|creature stalks)\b/)) add('horror');
+  if (leadHas(/\bhorror\b/) || catHas(/\bhorror films\b/) || has(/\b(terrifying|slasher|haunting|creature stalks)\b/)) add('horror');
   if (has(/\b(based on a true story|based on actual events|true story|real-life|biographical|biopic|historical figure)\b/) || catHas(/\bbiographical films\b/)) add('based-on-true-story');
   if (leadHas(/\banimated\b/) || catHas(/\banimated films\b/)) add('animated');
   if (leadHas(/\bdocumentary\b/) || catHas(/\bdocumentary films\b/)) add('documentary');
