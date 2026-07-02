@@ -4034,7 +4034,15 @@ function renderActiveCards() {
   else renderRecs();
 }
 
+function isPendingManualSearchResult(movie) {
+  return !!movie?.id && String(movie.id) === String(pendingSearchResetAfterRatingId || '');
+}
+
 function matchesGlobalFilters(movie) {
+  // A title just added through search must stay visible immediately, including
+  // when the search text is a pasted Wikipedia URL that cannot match its title.
+  // It remains pinned until that same card is rated, which clears the search.
+  if (isPendingManualSearchResult(movie)) return true;
   return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
 }
 
