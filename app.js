@@ -270,7 +270,7 @@ let state = {
   movies: {},
   tagWeights: {},
   genreWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', ratingFilter:'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{} },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{} },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', manifestFileId:'', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   wrongPicks: {},
@@ -344,10 +344,11 @@ const GENRE_RULES = [
   ['crime', /\bcrime(?:-|\s)(?:film|drama|series|thriller|comedy)\b/],
   ['documentary', /\bdocumentary(?:-|\s)(?:film|series)\b/],
   ['drama', /\bdrama(?:-|\s)(?:film|series)\b|\b(?:film|television) drama\b/],
+  ['kids', /\b(?:children'?s|kids?|pre-school|preschool)\b[^\n]{0,90}\b(?:film|films|movie|movies|television|tv|series|show|shows|programme|program|animation|animated)\b|\b(?:children'?s|kids?)\s+(?:films?|television|tv|series|shows?|programmes?|programs?)\b/],
   ['family', /\bfamily(?:-|\s)(?:film|drama|series|comedy)\b/],
   ['fantasy', /\bfantasy(?:-|\s)(?:film|drama|series|comedy)\b/],
   ['historical', /\bhistorical(?:-|\s)(?:film|drama|series|fiction)\b/],
-  ['horror', /\bhorror(?:-|\s)(?:film|comedy|drama|series)\b/],
+  ['horror', /\bhorror(?:-|\s)(?:films?|movies?|comedy|drama|series|television)\b|\b(?:slasher|supernatural|psychological|science fiction|sci-fi) horror\b|\b(?:slasher|splatter|gore|ghost|haunted|demonic|possession|monster)\s+(?:films?|movies?|series)\b/],
   ['musical', /\bmusical(?:-|\s)(?:film|comedy|drama|series)\b/],
   ['mystery', /\bmystery(?:-|\s)(?:film|drama|series|thriller)\b/],
   ['romance', /\bromance(?:-|\s)(?:film|drama|series)\b|\bromantic(?:-|\s)(?:film|drama|thriller)\b/],
@@ -1380,13 +1381,14 @@ function cleanContaminatedTags(silent=true) {
 function runStartupMaintenance() {
   const run = () => {
     try {
-      const removedHindiShows = purgeDisallowedHindiShows({recordWrongPicks:true});
+      const removedHindiShows = purgeDisallowedHindiShows();
+      const removedConventionalHorror = purgeDisallowedConventionalHorror();
       const excludedSensitiveTitles = purgeAiSensitiveContentExclusions();
       const addedAtMigrated = ensureAddedAtMetadata();
       const retiredWatchlist = retireWatchlistForRecentlyAdded();
       const changed = cleanContaminatedTags(true);
       const rotation = pruneRollingCandidatePool({reason:'startup'});
-      if (removedHindiShows || excludedSensitiveTitles || addedAtMigrated || retiredWatchlist || changed || rotation.evicted) {
+      if (removedHindiShows || removedConventionalHorror || excludedSensitiveTitles || addedAtMigrated || retiredWatchlist || changed || rotation.evicted) {
         saveLocalState();
         queueDriveSync();
         render();
@@ -1447,10 +1449,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Import a legacy localStorage library once, then remove its large payload only
   // after the IndexedDB write has been queued.
   if (libraryRecordCount() > 0) queueIndexedDbSave(0);
-  const startupRemovedHindiShows = purgeDisallowedHindiShows({recordWrongPicks:true});
+  const startupRemovedHindiShows = purgeDisallowedHindiShows();
+  const startupRemovedConventionalHorror = purgeDisallowedConventionalHorror();
   const startupAddedAtMigrated = ensureAddedAtMetadata();
   const startupRetiredWatchlist = retireWatchlistForRecentlyAdded();
-  if (startupRemovedHindiShows || startupAddedAtMigrated || startupRetiredWatchlist) saveLocalState({preserveUpdatedAt:true});
+  if (startupRemovedHindiShows || startupRemovedConventionalHorror || startupAddedAtMigrated || startupRetiredWatchlist) saveLocalState({preserveUpdatedAt:true});
   startupInitialLibraryPresent = libraryRecordCount() > 0;
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   // A Drive-enabled device must not treat a catalogue-only cache as a usable
@@ -2023,45 +2026,69 @@ function wrongPickMatches(value) {
 }
 
 function isHindiShowRecord(movie) {
-  if (!movie || !movie.format) return false;
-  return String(movie.language || '').trim().toLowerCase() === 'hindi';
+  return !!movie?.format && String(movie.language || '').trim().toLowerCase() === 'hindi';
 }
 
-function purgeDisallowedHindiShows(opts={}) {
-  const { recordWrongPicks=true } = opts;
+function horrorSourceText(movie) {
+  return [
+    movie?.leadText,
+    movie?.categoryText,
+    movie?.storyText,
+    ...(movie?.genres || []),
+    ...(movie?.tags || []),
+    ...(movie?.plotTags || [])
+  ].join(' ').toLowerCase();
+}
+
+function isConventionalHorrorTitle(movie) {
+  const source = horrorSourceText(movie);
+  const horrorSignal = movieGenres(movie).includes('horror') || /\b(?:horror|slasher|splatter|gore|haunted|possession|exorcism|demon(?:ic)?|ghost)\b/.test(source);
+  if (!horrorSignal) return false;
+  const hybridHorror = /\b(?:psychological|science[ -]?fiction|sci[ -]?fi|comedy|satirical|dark comedy)\s+(?:horror|thriller)\b|\b(?:horror[- ]comedy|psychological-horror|science-fiction-horror)\b/.test(source);
+  return !hybridHorror;
+}
+
+function excludeStoredTitles(predicate, reason) {
   let removed = 0;
   const stamp = nowStamp();
   state.wrongPicks = state.wrongPicks || {};
   state.deletedMovieRecords = state.deletedMovieRecords || {};
-  const purgeMap = (mapName) => {
+  state.unblockedTitleRecords = state.unblockedTitleRecords || {};
+  ['movies', 'hiddenTitles'].forEach(mapName => {
     Object.entries(state[mapName] || {}).forEach(([id, movie]) => {
-      if (!isHindiShowRecord(movie)) return;
-      if (recordWrongPicks) {
-        const key = normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title) || id;
-        state.wrongPicks[key] = {
-          id,
-          title:movie.title || '',
-          wikiTitle:movie.wikiTitle || '',
-          pageTitle:movie.pageTitle || '',
-          wikiPageId:movie.wikiPageId || wikiPageIdFromMovie(movie),
-          reason:'hindi-show-excluded',
-          at:stamp,
-          updatedAt:stamp
-        };
-        state.deletedMovieRecords[id] = { id, titleKey:key, reason:'hindi-show-excluded', at:stamp, updatedAt:stamp };
-      }
+      if (!predicate(movie)) return;
+      const key = normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title) || id;
+      delete state.unblockedTitleRecords[key];
+      state.wrongPicks[key] = {
+        id,
+        title:movie.title || '',
+        wikiTitle:movie.wikiTitle || '',
+        pageTitle:movie.pageTitle || '',
+        wikiPageId:movie.wikiPageId || wikiPageIdFromMovie(movie),
+        reason,
+        at:stamp,
+        updatedAt:stamp
+      };
+      state.deletedMovieRecords[id] = {id, titleKey:key, reason, at:stamp, updatedAt:stamp};
       delete state[mapName][id];
       removed++;
     });
-  };
-  purgeMap('movies');
-  purgeMap('hiddenTitles');
+  });
   if (removed) {
     invalidateTagCaches();
+    invalidateTasteModel();
     rebuildTagBrain();
     computeTagWeights();
   }
   return removed;
+}
+
+function purgeDisallowedHindiShows() {
+  return excludeStoredTitles(isHindiShowRecord, 'hindi-show-excluded');
+}
+
+function purgeDisallowedConventionalHorror() {
+  return excludeStoredTitles(isConventionalHorrorTitle, 'conventional-horror-excluded');
 }
 
 function unblockTitleForManualSearch(value) {
@@ -3275,13 +3302,15 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   if (!year || !title || !wikiPageId) return rejectWikiParse(diagnostics, 'missing release year, title or Wikipedia page ID');
 
   const genres = deriveGenres(leadText, cats);
-  return {
+  const candidate = {
     id, title, year, director, language, country, format: format||null,
     genres, categoryText: cats.join(' '),
     tags: [], coreTags: [], plotTags: [], descriptorTags: [], rawDescriptors: [],
     tagged: false, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, thumbnailUrl, storyText, leadText, wikiVerified: true, retagStatus: 'needs-ai-tags', retagMessage: 'AI tags pending',
     wikiParserVersion: WIKI_PARSER_VERSION
   };
+  if (isConventionalHorrorTitle(candidate)) return rejectWikiParse(diagnostics, 'conventional horror is excluded');
+  return candidate;
 }
 
 function wikiHeadingInfo(line) {
@@ -3892,8 +3921,6 @@ function updateControlDeck() {
   if (genreFilter && genreFilter.value !== (state.settings.genreFilter || 'all')) genreFilter.value=state.settings.genreFilter || 'all';
   const languageFilter=document.getElementById('languageFilter');
   if (languageFilter && languageFilter.value !== (state.settings.languageFilter || 'all')) languageFilter.value=state.settings.languageFilter || 'all';
-  const ratingFilter=document.getElementById('ratingFilter');
-  if (ratingFilter && ratingFilter.value !== (state.settings.ratingFilter || 'all')) ratingFilter.value=state.settings.ratingFilter || 'all';
   const sortMode=document.getElementById('sortMode');
   if (sortMode && sortMode.value !== (state.settings.sortMode || 'recommended')) sortMode.value=state.settings.sortMode || 'recommended';
   const shuffleBtn=document.getElementById('shuffleAgainBtn');
@@ -3920,13 +3947,10 @@ function updateGenreFilter(genre) {
   renderActiveCards();
 }
 
-function updateRatingFilter(filter) {
-  state.settings.ratingFilter = String(filter || 'all');
-  recVisibleLimit = Math.max(parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
-  poolVisibleLimit = 80;
-  hiddenVisibleLimit = 80;
-  saveSettingsState();
-  renderActiveCards();
+function filterByGenreFromCard(genre, event) {
+  if (event) event.stopPropagation();
+  updateGenreFilter(genre);
+  updateControlDeck();
 }
 
 function updateSortMode(mode) {
@@ -4011,7 +4035,7 @@ function renderActiveCards() {
 }
 
 function matchesGlobalFilters(movie) {
-  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesRatingFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
+  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
 }
 
 function discoveryPool() {
@@ -4026,15 +4050,6 @@ function matchesLanguageFilter(movie) {
 function matchesGenreFilter(movie) {
   const filter = state.settings.genreFilter || 'all';
   return filter === 'all' || movieGenres(movie).includes(filter);
-}
-
-function matchesRatingFilter(movie) {
-  const filter = String(state.settings.ratingFilter || 'all');
-  const rating = Number(movie?.rating || 0);
-  if (filter === 'all') return true;
-  if (filter === 'unrated') return rating === 0;
-  const selectedRating = Number(filter);
-  return Number.isInteger(selectedRating) && selectedRating >= 1 && selectedRating <= 5 && rating === selectedRating;
 }
 
 function matchesTitleSearch(movie) {
@@ -4622,7 +4637,10 @@ function renderGenres(movie, matchedGenres=null) {
   const genres = movieGenres(movie);
   if (!genres.length) return '';
   const matched = matchedGenres || new Set();
-  return `<div class="genre-row"><span class="genre-label">Genres</span>${genres.map(genre => `<span class="genre-chip${matched.has?.(genre) ? ' matched' : ''}">${genre}</span>`).join('')}</div>`;
+  return `<div class="genre-row"><span class="genre-label">Genres</span>${genres.map(genre => {
+    const safeGenre = String(genre).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return `<button type="button" class="genre-chip clickable${matched.has?.(genre) ? ' matched' : ''}" onclick="filterByGenreFromCard('${safeGenre}',event)">${genre}</button>`;
+  }).join('')}</div>`;
 }
 
 function renderTagChips(tags, matchedTags, expanded) {
@@ -6300,7 +6318,7 @@ function saveLocalState(opts={}) {
   try {
     localStorage.setItem('cinelens_v2_bootstrap',JSON.stringify({
       schema:'cinelens-local-v3',
-      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,ratingFilter:state.settings?.ratingFilter,sortMode:state.settings?.sortMode,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
+      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,sortMode:state.settings?.sortMode,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
       drive:{enabled:state.drive.enabled,folderId:state.drive.folderId,fileId:state.drive.fileId,manifestFileId:state.drive.manifestFileId||'',lastConnectedAt:state.drive.lastConnectedAt},
       updatedAt:state.meta?.updatedAt || nowStamp()
     }));
@@ -6344,8 +6362,6 @@ function loadLocalState() {
       document.getElementById('languageFilter').value=state.settings.languageFilter||'all';
       const genreFilter=document.getElementById('genreFilter');
       if (genreFilter) genreFilter.value=state.settings.genreFilter||'all';
-      const ratingFilter=document.getElementById('ratingFilter');
-      if (ratingFilter) ratingFilter.value=state.settings.ratingFilter||'all';
       const sortMode=document.getElementById('sortMode');
       if (sortMode) sortMode.value=state.settings.sortMode||'recommended';
       const titleSearch=document.getElementById('titleSearch');
@@ -7021,7 +7037,8 @@ async function loadFromDrive(opts={}) {
     const marked=stampCanonicalDriveFile(state.drive.fileId);
     const migratedAliases=migrateLegacyTagAliases();
     migrateLegacyPoolItems();
-    const removedHindiShows = purgeDisallowedHindiShows({recordWrongPicks:true});
+    const removedHindiShows = purgeDisallowedHindiShows();
+    const removedConventionalHorror = purgeDisallowedConventionalHorror();
     const addedAtMigrated = ensureAddedAtMetadata();
     const retiredWatchlist = retireWatchlistForRecentlyAdded();
     const cleaned=cleanContaminatedTags(true);
@@ -7031,7 +7048,7 @@ async function loadFromDrive(opts={}) {
     render();
     state.drive.connected=true;
     setDriveStatus('connected');
-    if (marked || cleaned || migratedAliases.rewrites || removedHindiShows || addedAtMigrated || retiredWatchlist) await uploadDriveData();
+    if (marked || cleaned || migratedAliases.rewrites || removedHindiShows || removedConventionalHorror || addedAtMigrated || retiredWatchlist) await uploadDriveData();
     scheduleTagCloudNormalization(1600);
     return true;
   } catch(error) {
