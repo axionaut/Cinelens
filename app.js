@@ -261,6 +261,7 @@ let poolVisibleLimit = 80;
 let hiddenVisibleLimit = 80;
 let wikiSearchResults = [];
 let wikiSearchQuery = '';
+let localBlockedSearchResults = [];
 // A searched title remains visible after adding. Its search is cleared only when
 // that same title is subsequently rated.
 let pendingSearchResetAfterRatingId = '';
@@ -3046,7 +3047,19 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
   );
   if (hiddenRecord) {
     restoreHiddenMovie(hiddenRecord.id);
-    return;
+    pendingSearchResetAfterRatingId = String(hiddenRecord.id || '');
+    render();
+    showToast(`Restored "${hiddenRecord.title}" from Hidden`, 'success');
+    return true;
+  }
+  if (existing) {
+    // A direct link or Wikipedia result that already belongs to the library is
+    // a navigation/search action, not a reason to fetch and retag the same title.
+    // Keep the current query, render the local card and make its existing state visible.
+    pendingSearchResetAfterRatingId = String(existing.id || '');
+    render();
+    showToast(`Already in your library: "${existing.title}"`, '');
+    return true;
   }
   unblockTitleForManualSearch(title);
   releaseRollingPoolExclusion(title);
@@ -3990,6 +4003,7 @@ function clearUnifiedTitleSearch() {
   state.settings.titleSearch = '';
   wikiSearchQuery = '';
   wikiSearchResults = [];
+  localBlockedSearchResults = [];
   const input = document.getElementById('titleSearch');
   if (input) input.value = '';
   syncUnifiedSearchClearButton();
@@ -4003,6 +4017,7 @@ function updateTitleSearch(value) {
   syncUnifiedSearchClearButton();
   if (!state.settings.titleSearch || state.settings.titleSearch !== wikiSearchQuery) {
     wikiSearchResults = [];
+    localBlockedSearchResults = [];
     renderWikiSearchResults();
   }
   recVisibleLimit = Math.max(parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
@@ -4078,10 +4093,39 @@ function matchesRatingFilter(movie) {
   return rating === Number(filter);
 }
 
+function titleSearchNeedle(value=state.settings.titleSearch) {
+  return canonicalTitle(String(value || ''));
+}
+
 function matchesTitleSearch(movie) {
-  const q = String(state.settings.titleSearch || '').trim().toLowerCase();
-  if (!q) return true;
-  return [movie?.title, movie?.wikiTitle, movie?.pageTitle].some(value => String(value || '').toLowerCase().includes(q));
+  const needle = titleSearchNeedle();
+  if (!needle) return true;
+  return [movie?.title, movie?.wikiTitle, movie?.pageTitle]
+    .some(value => canonicalTitle(value).includes(needle));
+}
+
+function localTitleSearchMatches() {
+  const needle = titleSearchNeedle();
+  if (!needle) return {active:[], hidden:[], blocked:[]};
+  const byNewest = (a, b) => movieAddedTime(b) - movieAddedTime(a) || movieTime(b) - movieTime(a) || titleSortKey(a).localeCompare(titleSortKey(b));
+  const matchesRecord = record => [record?.title, record?.wikiTitle, record?.pageTitle]
+    .some(value => canonicalTitle(value).includes(needle));
+  const active = Object.values(state.movies || {}).filter(matchesTitleSearch).sort(byNewest);
+  const hidden = Object.values(state.hiddenTitles || {}).filter(matchesTitleSearch).sort(byNewest);
+  const represented = new Set([...active, ...hidden].map(movie => canonicalTitle(movie.title || movie.wikiTitle || movie.pageTitle)));
+  const blocked = [
+    ...Object.values(state.wrongPicks || {}),
+    ...Object.values(state.rollingPoolExclusions || {})
+  ].filter(matchesRecord).filter(record => !represented.has(canonicalTitle(record.title || record.wikiTitle || record.pageTitle)));
+  return {active, hidden, blocked};
+}
+
+async function reAddBlockedTitleFromSearch(index) {
+  const record = localBlockedSearchResults[index];
+  if (!record) return false;
+  const title = record.wikiTitle || record.pageTitle || record.title;
+  if (!title) return false;
+  return fetchUnifiedWikiResult(title, '', {pageId:record.wikiPageId || ''});
 }
 
 function titleSearchActive() {
@@ -4383,22 +4427,43 @@ function renderRecs() {
 }
 
 function renderGlobalTitleSearch(grid) {
-  const results = sortMovies(Object.values(state.movies || {})
-    .filter(matchesTab)
-    .filter(matchesGlobalFilters), 'updated-desc');
+  // Search is a direct library lookup. It deliberately ignores the current tab,
+  // Since, language, genre and rating filters so a title already saved in CineLens
+  // can never look absent merely because another filter is active.
+  const {active, hidden, blocked} = localTitleSearchMatches();
+  localBlockedSearchResults = blocked;
+  const results = active;
   const limit = Math.max(recVisibleLimit, REC_INFINITE_PAGE_SIZE);
-  document.getElementById('recCount').textContent = results.length ? `search found ${Math.min(limit, results.length)} of ${results.length}` : 'no title matches';
+  const total = active.length + hidden.length + blocked.length;
+  document.getElementById('recCount').textContent = total
+    ? `library search found ${total}${hidden.length ? ` · ${hidden.length} hidden` : ''}${blocked.length ? ` · ${blocked.length} previously removed` : ''}`
+    : 'no title matches';
   grid.innerHTML = '';
-  if (!results.length) {
-    grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Title Matches</h3></div>`;
+  if (!total) {
+    grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Title Matches</h3><p>Try Wikipedia search below the field.</p></div>`;
     return;
   }
+
   const fragment = document.createDocumentFragment();
   results.slice(0, limit).forEach(movie => {
-    const contextLabel = movie.rating > 0 ? 'Rated' : movie.watchlist ? 'Watchlist' : 'In Pool';
-    fragment.appendChild(buildCard(movie, {showEdit:movie.rating > 0, watchlistView:!!movie.watchlist, poolView:!movie.rating && !movie.watchlist, contextLabel}));
+    const contextLabel = movie.rating > 0 ? 'Rated' : 'In Library';
+    fragment.appendChild(buildCard(movie, {
+      showEdit:movie.rating > 0,
+      poolView:Number(movie.rating || 0) === 0,
+      contextLabel
+    }));
+  });
+  hidden.forEach(movie => {
+    fragment.appendChild(buildCard(movie, { hiddenView:true, contextLabel:'Hidden' }));
   });
   grid.appendChild(fragment);
+
+  if (blocked.length) {
+    const blockedBox = document.createElement('div');
+    blockedBox.className = 'empty-state';
+    blockedBox.innerHTML = `<div class="icon">↻</div><h3>Previously removed from the active library</h3><p>${blocked.map((record, index) => `<button class="btn btn-warning" onclick="reAddBlockedTitleFromSearch(${index})">Re-add ${attrSafe(record.title || record.wikiTitle || record.pageTitle || 'title')}</button>`).join(' ')}</p>`;
+    grid.appendChild(blockedBox);
+  }
   if (results.length > limit) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreSearchResults()">Show ${Math.min(REC_INFINITE_PAGE_SIZE, results.length-limit)} more · ${results.length-limit} remaining</button></div>`);
 }
 
