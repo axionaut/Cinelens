@@ -270,7 +270,7 @@ let state = {
   movies: {},
   tagWeights: {},
   genreWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{} },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', ratingFilter:'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{} },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', manifestFileId:'', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   wrongPicks: {},
@@ -3921,6 +3921,8 @@ function updateControlDeck() {
   if (genreFilter && genreFilter.value !== (state.settings.genreFilter || 'all')) genreFilter.value=state.settings.genreFilter || 'all';
   const languageFilter=document.getElementById('languageFilter');
   if (languageFilter && languageFilter.value !== (state.settings.languageFilter || 'all')) languageFilter.value=state.settings.languageFilter || 'all';
+  const ratingFilter=document.getElementById('ratingFilter');
+  if (ratingFilter && ratingFilter.value !== (state.settings.ratingFilter || 'all')) ratingFilter.value=state.settings.ratingFilter || 'all';
   const sortMode=document.getElementById('sortMode');
   if (sortMode && sortMode.value !== (state.settings.sortMode || 'recommended')) sortMode.value=state.settings.sortMode || 'recommended';
   const shuffleBtn=document.getElementById('shuffleAgainBtn');
@@ -3943,6 +3945,12 @@ function updateLanguageFilter(language) {
 
 function updateGenreFilter(genre) {
   state.settings.genreFilter = genre || 'all';
+  saveSettingsState();
+  renderActiveCards();
+}
+
+function updateRatingFilter(rating) {
+  state.settings.ratingFilter = String(rating || 'all');
   saveSettingsState();
   renderActiveCards();
 }
@@ -4043,7 +4051,7 @@ function matchesGlobalFilters(movie) {
   // when the search text is a pasted Wikipedia URL that cannot match its title.
   // It remains pinned until that same card is rated, which clears the search.
   if (isPendingManualSearchResult(movie)) return true;
-  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
+  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesRatingFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
 }
 
 function discoveryPool() {
@@ -4058,6 +4066,14 @@ function matchesLanguageFilter(movie) {
 function matchesGenreFilter(movie) {
   const filter = state.settings.genreFilter || 'all';
   return filter === 'all' || movieGenres(movie).includes(filter);
+}
+
+function matchesRatingFilter(movie) {
+  const filter = String(state.settings.ratingFilter || 'all');
+  if (filter === 'all') return true;
+  const rating = Number(movie?.rating || 0);
+  if (filter === 'unrated') return rating === 0;
+  return rating === Number(filter);
 }
 
 function matchesTitleSearch(movie) {
