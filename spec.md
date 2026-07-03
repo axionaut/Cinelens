@@ -65,9 +65,16 @@ uses these rules:
   rated title merely because a view opens.
 - The tag vocabulary is built once per data revision and reused by stats, AI
   tagging and consolidation.
+- The header tag status reuses the same tag-vocabulary cache and stores a
+  separate active-title raw-tag count. The active count must match the previous
+  `countRawTags()` result and must not reuse the active-plus-hidden vocabulary
+  size.
 - Search input is debounced for both rendering and persistence. Typing must not
   serialize the entire library, queue Drive sync or rescore recommendations for
   each keystroke.
+- The Google Identity Services script in `index.html` must load asynchronously
+  so Google network latency does not block initial HTML parsing. The runtime
+  loader may still inject the script if the static tag is absent.
 - Card grids append through document fragments and remain page-limited. A view
   must not create DOM cards for every stored title.
 - Once a canonical Drive file ID exists, routine sync must use that ID directly
@@ -81,6 +88,14 @@ uses these rules:
 - If the manifest profile is missing, malformed or cannot be read, startup
   remains read-only and collection stays blocked rather than building a
   zero-rated starter pool.
+- IndexedDB persistence uses full saves by default. Full saves scan the active
+  and hidden title signature caches and are the only path allowed to delete
+  records from IndexedDB.
+- Scoped IndexedDB saves are allowed only for hot paths that change known
+  records without deletion: rating one active title, and collection saves for
+  newly added titles during an expansion run. Scoped saves upsert only the
+  provided ids wherever they currently live, keep unrelated records untouched
+  and still compare/write the compact profile payload.
 
 ### 2.4.1 Rolling candidate pool
 

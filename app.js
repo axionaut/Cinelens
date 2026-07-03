@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 3;
+const APP_VERSION = 4;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -747,11 +747,19 @@ function cleanAiTagResults(result, movie) {
 function buildTagVocabularyCache() {
   if (tagVocabularyCache) return tagVocabularyCache;
   const frequency = new Map();
-  [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(movie => {
+  const activeRawTags = new Set();
+  Object.values(state.movies || {}).forEach(movie => {
+    rawScoringTags(movie).forEach(tag => {
+      activeRawTags.add(tag);
+      frequency.set(tag, (frequency.get(tag) || 0) + 1);
+    });
+  });
+  Object.values(state.hiddenTitles || {}).forEach(movie => {
     rawScoringTags(movie).forEach(tag => frequency.set(tag, (frequency.get(tag) || 0) + 1));
   });
   const entries = [...frequency.entries()];
   tagVocabularyCache = {
+    activeRawCount: activeRawTags.size,
     full: entries
       .slice()
       .sort((a,b) => a[1] - b[1] || a[0].localeCompare(b[0]))
@@ -2762,6 +2770,17 @@ async function expandPool(manual=true) {
   let attempts = 0;
   let aiFailure = '';
   let collectionSatisfied = false;
+  let pendingCollectionSaveIds = new Set();
+
+  const noteCollectionSave = movie => {
+    if (movie?.id) pendingCollectionSaveIds.add(String(movie.id));
+  };
+
+  const saveCollectionState = (opts={}) => {
+    const changedMovieIds = [...pendingCollectionSaveIds];
+    pendingCollectionSaveIds.clear();
+    saveLocalState({...opts, changedMovieIds});
+  };
 
   const progress = (label, title='') => {
     const health = collectionHealth();
@@ -2790,7 +2809,10 @@ async function expandPool(manual=true) {
       const rotation = pruneRollingCandidatePool({reason:'collection'});
       rebuildTagBrain();
       computeTagWeights();
-      saveLocalState();
+      if (rotation.evicted) {
+        pendingCollectionSaveIds.clear();
+        saveLocalState();
+      } else saveCollectionState();
       if (rotation.evicted) console.info('CineLens rolling pool rotated', rotation);
       if (!manual && !shouldRunBackgroundCollection()) collectionSatisfied = true;
     } catch (error) {
@@ -2809,7 +2831,7 @@ async function expandPool(manual=true) {
         movie.retagMessage = 'AI retry pending';
         touchRecord(movie);
       });
-      saveLocalState();
+      saveCollectionState();
 
       if (isExternalRateLimitError(error)) {
         aiFailure = message;
@@ -2867,7 +2889,10 @@ async function expandPool(manual=true) {
             const stored = upsertMoviePreservingUserState(movie, existingMovie);
 
             if (existingMovie) outcomes.duplicate++;
-            else added++;
+            else {
+              added++;
+              noteCollectionSave(stored);
+            }
 
             if (!hasCurrentAiTags(stored)) pendingAiMovies.push({movie:stored, lane});
             if (pendingAiMovies.length >= AI_TAG_BATCH_SIZE) await flushPendingAiMovies();
@@ -2918,7 +2943,10 @@ async function expandPool(manual=true) {
     const finalRotation = pruneRollingCandidatePool({reason:'collection-finalize'});
     rebuildTagBrain();
     computeTagWeights();
-    saveLocalState();
+    if (finalRotation.evicted) {
+      pendingCollectionSaveIds.clear();
+      saveLocalState();
+    } else saveCollectionState();
     if (finalRotation.evicted) console.info('CineLens rolling pool rotated', finalRotation);
     queueDriveSync();
     scheduleTagCloudNormalization(1500);
@@ -3924,7 +3952,6 @@ function render() {
   else if (activeTab === 'pool') renderPoolGrid();
   else if (activeTab === 'hidden') renderHiddenGrid();
   else renderRecs();
-  updateLibraryHealth();
   maybeAutoExpandPool();
 }
 
@@ -4412,7 +4439,12 @@ function renderRecs() {
     const visibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10));
       const ordered = (state.settings.sortMode || 'recommended') === 'recommended'
         ? scored
-        : sortMovies(scored.map(item => item.movie), 'title-asc').map(movie => scored.find(item => item.movie.id === movie.id)).filter(Boolean);
+        : (() => {
+            const scoredById = new Map(scored.map(item => [String(item.movie.id), item]));
+            return sortMovies(scored.map(item => item.movie), 'title-asc')
+              .map(movie => scoredById.get(String(movie.id)))
+              .filter(Boolean);
+          })();
       const top = ordered.slice(0, visibleLimit);
     const fetchStatus = recommendationFetchStatus(scored);
     if (top.length) {
@@ -5122,7 +5154,7 @@ function rateMovie(id, rating) {
     pendingSearchResetAfterRatingId = '';
     clearUnifiedTitleSearch();
   }
-  saveLocalState(); queueDriveSync(); render();
+  saveLocalState({changedMovieIds:[id]}); queueDriveSync(); render();
   scheduleTasteStoryUpdate();
   showToast(nextRating ? `"${movie.title}" → ${nextRating}/5` : `Removed rating from "${movie.title}"`, nextRating ? 'success' : '');
 }
@@ -5464,7 +5496,7 @@ function runHousekeeping(manual=true, deferCanonical=false) {
 function countUniqueTags() {
   return fullAiTagVocabulary().length;
 }
-function countRawTags() { const s=new Set(); Object.values(state.movies).forEach(m=>rawScoringTags(m).forEach(t=>s.add(t))); return s.size; }
+function countRawTags() { return buildTagVocabularyCache().activeRawCount; }
 function tagStatusText() { return `tags: ${countUniqueTags()} · candidates: ${countRawTags()}`; }
 function updateHKStatus(msg) {
   const el = document.getElementById('hkStatus');
@@ -5909,6 +5941,9 @@ let localDbSaveQueued=false;
 let localDbMovieSignatureCache=new Map();
 let localDbHiddenSignatureCache=new Map();
 let localDbProfileSignature='';
+let localDbSaveGeneration=0;
+let pendingDirtyMovieIds=new Set();
+let pendingFullSave=true;
 
 function openLocalDatabase() {
   if (localDbPromise) return localDbPromise;
@@ -5970,7 +6005,16 @@ function localProfilePayload() {
   };
 }
 
-function queueIndexedDbSave(delay=450) {
+function queueIndexedDbSave(delay=450, changedMovieIds=null) {
+  if (Array.isArray(changedMovieIds)) {
+    changedMovieIds.forEach(id => {
+      const key = String(id || '').trim();
+      if (key) pendingDirtyMovieIds.add(key);
+    });
+  } else {
+    pendingFullSave = true;
+  }
+  localDbSaveGeneration++;
   clearTimeout(localDbSaveTimer);
   localDbSaveTimer=setTimeout(() => persistStateToIndexedDb(), Math.max(0, Number(delay)||0));
 }
@@ -5978,26 +6022,49 @@ function queueIndexedDbSave(delay=450) {
 async function persistStateToIndexedDb() {
   if (localDbSaveInProgress) { localDbSaveQueued=true; return; }
   localDbSaveInProgress=true;
+  const saveGeneration=localDbSaveGeneration;
+  const saveFull=pendingFullSave;
+  const dirtyMovieIds=[...pendingDirtyMovieIds];
   try {
     const db=await openLocalDatabase();
     const tx=db.transaction(['movies','hidden','meta'],'readwrite');
     const moviesStore=tx.objectStore('movies');
     const hiddenStore=tx.objectStore('hidden');
-    const nextMovies=new Map();
-    const nextHidden=new Map();
+    let nextMovies=localDbMovieSignatureCache;
+    let nextHidden=localDbHiddenSignatureCache;
 
-    Object.entries(state.movies || {}).forEach(([id,movie]) => {
-      const signature=JSON.stringify(movie);
-      nextMovies.set(String(id),signature);
-      if (localDbMovieSignatureCache.get(String(id)) !== signature) moviesStore.put({...movie,id:String(movie.id || id)});
-    });
-    Object.entries(state.hiddenTitles || {}).forEach(([id,movie]) => {
-      const signature=JSON.stringify(movie);
-      nextHidden.set(String(id),signature);
-      if (localDbHiddenSignatureCache.get(String(id)) !== signature) hiddenStore.put({...movie,id:String(movie.id || id)});
-    });
-    localDbMovieSignatureCache.forEach((_,id) => { if (!nextMovies.has(id)) moviesStore.delete(id); });
-    localDbHiddenSignatureCache.forEach((_,id) => { if (!nextHidden.has(id)) hiddenStore.delete(id); });
+    if (saveFull) {
+      nextMovies=new Map();
+      nextHidden=new Map();
+      Object.entries(state.movies || {}).forEach(([id,movie]) => {
+        const signature=JSON.stringify(movie);
+        nextMovies.set(String(id),signature);
+        if (localDbMovieSignatureCache.get(String(id)) !== signature) moviesStore.put({...movie,id:String(movie.id || id)});
+      });
+      Object.entries(state.hiddenTitles || {}).forEach(([id,movie]) => {
+        const signature=JSON.stringify(movie);
+        nextHidden.set(String(id),signature);
+        if (localDbHiddenSignatureCache.get(String(id)) !== signature) hiddenStore.put({...movie,id:String(movie.id || id)});
+      });
+      localDbMovieSignatureCache.forEach((_,id) => { if (!nextMovies.has(id)) moviesStore.delete(id); });
+      localDbHiddenSignatureCache.forEach((_,id) => { if (!nextHidden.has(id)) hiddenStore.delete(id); });
+    } else {
+      nextMovies=new Map(localDbMovieSignatureCache);
+      nextHidden=new Map(localDbHiddenSignatureCache);
+      dirtyMovieIds.forEach(id => {
+        const movie=state.movies?.[id];
+        const hidden=state.hiddenTitles?.[id];
+        if (movie) {
+          const signature=JSON.stringify(movie);
+          nextMovies.set(id,signature);
+          if (localDbMovieSignatureCache.get(id) !== signature) moviesStore.put({...movie,id:String(movie.id || id)});
+        } else if (hidden) {
+          const signature=JSON.stringify(hidden);
+          nextHidden.set(id,signature);
+          if (localDbHiddenSignatureCache.get(id) !== signature) hiddenStore.put({...hidden,id:String(hidden.id || id)});
+        }
+      });
+    }
 
     const profile=localProfilePayload();
     const profileSignature=JSON.stringify(profile);
@@ -6006,6 +6073,10 @@ async function persistStateToIndexedDb() {
     localDbMovieSignatureCache=nextMovies;
     localDbHiddenSignatureCache=nextHidden;
     localDbProfileSignature=profileSignature;
+    if (localDbSaveGeneration === saveGeneration) {
+      pendingDirtyMovieIds.clear();
+      pendingFullSave=false;
+    }
     try { localStorage.removeItem('cinelens_v2'); } catch(_) {}
   } catch(error) {
     console.warn('IndexedDB local save failed',error);
@@ -6046,6 +6117,8 @@ async function loadIndexedDbState() {
     localDbMovieSignatureCache=new Map(movies.map(movie=>[String(movie.id),JSON.stringify(movie)]));
     localDbHiddenSignatureCache=new Map(hidden.map(movie=>[String(movie.id),JSON.stringify(movie)]));
     localDbProfileSignature=JSON.stringify(localProfilePayload());
+    pendingDirtyMovieIds.clear();
+    pendingFullSave=false;
     return true;
   } catch(error) {
     console.warn('IndexedDB local load failed',error);
@@ -6426,7 +6499,7 @@ function saveLocalState(opts={}) {
       updatedAt:state.meta?.updatedAt || nowStamp()
     }));
   } catch(e) { console.warn('Local bootstrap save failed',e); }
-  queueIndexedDbSave();
+  queueIndexedDbSave(450, opts.changedMovieIds);
   updateStats();
 }
 function loadLocalState() {
