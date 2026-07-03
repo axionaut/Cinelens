@@ -2629,15 +2629,45 @@ function discoveryCandidateAllowed(title, lane, existing, seenThisRun) {
 }
 
 async function nextLaneDiscoveryCandidates(lane, limit, existing, seenThisRun) {
-  // Consume the local Wikimedia candidate index first. Network work happens
-  // only when a year/lane slice has not yet been indexed on this device.
-  let out=await indexedCandidatesForLane(lane,limit,existing,seenThisRun);
-  let slicesBuilt=0;
-  while (out.length < limit && !fetchAbortRequested && slicesBuilt < 3) {
-    const indexed=await indexNextDiscoverySlice(lane);
-    if (!indexed) break;
-    slicesBuilt++;
-    out.push(...await indexedCandidatesForLane(lane,limit-out.length,existing,seenThisRun));
+  ensureDiscoveryCursor();
+  const categories = await fetchYearCategoryIndex(lane.key);
+  if (!categories.length) return [];
+  const cursor = state.discoveryCursor[lane.key];
+  if (cursor.categoryTitle) {
+    const savedIndex = categories.indexOf(cursor.categoryTitle);
+    if (savedIndex >= 0) cursor.categoryIndex = savedIndex;
+  }
+  const out = [];
+  let scannedCategories = 0;
+  let scannedTitles = 0;
+  while (out.length < limit && !fetchAbortRequested && scannedCategories < 24 && scannedTitles < 900) {
+    if (cursor.categoryIndex >= categories.length) {
+      cursor.categoryIndex = 0;
+      cursor.categoryTitle = '';
+      cursor.offset = 0;
+      cursor.cycles += 1;
+      Object.keys(yearCategoryIndexCache).filter(key => key.startsWith(`${lane.key}:`)).forEach(key => delete yearCategoryIndexCache[key]);
+      clearYearMemberCacheForCategories(categories);
+      break;
+    }
+    const category = categories[cursor.categoryIndex];
+    cursor.categoryTitle = category;
+    const members = await fetchYearCategoryMembers(category);
+    if (!members.length || cursor.offset >= members.length) {
+      cursor.categoryIndex += 1;
+      cursor.categoryTitle = categories[cursor.categoryIndex] || '';
+      cursor.offset = 0;
+      scannedCategories += 1;
+      continue;
+    }
+    const member = members[cursor.offset];
+    const title = typeof member === 'string' ? member : member.title;
+    cursor.offset += 1;
+    scannedTitles += 1;
+    if (discoveryCandidateAllowed(member, lane, existing, seenThisRun)) {
+      seenThisRun.add(normaliseTitleKey(title));
+      out.push({title, pageid:String(member?.pageid || ''), lane, tier:0, sourceCategory:category});
+    }
   }
   return out;
 }
@@ -2737,7 +2767,7 @@ async function expandPool(manual=true) {
     showFetchProgress(
       label,
       pct,
-      `${attempts}/${attemptBudget} candidates evaluated · ${added} added · ${health.strongCount}/${health.target} strong matches${title ? ` · ${title}` : ''}`
+      `${attempts}/${attemptBudget} checked · ${added} added · ${health.strongCount}/${health.target} strong matches${title ? ` · ${title}` : ''}`
     );
   };
 
@@ -2802,6 +2832,7 @@ async function expandPool(manual=true) {
       added < FETCH_MAX_ADDED_PER_RUN &&
       (manual || shouldRunBackgroundCollection())
     ) {
+      const cursorBeforeBatch = JSON.parse(JSON.stringify(state.discoveryCursor || {}));
       const remaining = Math.min(8, attemptBudget - attempts);
       const toFetch = await nextDiscoveryCandidates(mode, Math.max(1, remaining), seenThisRun);
       if (!toFetch.length) break;
@@ -2833,33 +2864,23 @@ async function expandPool(manual=true) {
             const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
             const stored = upsertMoviePreservingUserState(movie, existingMovie);
 
-            if (existingMovie) {
-              outcomes.duplicate++;
-              markIndexedCandidate(candidate,'known',{bumpAttempt:true});
-            } else {
-              added++;
-              markIndexedCandidate(candidate,'added',{bumpAttempt:true,addedAt:nowStamp()});
-            }
+            if (existingMovie) outcomes.duplicate++;
+            else added++;
 
             if (!hasCurrentAiTags(stored)) pendingAiMovies.push({movie:stored, lane});
             if (pendingAiMovies.length >= AI_TAG_BATCH_SIZE) await flushPendingAiMovies();
           } else if (movie) {
             outcomes.filtered++;
-            markIndexedCandidate(candidate,'rejected',{bumpAttempt:true,reason:'final-filter'});
           } else {
             outcomes.parser++;
             const reason = diagnostics.reason || 'Wikipedia parser rejected page';
             parserReasons[reason] = (parserReasons[reason] || 0) + 1;
-            markIndexedCandidate(candidate,'rejected',{bumpAttempt:true,reason});
           }
         } catch (error) {
           if (fetchAbortRequested || error?.name === 'AbortError') break;
           outcomes.parser++;
           const reason = String(error?.message || 'Wikipedia request failed');
           parserReasons[reason] = (parserReasons[reason] || 0) + 1;
-          // A transient request failure remains available. It should not poison
-          // an otherwise valid indexed candidate permanently.
-          markIndexedCandidate(candidate,'ready',{bumpAttempt:true,lastError:reason});
         }
 
         processedCandidates++;
@@ -2868,8 +2889,11 @@ async function expandPool(manual=true) {
         if (attempts % 20 === 0 && !fetchAbortRequested) await abortableSleep(WIKI_BATCH_PAUSE_MS);
       }
 
-      // Indexed slices are durable once built. Pausing a run must never roll the
-      // discovery cursor back to an already indexed year/category.
+      if (fetchAbortRequested && processedCandidates < toFetch.length) {
+        state.discoveryCursor = cursorBeforeBatch;
+        ensureDiscoveryCursor();
+        saveLocalState({preserveUpdatedAt:true});
+      }
 
       if (!fetchAbortRequested) await flushPendingAiMovies();
     }
@@ -5868,7 +5892,7 @@ async function resetAllData() {
 // LOCAL DATABASE — IndexedDB record cache
 // ─────────────────────────────────────────────
 const LOCAL_DB_NAME='cinelens_local_v3';
-const LOCAL_DB_VERSION=2;
+const LOCAL_DB_VERSION=1;
 const LOCAL_DB_PROFILE_KEY='profile';
 let localDbPromise=null;
 let localDbSaveTimer=null;
@@ -5877,11 +5901,6 @@ let localDbSaveQueued=false;
 let localDbMovieSignatureCache=new Map();
 let localDbHiddenSignatureCache=new Map();
 let localDbProfileSignature='';
-// Lightweight local Wikimedia discovery index. These records are metadata only
-// (page id/title/lane/year/source slice), never full plots or Gemini tags.
-let localCandidateIndexCache=new Map();
-let localCandidateIndexLoaded=false;
-let localCandidateIndexWriteQueue=new Map();
 
 function openLocalDatabase() {
   if (localDbPromise) return localDbPromise;
@@ -5893,7 +5912,6 @@ function openLocalDatabase() {
       if (!db.objectStoreNames.contains('movies')) db.createObjectStore('movies',{keyPath:'id'});
       if (!db.objectStoreNames.contains('hidden')) db.createObjectStore('hidden',{keyPath:'id'});
       if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
-      if (!db.objectStoreNames.contains('candidates')) db.createObjectStore('candidates',{keyPath:'key'});
     };
     request.onsuccess=()=>resolve(request.result);
     request.onerror=()=>reject(request.error || new Error('IndexedDB open failed'));
@@ -5938,140 +5956,6 @@ function localProfilePayload() {
       lastConnectedAt:state.drive.lastConnectedAt
     }
   };
-}
-
-
-function candidateIndexKey(laneKey, candidate) {
-  return `${laneKey}:${String(candidate?.pageid || candidate?.pageId || normaliseTitleKey(candidate?.title) || '')}`;
-}
-
-function candidateIndexYear(candidate) {
-  const direct=Number(candidate?.year);
-  if (Number.isFinite(direct) && direct >= 1900) return direct;
-  return yearFromTitleText(candidate?.sourceCategory || candidate?.title || '') || 0;
-}
-
-async function loadCandidateIndexFromIndexedDb() {
-  if (localCandidateIndexLoaded) return localCandidateIndexCache;
-  try {
-    const db=await openLocalDatabase();
-    const tx=db.transaction(['candidates'],'readonly');
-    const records=await idbRequest(tx.objectStore('candidates').getAll());
-    await idbTransactionDone(tx);
-    localCandidateIndexCache=new Map(records.map(record=>[record.key,record]));
-    localCandidateIndexLoaded=true;
-  } catch(error) {
-    console.warn('Candidate index load failed',error);
-    localCandidateIndexLoaded=true;
-  }
-  return localCandidateIndexCache;
-}
-
-function queueCandidateIndexWrite(record) {
-  if (!record?.key) return;
-  localCandidateIndexCache.set(record.key,record);
-  localCandidateIndexWriteQueue.set(record.key,record);
-  if (queueCandidateIndexWrite.timer) return;
-  queueCandidateIndexWrite.timer=setTimeout(async () => {
-    const entries=[...localCandidateIndexWriteQueue.values()];
-    localCandidateIndexWriteQueue.clear();
-    queueCandidateIndexWrite.timer=null;
-    if (!entries.length) return;
-    try {
-      const db=await openLocalDatabase();
-      const tx=db.transaction(['candidates'],'readwrite');
-      const store=tx.objectStore('candidates');
-      entries.forEach(item=>store.put(item));
-      await idbTransactionDone(tx);
-    } catch(error) { console.warn('Candidate index save failed',error); }
-  },120);
-}
-
-function markIndexedCandidate(candidate, status, extra={}) {
-  if (!candidate?.candidateKey) return;
-  const prior=localCandidateIndexCache.get(candidate.candidateKey) || {};
-  queueCandidateIndexWrite({
-    ...prior,
-    key:candidate.candidateKey,
-    status,
-    updatedAt:nowStamp(),
-    attempts:Number(prior.attempts || 0) + (extra.bumpAttempt ? 1 : 0),
-    ...extra
-  });
-}
-
-function candidateIndexKnownSets() {
-  const known=[...Object.values(state.movies || {}),...Object.values(state.hiddenTitles || {})];
-  return {
-    titles:new Set(known.flatMap(movie=>[movie.title,movie.wikiTitle,movie.pageTitle].map(normaliseTitleKey).filter(Boolean))),
-    pageIds:new Set(known.map(wikiPageIdFromMovie).filter(Boolean))
-  };
-}
-
-function indexedCandidateAvailable(record, lane, existing, seenThisRun) {
-  if (!record || record.laneKey !== lane.key || record.status !== 'ready') return false;
-  if (candidateIndexYear(record) < collectionMinYear()) return false;
-  const title=record.title || '';
-  const clean=normaliseTitleKey(title);
-  const pageId=String(record.pageid || '');
-  if (!clean || TITLE_BLOCKLIST.has(clean) || obviousNonMovieTitle(title)) return false;
-  if (existing.titles.has(clean) || (pageId && existing.pageIds.has(pageId))) return false;
-  if (hiddenTitleMatches(title) || wrongPickMatches(title) || rollingPoolExclusionMatches(title) || seenThisRun.has(clean)) return false;
-  return true;
-}
-
-async function indexedCandidatesForLane(lane, limit, existing, seenThisRun) {
-  await loadCandidateIndexFromIndexedDb();
-  const results=[];
-  const records=[...localCandidateIndexCache.values()]
-    .filter(record=>indexedCandidateAvailable(record,lane,existing,seenThisRun))
-    .sort((a,b)=>candidateIndexYear(b)-candidateIndexYear(a)||String(a.sourceCategory||'').localeCompare(String(b.sourceCategory||''))||String(a.title||'').localeCompare(String(b.title||'')));
-  for (const record of records) {
-    if (results.length >= limit) break;
-    const clean=normaliseTitleKey(record.title);
-    seenThisRun.add(clean);
-    results.push({title:record.title,pageid:String(record.pageid || ''),lane,tier:0,sourceCategory:record.sourceCategory || '',candidateKey:record.key});
-  }
-  return results;
-}
-
-async function indexNextDiscoverySlice(lane) {
-  await loadCandidateIndexFromIndexedDb();
-  ensureDiscoveryCursor();
-  const categories=await fetchYearCategoryIndex(lane.key);
-  if (!categories.length) return 0;
-  const cursor=state.discoveryCursor[lane.key];
-  if (cursor.categoryTitle) {
-    const saved=categories.indexOf(cursor.categoryTitle);
-    if (saved >= 0) cursor.categoryIndex=saved;
-  }
-  if (cursor.categoryIndex >= categories.length) return 0;
-  const category=categories[cursor.categoryIndex];
-  const members=await fetchYearCategoryMembers(category);
-  const year=yearFromTitleText(category);
-  const indexedAt=nowStamp();
-  let added=0;
-  members.forEach(member=>{
-    const title=member?.title || '';
-    if (!title || obviousNonMovieTitle(title)) return;
-    const key=candidateIndexKey(lane.key,member);
-    if (!key.endsWith(':')) {
-      const prior=localCandidateIndexCache.get(key);
-      if (!prior) {
-        queueCandidateIndexWrite({key,laneKey:lane.key,title,pageid:String(member?.pageid || ''),year,sourceCategory:category,status:'ready',indexedAt,updatedAt:indexedAt,attempts:0});
-        added++;
-      }
-    }
-  });
-  // The cursor advances after the *slice is indexed*, never after a title is
-  // fetched. Categories are ordered newest-to-oldest, so 2014 is followed by
-  // 2013, not 2015.
-  cursor.categoryIndex += 1;
-  cursor.categoryTitle=categories[cursor.categoryIndex] || '';
-  cursor.offset=0;
-  cursor.cycles=Math.max(0,Number(cursor.cycles)||0);
-  saveLocalState({preserveUpdatedAt:true});
-  return added;
 }
 
 function queueIndexedDbSave(delay=450) {
