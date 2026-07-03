@@ -20,6 +20,8 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
+const APP_VERSION = 'v2026.07.03.1';
+const APP_RELEASE_DATE = '2026-07-03';
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -1445,6 +1447,7 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
+  renderAppVersion();
   loadLocalState();
   await loadIndexedDbState();
   // Import a legacy localStorage library once, then remove its large payload only
@@ -3912,6 +3915,7 @@ function matchesTab(m) {
 // RENDER
 // ─────────────────────────────────────────────
 function render() {
+  renderAppVersion();
   updateStats();
   updateAiTagButton();
   updateVisibleSections();
@@ -3924,6 +3928,13 @@ function render() {
   else renderRecs();
   updateLibraryHealth();
   maybeAutoExpandPool();
+}
+
+function renderAppVersion() {
+  const label = document.getElementById('appVersion');
+  if (!label) return;
+  label.textContent = APP_VERSION;
+  label.title = `CineLens ${APP_VERSION} released ${APP_RELEASE_DATE}`;
 }
 
 function updateControlDeck() {

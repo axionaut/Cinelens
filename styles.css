@@ -10,8 +10,10 @@
   body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");pointer-events:none;z-index:9999;opacity:.4}
 
   header{position:sticky;top:0;z-index:100;background:rgba(16,13,11,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:0 28px;height:54px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 8px 28px rgba(0,0,0,.22)}
+  .header-left{display:flex;align-items:center;gap:14px;min-width:0}
   .logo{font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:3px;color:var(--accent);line-height:1}
   .logo span{color:var(--muted);font-size:12px;font-family:'DM Mono',monospace;letter-spacing:1px;margin-left:8px;vertical-align:middle}
+  .app-version{display:inline-flex;align-items:center;height:22px;padding:0 7px;border:1px solid rgba(242,193,78,.18);border-radius:4px;background:rgba(242,193,78,.08);color:#d9c28e;font:500 11px/1 'DM Mono',monospace;white-space:nowrap}
   .header-right{display:flex;align-items:center;gap:8px}
 
   .tab-bar{display:flex;gap:3px;background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:3px}
@@ -395,8 +397,9 @@
   .tag-insight-chip.score-negative{border-color:rgba(239,83,80,.55);color:#ff7c78;background:rgba(239,83,80,.1)}
   @media(max-width:768px){
     header{position:sticky;display:grid;grid-template-columns:1fr auto;align-items:center;height:auto;min-height:56px;padding:10px 12px}
-    header>div:first-child{min-width:0;display:flex!important;gap:10px!important}
+    .header-left{min-width:0;display:flex!important;gap:10px!important}
     .logo{font-size:26px;white-space:nowrap}
+    .app-version{height:20px;padding:0 6px;font-size:10px}
     .nav-toggle{display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(255,204,51,.22);background:rgba(255,255,255,.05);color:var(--accent);border-radius:6px;padding:6px 9px;font-family:'DM Mono',monospace;font-size:10px}
     .tab-bar{display:none;position:absolute;left:12px;right:12px;top:56px;z-index:140;background:#111;border-color:#3b3328;border-radius:8px;padding:8px;grid-template-columns:repeat(3,1fr);gap:6px}
     .tab-bar.open{display:grid}
