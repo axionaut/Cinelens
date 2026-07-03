@@ -41,10 +41,10 @@ The required delivery sequence is:
 6. Commit the app and spec changes together.
 7. Push the commit to the remote branch.
 
-The app version is maintained in `app.js` as `APP_VERSION` and shown in the
-main header beside the CineLens logo. Each pushed app change must increment the
-visible version in the same commit so a deployed page can be identified without
-opening developer tools.
+The app version is maintained in `app.js` as an integer `APP_VERSION` and shown
+in the main header beside the CineLens logo. Each pushed app change must
+increment the visible version by exactly 1 in the same commit so a deployed
+page can be identified without opening developer tools.
 
 Assistant status and final responses for code-change work should start by
 confirming `spec.md` has been considered and should end by stating whether
@@ -713,10 +713,10 @@ Card width should remain readable and avoid becoming tiny tiles.
 
 ### 4.3 Header Tabs
 
-The main header shows the CineLens logo, a compact app-version badge and the
-primary tab navigation. The version badge must remain close to the logo on
-desktop and mobile, and it must read from the app's release constants rather
-than user data or Drive state.
+The main header shows the CineLens logo, a compact integer app-version badge
+and the primary tab navigation. The version badge must remain close to the logo
+on desktop and mobile, and it must read from `APP_VERSION` rather than user
+data or Drive state.
 
 Top tab bar should include:
 
