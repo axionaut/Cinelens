@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 2;
+const APP_VERSION = 3;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -5901,7 +5901,6 @@ async function resetAllData() {
 // LOCAL DATABASE — IndexedDB record cache
 // ─────────────────────────────────────────────
 const LOCAL_DB_NAME='cinelens_local_v3';
-const LOCAL_DB_VERSION=1;
 const LOCAL_DB_PROFILE_KEY='profile';
 let localDbPromise=null;
 let localDbSaveTimer=null;
@@ -5915,7 +5914,11 @@ function openLocalDatabase() {
   if (localDbPromise) return localDbPromise;
   localDbPromise=new Promise((resolve,reject) => {
     if (!('indexedDB' in window)) { reject(new Error('IndexedDB unavailable')); return; }
-    const request=indexedDB.open(LOCAL_DB_NAME, LOCAL_DB_VERSION);
+    // Never request a lower schema version than an existing device database.
+    // The reverted candidate-index migration may have already upgraded this DB.
+    // Opening without an explicit version safely reuses that database and its
+    // normal movies/hidden/meta stores.
+    const request=indexedDB.open(LOCAL_DB_NAME);
     request.onupgradeneeded=() => {
       const db=request.result;
       if (!db.objectStoreNames.contains('movies')) db.createObjectStore('movies',{keyPath:'id'});

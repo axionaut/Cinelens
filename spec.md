@@ -152,6 +152,10 @@ library or as the normal Drive-sync unit.
   not rewrite the entire local catalogue.
 - A legacy `cinelens_v2` localStorage snapshot is imported once on the first
   v3 startup, then removed only after the IndexedDB write succeeds.
+- The app must open the existing `cinelens_local_v3` IndexedDB database without
+  requesting a lower schema version. A reverted experimental migration may leave
+  extra object stores behind; those stores are harmless and must not prevent the
+  active app from opening the existing `movies`, `hidden` and `meta` stores.
 
 #### Chunked Drive model
 
@@ -946,46 +950,16 @@ reached 2014, the next historical slice is 2013, never 2015. The collector may
 stay within a year slice until its locally indexed candidates are exhausted,
 but it must not restart from newer years merely because a fetch run ends.
 
-### 6.0.1 Local Wikimedia candidate index
+### 6.0.1 Collection cursor persistence
 
-CineLens must not rediscover and re-check the same broad Wikipedia category
-members every time a collection run starts. It keeps a lightweight local
-candidate index in IndexedDB.
+Automatic discovery currently uses the existing Wikipedia year/category flow.
+It must preserve each lane cursor across pauses, restarts and device sync so a
+collection run continues backward through history: `2014 → 2013 → 2012`.
 
-Each index record contains only discovery metadata:
-
-```text
-lane key
-Wikipedia page ID
-title
-year
-source category
-status: ready / added / known / rejected
-attempt metadata
-```
-
-It deliberately does not contain full extracts, plots, posters or Gemini tags.
-Those remain expensive title-level data fetched only after a candidate is
-selected.
-
-Collection flow:
-
-1. Read ready candidates from the local index for the current lane/year slice.
-2. Subtract active, Hidden, permanently removed and rolling-excluded titles by
-   page ID and normalized title before any page fetch.
-3. If more candidates are needed, index the next unindexed Wikipedia year
-   category once, save its lightweight members in IndexedDB and advance the
-   lane cursor immediately.
-4. Select exact unseen candidates from that index and fetch only their pages
-   for final story/type/language validation and Gemini tagging.
-5. Mark final outcomes in the local candidate index. Added, already-known and
-   parser-rejected pages are not fetched again. Transient network failures
-   remain available for a later retry.
-
-The index is per-device cache data. It is not copied into the Drive personal
-profile and it is not part of the large title catalogue. A device may build an
-index slice once, use it repeatedly until exhausted and only then ask Wikimedia
-for the next descending year slice.
+The reverted experimental local Wikimedia candidate-index feature is not part of
+the active collection design. Any leftover IndexedDB `candidates` object store
+from that experiment is ignored by the app and must not affect startup, cache
+loading or normal collection.
 
 ### 6.1 API Discipline
 
