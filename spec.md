@@ -93,9 +93,10 @@ uses these rules:
   records from IndexedDB.
 - Scoped IndexedDB saves are allowed only for hot paths that change known
   records without deletion: rating one active title, and collection saves for
-  newly added titles during an expansion run. Scoped saves upsert only the
-  provided ids wherever they currently live, keep unrelated records untouched
-  and still compare/write the compact profile payload.
+  every title an expansion run created or mutated, including duplicates that
+  received fresh Wikipedia data, AI tags or AI retry metadata. Scoped saves
+  upsert only the provided ids wherever they currently live, keep unrelated
+  records untouched and still compare/write the compact profile payload.
 
 ### 2.4.1 Rolling candidate pool
 
@@ -1747,7 +1748,7 @@ Every completed code change must follow this sequence before it is reported as d
 2. Syntax-check the real `app.js` file.
 3. Run a targeted runtime smoke test in headless Chrome against the real split app, preferably served from localhost when storage or browser behavior is involved.
 4. Exercise the changed user flow and verify its persisted state, not only function presence.
-5. Remove every temporary test artifact, including smoke-test HTML files, extracted scripts, browser profiles, logs, server output and generated scratch files.
+5. Remove every temporary test artifact, including ad hoc smoke-test HTML files, extracted scripts, browser profiles, logs, server output and generated scratch files.
 6. Confirm no temporary artifact remains in the workspace, staged changes, system temp directory or any external browser-profile path used by the test.
 7. Run `git diff --check` and review the final diff for unintended changes.
 8. Commit only the intended project files with a descriptive commit message.
@@ -1762,9 +1763,12 @@ app.js
 styles.css
 spec.md
 .gitattributes
+dev/harness.mjs
+dev/assert-vNNN.mjs
+dev/README.md
 ```
 
-When any of these files are part of the change, stage, commit and push the related bundle files together. Do not stage editor files, generated syntax extracts, smoke harnesses, browser profiles, logs or other temporary artifacts.
+When any of these files are part of the change, stage, commit and push the related bundle files together. The committed `dev/` harness and per-release assertion files are permanent test code. Future behavior smokes must reuse `node dev/harness.mjs dev/assert-vNNN.mjs`; if the harness lacks a shared capability, extend the harness itself. Do not stage editor files, generated syntax extracts, throwaway smoke rigs, browser profiles, logs or other temporary artifacts.
 
 Do not describe a change as complete after static checks alone when a browser-visible or persistence behavior was changed.
 
@@ -2443,9 +2447,13 @@ focused behavior smoke for the changed path
 temporary harness/profile cleanup
 ```
 
-Only `index.html`, `styles.css` and `app.js` are application release files.
-`spec.md`, workspace files, smoke harnesses, browser profiles and generated
-artifacts must not be staged, committed or pushed.
+`index.html`, `styles.css` and `app.js` are application release files.
+`spec.md`, `.gitattributes` and the committed `dev/` smoke harness plus
+per-release assertion files are permanent repository files. Future behavior
+smokes must run through `node dev/harness.mjs dev/assert-vNNN.mjs`; if a smoke
+needs new shared capability, extend the harness instead of creating a
+throwaway rig. Workspace files, temporary browser profiles, logs, downloads,
+server output and generated artifacts must not be staged, committed or pushed.
 
 ## 26. Rejected Title Refresh Lane
 

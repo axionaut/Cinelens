@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 4;
+const APP_VERSION = 5;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -2800,6 +2800,7 @@ async function expandPool(manual=true) {
       .filter(movie => movie?.storyText && !hasCurrentAiTags(movie));
 
     if (!movies.length) return;
+    movies.forEach(noteCollectionSave);
 
     progress('AI tagging new titles…', movies.map(movie => movie.title).join(' · '));
 
@@ -2887,11 +2888,11 @@ async function expandPool(manual=true) {
           } else if (movie && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
             const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
             const stored = upsertMoviePreservingUserState(movie, existingMovie);
+            noteCollectionSave(stored);
 
             if (existingMovie) outcomes.duplicate++;
             else {
               added++;
-              noteCollectionSave(stored);
             }
 
             if (!hasCurrentAiTags(stored)) pendingAiMovies.push({movie:stored, lane});
