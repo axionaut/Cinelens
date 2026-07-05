@@ -1,0 +1,6 @@
+# Local-only files — not part of the public deployed app
+Apps Script.txt
+spec.md
+brief.md
+dev/
+Cinelens.code-workspace
