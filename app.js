@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 9;
+const APP_VERSION = 10;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -1412,10 +1412,11 @@ function runStartupMaintenance() {
       const removedConventionalHorror = purgeDisallowedConventionalHorror();
       const excludedSensitiveTitles = purgeAiSensitiveContentExclusions();
       const addedAtMigrated = ensureAddedAtMetadata();
+      const ratedAtMigrated = ensureRatedAtMetadata();
       const retiredWatchlist = retireWatchlistForRecentlyAdded();
       const changed = cleanContaminatedTags(true);
       const rotation = pruneRollingCandidatePool({reason:'startup'});
-      if (removedHindiShows || removedConventionalHorror || excludedSensitiveTitles || addedAtMigrated || retiredWatchlist || changed || rotation.evicted) {
+      if (removedHindiShows || removedConventionalHorror || excludedSensitiveTitles || addedAtMigrated || ratedAtMigrated || retiredWatchlist || changed || rotation.evicted) {
         saveLocalState();
         queueDriveSync();
         render();
@@ -1481,8 +1482,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   const startupRemovedHindiShows = purgeDisallowedHindiShows();
   const startupRemovedConventionalHorror = purgeDisallowedConventionalHorror();
   const startupAddedAtMigrated = ensureAddedAtMetadata();
+  const startupRatedAtMigrated = ensureRatedAtMetadata();
   const startupRetiredWatchlist = retireWatchlistForRecentlyAdded();
-  if (startupRemovedHindiShows || startupRemovedConventionalHorror || startupAddedAtMigrated || startupRetiredWatchlist) saveLocalState({preserveUpdatedAt:true});
+  if (startupRemovedHindiShows || startupRemovedConventionalHorror || startupAddedAtMigrated || startupRatedAtMigrated || startupRetiredWatchlist) saveLocalState({preserveUpdatedAt:true});
   startupInitialLibraryPresent = libraryRecordCount() > 0;
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   // A Drive-enabled device must not treat a catalogue-only cache as a usable
@@ -1613,7 +1615,10 @@ function findExistingMovieByIdentity(movie, collection=state.movies) {
 
 function mergeUserState(target, source) {
   if (!target || !source) return target;
-  if (!Number(target.rating || 0) && Number(source.rating || 0)) target.rating = Number(source.rating || 0);
+  if (!Number(target.rating || 0) && Number(source.rating || 0)) {
+    target.rating = Number(source.rating || 0);
+    if (source.ratedAt && !target.ratedAt) target.ratedAt = source.ratedAt;
+  }
   if (source.watchlist) target.watchlist = true;
   if (source.manualAdded) target.manualAdded = true;
   if (source.skipped) target.skipped = true;
@@ -1621,6 +1626,26 @@ function mergeUserState(target, source) {
   target.suppressedTags = [...new Set([...(target.suppressedTags || []), ...(source.suppressedTags || [])])];
   target.suppressedRawTags = [...new Set([...(target.suppressedRawTags || []), ...(source.suppressedRawTags || [])])];
   return target;
+}
+
+function ratingTimestamp(movie) {
+  return Date.parse(movie?.ratedAt || '') || 0;
+}
+
+function legacyRatingTimestamp(movie) {
+  return movie?._updatedAt || movie?.updatedAt || movie?.addedAt || movie?.fetchedAt || movie?.createdAt || '';
+}
+
+function ensureRatedAtMetadata() {
+  let changed = 0;
+  Object.values(state.movies || {}).forEach(movie => {
+    if (Number(movie?.rating || 0) <= 0 || movie.ratedAt) return;
+    const stamp = legacyRatingTimestamp(movie);
+    if (!stamp) return;
+    movie.ratedAt = stamp;
+    changed++;
+  });
+  return changed;
 }
 
 function movieAddedTime(movie) {
@@ -4851,7 +4876,10 @@ function showMoreSearchResults() {
 function renderRatedGrid() {
   const grid = document.getElementById('ratedGrid');
   if (!grid) return;
-  const rated = sortMovies(Object.values(state.movies || {}).filter(m => Number(m.rating || 0) > 0).filter(matchesGlobalFilters), 'rating-desc');
+  const rated = Object.values(state.movies || {})
+    .filter(m => Number(m.rating || 0) > 0)
+    .filter(matchesGlobalFilters)
+    .sort((a,b) => (ratingTimestamp(b) || recordTimestamp(b) || movieAddedTime(b)) - (ratingTimestamp(a) || recordTimestamp(a) || movieAddedTime(a)) || titleSortKey(a).localeCompare(titleSortKey(b)));
   updateAiTagButton();
   const count = document.getElementById('ratedCount');
   if (count) count.textContent = rated.length ? `${rated.length} titles` : 'none yet';
@@ -5624,7 +5652,9 @@ function rateMovie(id, rating) {
   const currentRating = Number(movie.rating || 0);
   const clickedRating = Number(rating);
   const nextRating = currentRating === 1 && clickedRating === 1 ? 0 : clickedRating;
+  const ratingChanged = currentRating !== nextRating;
   movie.rating = nextRating;
+  if (ratingChanged) movie.ratedAt = nowStamp();
   if (nextRating > 0) movie.watchlist = false;
   touchRecord(movie);
   collapseDuplicateMovies(state.movies);
@@ -6174,6 +6204,13 @@ function setTagFilter(filter, btn) {
   btn.classList.add('active');
   renderTagBrain();
 }
+
+function formatTagBrainWeight(value) {
+  const num = Number(value || 0);
+  if (Math.abs(num) < 0.005) return '~';
+  return `${num > 0 ? '+' : ''}${num.toFixed(2)}`;
+}
+
 function renderTagBrain() {
   computeTagWeights();
   if (!state.settings.tagPreferences) state.settings.tagPreferences = {};
@@ -6203,7 +6240,7 @@ function renderTagBrain() {
   countEl.textContent=`${entries.length} tags${tagFilter!=='all'||search?' · filtered':''}`;
   grid.innerHTML=entries.map(([tag,data])=>{
     const cls=data.weight>0?'positive':data.weight<0?'negative':'neutral';
-    const ws=data.weight>0?'+'+data.weight:data.weight===0?'~':data.weight;
+    const ws=formatTagBrainWeight(data.weight);
     const pref=data.preference ? `<span class="tb-pref">${data.preference > 0 ? 'pref +' : 'pref '}${data.preference}</span>` : '';
     const safe=tag.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     const title = state.settings.tagDeleteMode
@@ -6654,7 +6691,8 @@ function touchSettings(stamp=nowStamp()) {
 }
 
 
-function syncMustWaitForForegroundWork() {
+function syncMustWaitForForegroundWork({respectHardCap=false}={}) {
+  if (respectHardCap && driveSyncDeferredSince && Date.now() - driveSyncDeferredSince >= DRIVE_SYNC_MAX_DEFER_MS) return false;
   return !!(
     poolExpansionInProgress ||
     receptionBackfillInProgress ||
@@ -6666,17 +6704,19 @@ function syncMustWaitForForegroundWork() {
 
 function queueDriveSync(delay=DRIVE_SYNC_DEBOUNCE_MS) {
   if (!state.drive?.enabled && !state.drive?.connected && !state.drive?.accessToken) return;
+  if (!driveSyncDeferredSince) driveSyncDeferredSince = Date.now();
   driveSyncDeferred=true;
   clearTimeout(driveSyncTimer);
+  const requestedDelay = Number(delay);
   driveSyncTimer=setTimeout(() => {
     driveSyncTimer=null;
-    if (syncMustWaitForForegroundWork()) {
+    if (syncMustWaitForForegroundWork({respectHardCap:true})) {
       queueDriveSync(Math.max(1000, delay));
       return;
     }
     driveSyncDeferred=false;
     syncDrive(false);
-  }, Math.max(0, Number(delay) || DRIVE_SYNC_DEBOUNCE_MS));
+  }, Math.max(0, Number.isFinite(requestedDelay) ? requestedDelay : DRIVE_SYNC_DEBOUNCE_MS));
 }
 
 function queueSettingsSync() {
@@ -7057,7 +7097,9 @@ let driveSyncInProgress=false;
 let driveSyncQueued=false;
 let driveSyncTimer=null;
 let driveSyncDeferred=false;
+let driveSyncDeferredSince=0;
 const DRIVE_SYNC_DEBOUNCE_MS=1200;
+const DRIVE_SYNC_MAX_DEFER_MS=10000;
 const DRIVE_TOKEN_KEY='cinelens_drive_token_v1';
 const DRIVE_TOKEN_EXPIRY_KEY='cinelens_drive_token_expiry_v1';
 const DRIVE_SILENT_TOKEN_TIMEOUT_MS=8000;
@@ -7083,7 +7125,7 @@ function scheduleDriveTokenRefresh(expiry=0) {
     if (!state.drive.enabled && !state.drive.connected) return;
     try {
       state.drive.accessToken = '';
-      await requestDriveTokenSilent();
+      await requestDriveTokenSilent({allowPromptlessRequest:true});
       state.drive.connected = true;
       setDriveStatus('connected');
     } catch(e) {
@@ -7178,11 +7220,7 @@ async function connectDrive() {
   setDriveStatus('syncing');
   try {
     if (!googleIdentityReady()) await waitForGoogleIdentity();
-    try {
-      await requestDriveTokenSilent();
-    } catch(e) {
-      await requestDriveTokenInteractive();
-    }
+    await requestDriveTokenInteractive({forcePrompt:true});
     state.drive.enabled=true;
     const manifest=await findDriveManifest();
     if (manifest) {
@@ -7317,20 +7355,17 @@ function tokenRequest(prompt, opts={}) {
     catch(e) { finish(reject, e); }
   });
 }
-async function requestDriveTokenInteractive() {
-  const stored=getStoredDriveToken();
+async function requestDriveTokenInteractive(opts={}) {
+  const stored=opts.forcePrompt ? '' : getStoredDriveToken();
   if (stored) { state.drive.accessToken=stored; return stored; }
   await waitForGoogleIdentity();
-  try {
-    return await tokenRequest('');
-  } catch(e) {
-    return tokenRequest('select_account');
-  }
+  return tokenRequest('');
 }
-async function requestDriveTokenSilent() {
+async function requestDriveTokenSilent(opts={}) {
   if (state.drive.accessToken) return state.drive.accessToken;
   const stored=getStoredDriveToken();
   if (stored) { state.drive.accessToken=stored; return stored; }
+  if (!opts.allowPromptlessRequest) throw {error:'interaction_required'};
   await waitForGoogleIdentity();
   return tokenRequest('none', {timeoutMs:DRIVE_SILENT_TOKEN_TIMEOUT_MS});
 }
@@ -7372,6 +7407,7 @@ function catalogueMovieForDrive(movie) {
   const copy={...movie};
   // Personal state syncs in profile. It must not cause a catalogue-chunk upload.
   delete copy.rating;
+  delete copy.ratedAt;
   delete copy.watchlist;
   delete copy.manualAdded;
   delete copy.hiddenAt;
@@ -7380,15 +7416,22 @@ function catalogueMovieForDrive(movie) {
 }
 
 function personalMovieState(movie) {
+  const ratedAt = movie?.ratedAt || (Number(movie?.rating || 0) > 0 ? legacyRatingTimestamp(movie) : '');
   return {
     rating:Number(movie?.rating || 0),
+    ratedAt,
     watchlist:!!movie?.watchlist,
     manualAdded:!!movie?.manualAdded,
     // Catalogue chunks intentionally omit _updatedAt. Never manufacture a
     // fresh timestamp for that blank personal overlay: doing so can beat a
     // real Drive rating during restore and reset it to zero.
-    updatedAt:movie?._updatedAt || ''
+    updatedAt:ratedAt || ''
   };
+}
+
+function personalOverlayRatedAt(personal={}) {
+  if (personal.ratedAt) return personal.ratedAt;
+  return Number(personal.rating || 0) > 0 ? String(personal.updatedAt || '') : '';
 }
 
 function buildDriveChunks() {
@@ -7447,15 +7490,20 @@ function applyDriveProfile(profile,{merge=true,preferDrive=false}={}) {
     const movie=state.movies?.[id];
     if (!movie) return;
     const localPersonal=personalMovieState(movie);
-    const remoteStamp=recordTimestamp({_updatedAt:remotePersonal.updatedAt});
-    const localStamp=recordTimestamp({_updatedAt:localPersonal.updatedAt});
+    const remoteStamp=Date.parse(personalOverlayRatedAt(remotePersonal) || '') || 0;
+    const localStamp=Date.parse(personalOverlayRatedAt(localPersonal) || '') || 0;
+    const remoteHasRating=Number(remotePersonal.rating || 0) > 0;
+    const localHasRating=Number(localPersonal.rating || 0) > 0;
     // During startup restore, Drive is the canonical personal profile. On
     // later background convergence, retain the newer genuine personal edit.
-    const chosen=preferDrive || remoteStamp >= localStamp ? remotePersonal : localPersonal;
+    let chosen = localPersonal;
+    if (preferDrive && (remoteStamp || !localHasRating)) chosen = remotePersonal;
+    else if (remoteStamp > localStamp) chosen = remotePersonal;
+    else if (!localHasRating && remoteHasRating && remoteStamp === localStamp) chosen = remotePersonal;
     movie.rating=Number(chosen.rating || 0);
+    movie.ratedAt=personalOverlayRatedAt(chosen);
     movie.watchlist=!!chosen.watchlist;
     movie.manualAdded=!!chosen.manualAdded;
-    if (chosen.updatedAt) movie._updatedAt=chosen.updatedAt;
   });
   if (profile.meta) state.meta={...state.meta,...profile.meta};
   invalidateTagCaches();
@@ -7764,7 +7812,7 @@ async function createDriveFile() {
   } catch(e){showToast('Drive file create failed','error');}
 }
 async function syncDrive(manual=false) {
-  if (!manual && syncMustWaitForForegroundWork()) {
+  if (!manual && syncMustWaitForForegroundWork({respectHardCap:true})) {
     queueDriveSync(1200);
     return;
   }
@@ -7774,6 +7822,7 @@ async function syncDrive(manual=false) {
   }
   const finishSync=() => {
     driveSyncInProgress=false;
+    driveSyncDeferredSince=0;
     if (driveSyncQueued) {
       driveSyncQueued=false;
       queueDriveSync(350);
