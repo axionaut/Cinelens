@@ -1513,8 +1513,11 @@ Expected behavior:
 - On load, attempt Drive restore if a valid token exists.
 - If token expired, clear it and show not connected.
 - Manual Drive button requests interactive token.
-- Silent token request may be attempted where Google/browser allows.
-- If browser blocks silent auth, manual button must still work.
+- Silent/startup/refresh/re-auth token requests must use `prompt:'none'` so a
+  browser that cannot issue silently fails quietly instead of opening Google
+  sign-in UI.
+- If browser blocks silent auth, render from the local cache, show the quiet
+  Drive reconnect state and keep the manual Drive button interactive.
 
 ### 9.4 Critical Drive Rule
 
@@ -2407,6 +2410,12 @@ second competing library.
   records during later synchronization.
 - At the end of a successful sync, the canonical Drive file and that browser's
   local cache contain the same dataset.
+- Startup, refresh and 401 re-auth Drive token attempts are non-interactive and
+  use Google `prompt:'none'`. If a mobile browser cannot issue a silent token,
+  CineLens must not open the Google sign-in page by itself; it keeps rendering
+  the local IndexedDB cache and shows the existing Drive reconnect state until
+  the user explicitly taps Drive. The explicit Drive button remains the only
+  path that may request interactive sign-in.
 
 The persisted dataset includes movies, hidden titles, removal records,
 settings and tag preferences, tag normalization state, discovery cursors,
@@ -2506,8 +2515,18 @@ Existing-title reception backfill is bounded, idle, resumable and scoped. It
 does not refetch the whole library at startup, does not block initial render,
 Drive restore, IndexedDB hydration, rating, search or normal recommendation
 rendering, and persists only changed record ids through scoped IndexedDB saves.
-The local database remains opened version-less for `cinelens_local_v3`; do not
-reintroduce an explicit lower IndexedDB schema version.
+Backfill prioritizes rated titles first, then current unrated recommendation
+candidates by predicted fit, then the remaining eligible titles. Failed refetch
+attempts stamp per-title retry metadata and are skipped for a cooldown so one
+bad page cannot block later titles. Backfill is maintenance, not collection:
+`Stop Fetching` stops pool expansion but does not permanently freeze reception
+backfill, which resumes on idle after foreground collection or AI tagging is
+clear. The existing Library maintenance line may show the remaining count as
+`N titles need quality data`; cards may only add the terse inherited
+`reception-aware` hint on the match line when the displayed score actually uses
+usable reception. The local database remains opened version-less for
+`cinelens_local_v3`; do not reintroduce an explicit lower IndexedDB schema
+version.
 
 ## 26. Rejected Title Refresh Lane
 

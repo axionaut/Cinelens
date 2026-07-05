@@ -128,7 +128,8 @@ export default async function run(t) {
       excluded,
       oldScore:oldScore.matchScore,
       v5Rating:state.movies.wiki_rate.rating,
-      version:String(APP_VERSION)
+      version:String(APP_VERSION),
+      expectedVersion:String(APP_VERSION)
     };
   }, extract('positive'), extract('vague'), extract('none'));
 
@@ -143,5 +144,5 @@ export default async function run(t) {
   t.assert(result.looDelta < 0.0001, 'leave-one-out rated card uses the same reception shift as recommendation card', String(result.looDelta));
   t.assert(result.belowGlobal === 0.9 && result.pooled >= 0.25 && result.lane >= 0.25 && result.lane <= 1.1 && result.calibration.global.sample >= 15 && result.calibration.lanes.englishMovies.sample >= 25, 'calibration thresholds and clamps behave as specified', JSON.stringify({belowGlobal:result.belowGlobal, pooled:result.pooled, lane:result.lane, calibration:result.calibration}));
   t.assert(!result.excluded.includes('wiki_doc') && !result.excluded.includes('wiki_hidden'), 'glowing reception does not resurrect excluded or hidden titles', JSON.stringify(result.excluded));
-  t.assert(result.oldScore > 0 && result.v5Rating === 4 && result.version === '6', 'old records, v5 scoped rating and version 6 render path remain compatible', JSON.stringify({oldScore:result.oldScore, rating:result.v5Rating, version:result.version}));
+  t.assert(result.oldScore > 0 && result.v5Rating === 4 && result.version === result.expectedVersion, 'old records, v5 scoped rating and current version render path remain compatible', JSON.stringify({oldScore:result.oldScore, rating:result.v5Rating, version:result.version}));
 }

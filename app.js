@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 6;
+const APP_VERSION = 7;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -233,6 +233,7 @@ const RECEPTION_COEFFICIENT_MAX = 1.1;
 const RECEPTION_LANE_MIN_SAMPLE = 25;
 const RECEPTION_GLOBAL_MIN_SAMPLE = 15;
 const RECEPTION_BACKFILL_BATCH_SIZE = 3;
+const RECEPTION_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // The active unseen catalogue is intentionally bounded, but not by one global cap.
 // Ratings, watchlist items, manual additions and hidden records are personal history
 // and are never rotated. Automatic unseen titles compete within their own
@@ -2463,10 +2464,6 @@ function stopFetching(opts={}) {
     clearTimeout(backgroundAiTimer);
     backgroundAiTimer = null;
   }
-  if (receptionBackfillTimer) {
-    clearTimeout(receptionBackfillTimer);
-    receptionBackfillTimer = null;
-  }
   if (currentWikiAbortController) currentWikiAbortController.abort();
   if (currentSleepCancel) currentSleepCancel();
   hideFetchProgress();
@@ -3316,10 +3313,40 @@ function needsReceptionBackfill(movie) {
   return !movie.reception || Number(movie.reception.version || 0) < RECEPTION_VERSION;
 }
 
+function receptionBackfillRecentlyAttempted(movie, now=Date.now()) {
+  const attemptedAt = Date.parse(movie?.receptionBackfillAttemptedAt || '') || 0;
+  return !!attemptedAt && now - attemptedAt < RECEPTION_BACKFILL_RETRY_COOLDOWN_MS;
+}
+
+function receptionBackfillCandidates() {
+  const now = Date.now();
+  const candidates = Object.values(state.movies || {})
+    .filter(needsReceptionBackfill)
+    .filter(movie => !receptionBackfillRecentlyAttempted(movie, now));
+  const scored = new Map(scoreMovies().map(item => [String(item.movie.id), item]));
+  return candidates.sort((a,b) => {
+    const aRated = Number(a.rating || 0) > 0;
+    const bRated = Number(b.rating || 0) > 0;
+    if (aRated !== bRated) return aRated ? -1 : 1;
+    if (aRated && bRated) return Number(b.rating || 0) - Number(a.rating || 0) || titleSortKey(a).localeCompare(titleSortKey(b));
+    const aScore = Number(scored.get(String(a.id))?.matchScore || -1);
+    const bScore = Number(scored.get(String(b.id))?.matchScore || -1);
+    const aRecommended = aScore >= 0;
+    const bRecommended = bScore >= 0;
+    if (aRecommended !== bRecommended) return aRecommended ? -1 : 1;
+    if (aRecommended && bRecommended) return bScore - aScore || titleSortKey(a).localeCompare(titleSortKey(b));
+    return titleSortKey(a).localeCompare(titleSortKey(b));
+  });
+}
+
 function scheduleReceptionBackfill(delay=3500) {
-  if (!libraryWritesUnlocked || receptionBackfillInProgress || receptionBackfillTimer || autoFetchPaused) return;
+  if (!libraryWritesUnlocked || receptionBackfillInProgress) return;
   const hasWork = Object.values(state.movies || {}).some(needsReceptionBackfill);
   if (!hasWork) return;
+  if (receptionBackfillTimer) {
+    clearTimeout(receptionBackfillTimer);
+    receptionBackfillTimer = null;
+  }
   const run = () => {
     receptionBackfillTimer = null;
     runReceptionBackfill();
@@ -3332,28 +3359,38 @@ function scheduleReceptionBackfill(delay=3500) {
 }
 
 async function runReceptionBackfill() {
-  if (!libraryWritesUnlocked || receptionBackfillInProgress || fetchAbortRequested || poolExpansionInProgress || backgroundAiTaggingInProgress) return;
-  const candidates = Object.values(state.movies || {}).filter(needsReceptionBackfill).sort((a,b) => String(a.id).localeCompare(String(b.id)));
+  if (!libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress) {
+    scheduleReceptionBackfill(3000);
+    return;
+  }
+  const candidates = receptionBackfillCandidates();
   if (!candidates.length) return;
   receptionBackfillInProgress = true;
-  const cursor = String(state.meta?.receptionBackfillCursor || '');
-  const start = Math.max(0, candidates.findIndex(movie => String(movie.id) > cursor));
-  const ordered = [...candidates.slice(start), ...candidates.slice(0, start)];
   const changedMovieIds = [];
   try {
-    for (const movie of ordered.slice(0, RECEPTION_BACKFILL_BATCH_SIZE)) {
-      if (fetchAbortRequested || autoFetchPaused) break;
-      const mode = movie.format ? 'shows' : 'movies';
-      const fresh = movie.wikiPageId
-        ? await fetchWikiMovieByPageId(movie.wikiPageId, mode, {ai:false, directLink:!!movie.manualAdded})
-        : await fetchWikiMovie(movie.wikiTitle || movie.pageTitle || movie.title, mode, null, {ai:false, directLink:!!movie.manualAdded});
-      if (!fresh?.reception) continue;
-      movie.reception = normaliseReceptionRecord(fresh.reception);
-      movie.wikiParserVersion = Math.max(Number(movie.wikiParserVersion || 0), Number(fresh.wikiParserVersion || WIKI_PARSER_VERSION));
-      touchRecord(movie);
-      changedMovieIds.push(String(movie.id));
-      state.meta = state.meta || {};
-      state.meta.receptionBackfillCursor = String(movie.id);
+    for (const movie of candidates.slice(0, RECEPTION_BACKFILL_BATCH_SIZE)) {
+      if (poolExpansionInProgress || backgroundAiTaggingInProgress) break;
+      try {
+        const mode = movie.format ? 'shows' : 'movies';
+        const fresh = movie.wikiPageId
+          ? await fetchWikiMovieByPageId(movie.wikiPageId, mode, {ai:false, directLink:!!movie.manualAdded})
+          : await fetchWikiMovie(movie.wikiTitle || movie.pageTitle || movie.title, mode, null, {ai:false, directLink:!!movie.manualAdded});
+        if (!fresh?.reception) {
+          movie.receptionBackfillAttemptedAt = nowStamp();
+          touchRecord(movie);
+          changedMovieIds.push(String(movie.id));
+          continue;
+        }
+        movie.reception = normaliseReceptionRecord(fresh.reception);
+        delete movie.receptionBackfillAttemptedAt;
+        movie.wikiParserVersion = Math.max(Number(movie.wikiParserVersion || 0), Number(fresh.wikiParserVersion || WIKI_PARSER_VERSION));
+        touchRecord(movie);
+        changedMovieIds.push(String(movie.id));
+      } catch(error) {
+        movie.receptionBackfillAttemptedAt = nowStamp();
+        touchRecord(movie);
+        changedMovieIds.push(String(movie.id));
+      }
     }
     if (changedMovieIds.length) {
       updateReceptionCalibration();
@@ -3366,7 +3403,7 @@ async function runReceptionBackfill() {
     console.warn('Reception backfill paused', error);
   } finally {
     receptionBackfillInProgress = false;
-    if (!fetchAbortRequested && !autoFetchPaused) scheduleReceptionBackfill(9000);
+    scheduleReceptionBackfill(9000);
   }
 }
 
@@ -4516,6 +4553,8 @@ function updateLibraryHealth() {
   const label = document.getElementById('libraryHealthLabel');
   const maintenance = document.getElementById('maintenanceHealth');
   const drive = state.drive?.connected ? 'Drive synced' : state.drive?.enabled ? 'Drive reconnect needed' : 'Local only';
+  const receptionNeedCount = Object.values(state.movies || {}).filter(needsReceptionBackfill).length;
+  const receptionSegment = receptionNeedCount ? ` · ${receptionNeedCount} titles need quality data` : '';
 
   let text;
   if (autoFetchPaused) text = 'Collection paused';
@@ -4527,7 +4566,7 @@ function updateLibraryHealth() {
 
   if (label) label.textContent = text;
   if (maintenance) {
-    maintenance.textContent = `${text} · ${health.pendingTags} pending AI tags · ${drive}`;
+    maintenance.textContent = `${text} · ${health.pendingTags} pending AI tags${receptionSegment} · ${drive}`;
   }
 }
 
@@ -4937,8 +4976,9 @@ function buildCard(movie, opts={}) {
   card.className = `movie-card ${isShow(movie) ? 'show-card' : 'film-card'}` + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
   const matchPct = Math.round(resolvedMatchScore * 100);
+  const receptionHint = usableReception(movie) ? ' · reception-aware' : '';
   const matchSummary = resolvedPosOverlap
-    ? `${resolvedPosOverlap} learned tag signal${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre signal${resolvedGenreOverlap===1?'':'s'}`:''} · ${matchPct}% predicted fit${resolvedPredictedRating?` · model ${resolvedPredictedRating.toFixed(1)}★`:''}${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} negative`:''}`
+    ? `${resolvedPosOverlap} learned tag signal${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre signal${resolvedGenreOverlap===1?'':'s'}`:''} · ${matchPct}% predicted fit${resolvedPredictedRating?` · model ${resolvedPredictedRating.toFixed(1)}★`:''}${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} negative`:''}${receptionHint}`
     : 'no current positive taste overlap';
   const safeId = movie.id.replace(/'/g,"\\'");
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';
@@ -7174,10 +7214,10 @@ async function requestDriveTokenSilent() {
   const stored=getStoredDriveToken();
   if (stored) { state.drive.accessToken=stored; return stored; }
   await waitForGoogleIdentity();
-  return tokenRequest('');
+  return tokenRequest('none');
 }
 async function requestDriveToken(prompt='select_account') {
-  return prompt === '' ? requestDriveTokenSilent() : requestDriveTokenInteractive();
+  return prompt === 'none' ? requestDriveTokenSilent() : requestDriveTokenInteractive();
 }
 function clearDriveToken() {
   state.drive.accessToken='';
