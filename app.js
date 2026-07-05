@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 7;
+const APP_VERSION = 8;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -212,7 +212,7 @@ let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const CARD_REFRESH_BATCH_SIZE = 20;
-const WIKI_PARSER_VERSION = 4;
+const WIKI_PARSER_VERSION = 5;
 const REC_INFINITE_PAGE_SIZE = 20;
 const STRONG_REC_TARGET = 40;
 const STRONG_REC_REFILL_THRESHOLD = 20;
@@ -234,6 +234,9 @@ const RECEPTION_LANE_MIN_SAMPLE = 25;
 const RECEPTION_GLOBAL_MIN_SAMPLE = 15;
 const RECEPTION_BACKFILL_BATCH_SIZE = 3;
 const RECEPTION_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const ENGLISH_PREFERENCE_STAR_BONUS = 0.3;
+const CROSS_FORMAT_TASTE_WEIGHT = 0.4;
+const SHOW_STORY_MAX_CHARS = 12000;
 // The active unseen catalogue is intentionally bounded, but not by one global cap.
 // Ratings, watchlist items, manual additions and hidden records are personal history
 // and are never rotated. Automatic unseen titles compete within their own
@@ -2320,7 +2323,7 @@ function pruneRollingCandidatePool({reason='rotation'}={}) {
   const replaceable = Object.values(state.movies || {}).filter(isReplaceableRollingCandidate);
   if (!replaceable.length) return {evicted:0, retained:0, pending:0, reason};
 
-  const model = personalizedEnough() ? getTasteModel() : null;
+  const hasTasteModel = personalizedEnough();
   const segments = new Map();
   const pendingBySegment = new Map();
 
@@ -2336,7 +2339,7 @@ function pruneRollingCandidatePool({reason='rotation'}={}) {
       return;
     }
 
-    const fit = model ? predictTasteFit(movie, model) : null;
+    const fit = hasTasteModel ? predictTasteFit(movie) : null;
     segments.get(segmentKey).push({
       movie,
       type:'tagged',
@@ -3441,7 +3444,9 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   if (isPersonOrOrganizationPage(pageTitle, leadText, cats) && !infoboxMedia && !mediaEvidence.film && !mediaEvidence.show && !preliminaryFormat.strong) return rejectWikiParse(diagnostics, 'person or organization page, not a movie/show');
   const trustedLane = opts.trustedLane || null;
   if (!mediaEvidence.film && !mediaEvidence.show && !preliminaryFormat.strong && !infoboxMedia && !trustedLane) return rejectWikiParse(diagnostics, 'no film/show evidence');
-  const storyText = extractNarrativeSection(extract);
+  const formatDecision = preliminaryFormat;
+  const format = formatDecision.strong ? formatDecision.format : (infobox.type === 'show' ? 'series' : (trustedLane ? (trustedLane.mode === 'shows' ? 'series' : null) : formatDecision.format));
+  const storyText = buildStoryTextForFormat(extract, format);
   if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return rejectWikiParse(diagnostics, 'no usable narrative section');
   const reception = parseReceptionFromExtract(extract);
 
@@ -3461,8 +3466,6 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   else if (!language && englishEvidence) language = 'English';
   else if (!language && trustedLane?.language) language = trustedLane.language;
 
-  const formatDecision = preliminaryFormat;
-  const format = formatDecision.strong ? formatDecision.format : (infobox.type === 'show' ? 'series' : (trustedLane ? (trustedLane.mode === 'shows' ? 'series' : null) : formatDecision.format));
   if (!format && !mediaEvidence.film && trustedLane?.mode !== 'movies' && !(formatDecision.strong && formatDecision.format === null)) return rejectWikiParse(diagnostics, 'not a movie page');
   if (mode === 'movies' && format) return rejectWikiParse(diagnostics, 'title is a show, not a movie');
   if (mode === 'shows' && !format) return rejectWikiParse(diagnostics, 'title is a movie, not a show');
@@ -3533,11 +3536,64 @@ function extractNarrativeSection(extract) {
   if (!text) return '';
   const candidates = [];
   wikiSectionBlocks(text).forEach(({heading, section}) => {
+    if (/\bepisodes?\b/i.test(heading)) return;
     const score = narrativeSectionScore(heading, section);
     if (score > 0) candidates.push({ section, score });
   });
   candidates.sort((a,b) => b.score - a.score || b.section.length - a.section.length);
   return candidates[0]?.section || extractInlineNarrative(text);
+}
+
+function cleanEpisodeSynopsisBlock(block) {
+  return String(block || '')
+    .replace(/\bDirected by\s+.*?(?=\b(?:Written by|Story by|Teleplay by)\b|\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b|\b\d[A-Z]{2,}\d{2,}\b|$)/gi, ' ')
+    .replace(/\b(?:Written by|Story by|Teleplay by)\s+.*?(?=\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b|\b\d[A-Z]{2,}\d{2,}\b|$)/gi, ' ')
+    .replace(/^\s*\d+\s+"[^"]+"\s*/g, ' ')
+    .replace(/\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b/g, ' ')
+    .replace(/\b\d{4}-\d{2}-\d{2}\b/g, ' ')
+    .replace(/\b\d+(?:\.\d+)?\s+million\b/gi, ' ')
+    .replace(/\(in millions\)/gi, ' ')
+    .replace(/\b\d[A-Z]{2,}\d{2,}\b/g, ' ')
+    .replace(/\b[A-Z]{2,}\d{2,}[A-Z0-9]*\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function episodeSynopsisCandidate(line) {
+  const text = cleanEpisodeSynopsisBlock(line);
+  if (text.length < 120) return '';
+  if (!/[.!?]/.test(text)) return '';
+  if (/\b(No\.?|Title|Directed by|Written by|Original release date|Air date|Prod\.?\s*code|Series|Season|U\.S\. viewers?)\b/i.test(text)) return '';
+  if (!narrativeSectionScore('plot', text)) return '';
+  return text;
+}
+
+function extractEpisodeSynopses(extract, capChars=SHOW_STORY_MAX_CHARS) {
+  const sections = wikiSectionBlocks(extract).filter(({heading}) => /episodes?/i.test(heading));
+  const synopses = [];
+  sections.forEach(({section}) => {
+    const pieces = String(section || '')
+      .split(/\n+|\s{2,}|\s(?=\d+\s+"[^"]+")/);
+    pieces.forEach(piece => {
+      if (synopses.join(' ').length >= capChars) return;
+      const candidate = episodeSynopsisCandidate(piece);
+      if (candidate) synopses.push(candidate);
+    });
+  });
+  return synopses.join(' ').replace(/\s+/g, ' ').trim().slice(0, capChars).trim();
+}
+
+function buildStoryTextForFormat(extract, format) {
+  const primary = extractNarrativeSection(extract);
+  if (!format) return primary;
+  const episodeText = extractEpisodeSynopses(extract, SHOW_STORY_MAX_CHARS);
+  return [primary, episodeText]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, SHOW_STORY_MAX_CHARS)
+    .trim();
 }
 
 function emptyReception(present=false) {
@@ -3661,7 +3717,8 @@ function parseReceptionFromExtract(extract) {
 }
 
 function extractInlineNarrative(text) {
-  const compact = String(text || '').replace(/\s+/g, ' ').trim();
+  const beforeHeadings = String(text || '').split(/\n\s*==/)[0] || '';
+  const compact = beforeHeadings.replace(/\s+/g, ' ').trim();
   const sentences = compact.match(/[^.!?]+[.!?]+/g) || [];
   const start = sentences.findIndex(sentence =>
     /^\s*In the (?:film|series|show),/i.test(sentence)
@@ -4722,7 +4779,7 @@ function renderRecs() {
         ? `improving recommendations · ${fetchStatus.strongCount}/${STRONG_REC_TARGET} strong · showing ${top.length} of ${scored.length}`
         : `showing ${top.length} of ${scored.length} matches`;
       const fragment = document.createDocumentFragment();
-      top.forEach((item, i) => fragment.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating })));
+      top.forEach((item, i) => fragment.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating, receptionEffect:item.receptionEffect })));
       grid.appendChild(fragment);
       return;
     }
@@ -4877,7 +4934,7 @@ function cardMatchData(movie) {
   if (!cardMatchCache) cardMatchCache = buildCardMatchCache();
   const id = String(movie.id);
   if (!cardMatchCache.has(id)) {
-    const model = Number(movie.rating || 0) > 0 ? getTasteModel(id) : getTasteModel();
+    const model = Number(movie.rating || 0) > 0 ? getTasteModel(id, formatClass(movie)) : getTasteModel('', formatClass(movie));
     cardMatchCache.set(id, predictTasteFit(movie, model));
   }
   return cardMatchCache.get(id) || {
@@ -4957,12 +5014,19 @@ function restoreManualStars() {
   if (!box) return;
   box.querySelectorAll('.star').forEach(st => st.classList.remove('active'));
 }
+function formatReceptionEffect(effect) {
+  const rounded = Math.round(Number(effect || 0) * 10) / 10;
+  if (Object.is(rounded, -0)) return '±0.0★';
+  if (rounded === 0) return '±0.0★';
+  return `${rounded > 0 ? '+' : ''}${rounded.toFixed(1)}★`;
+}
+
 function buildCard(movie, opts={}) {
-  const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, predictedRating, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag } = opts;
+  const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, predictedRating, receptionEffect, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag } = opts;
   const hasSuppliedMatch = Number.isFinite(Number(matchScore)) || Number.isFinite(Number(tasteFit));
   const automaticMatch = hasSuppliedMatch ? null : cardMatchData(movie);
   const resolvedMatch = hasSuppliedMatch
-    ? { matchScore:Number(matchScore ?? tasteFit) || 0, tasteFit:Number(tasteFit ?? matchScore) || 0, predictedRating:Number(predictedRating || 0), posOverlap:Number(posOverlap || 0), genreOverlap:Number(genreOverlap || 0), negativeOverlap:Number(negativeOverlap || 0), matchedTags:matchedTags || new Set(), matchedGenres:matchedGenres || new Set() }
+    ? { matchScore:Number(matchScore ?? tasteFit) || 0, tasteFit:Number(tasteFit ?? matchScore) || 0, predictedRating:Number(predictedRating || 0), receptionEffect:Number(receptionEffect || 0), posOverlap:Number(posOverlap || 0), genreOverlap:Number(genreOverlap || 0), negativeOverlap:Number(negativeOverlap || 0), matchedTags:matchedTags || new Set(), matchedGenres:matchedGenres || new Set() }
     : automaticMatch;
   const showMatch = !!resolvedMatch;
   const resolvedMatchScore = Number(resolvedMatch?.matchScore ?? resolvedMatch?.tasteFit ?? 0) || 0;
@@ -4972,11 +5036,12 @@ function buildCard(movie, opts={}) {
   const resolvedMatchedTags = resolvedMatch?.matchedTags || new Set();
   const resolvedMatchedGenres = resolvedMatch?.matchedGenres || new Set();
   const resolvedPredictedRating = Number(resolvedMatch?.predictedRating || 0);
+  const resolvedReceptionEffect = Number(resolvedMatch?.receptionEffect || 0);
   const card = document.createElement('div');
   card.className = `movie-card ${isShow(movie) ? 'show-card' : 'film-card'}` + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
   const matchPct = Math.round(resolvedMatchScore * 100);
-  const receptionHint = usableReception(movie) ? ' · reception-aware' : '';
+  const receptionHint = usableReception(movie) ? ` · reception ${formatReceptionEffect(resolvedReceptionEffect)}` : '';
   const matchSummary = resolvedPosOverlap
     ? `${resolvedPosOverlap} learned tag signal${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre signal${resolvedGenreOverlap===1?'':'s'}`:''} · ${matchPct}% predicted fit${resolvedPredictedRating?` · model ${resolvedPredictedRating.toFixed(1)}★`:''}${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} negative`:''}${receptionHint}`
     : 'no current positive taste overlap';
@@ -5181,6 +5246,15 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function formatClass(movie) {
+  return movie?.format ? 'show' : 'movie';
+}
+
+function formatTasteWeight(row, targetFormatClass) {
+  if (!targetFormatClass || targetFormatClass === 'all') return 1;
+  return row?.formatClass === targetFormatClass ? 1 : CROSS_FORMAT_TASTE_WEIGHT;
+}
+
 function ratingEvidenceRows(excludeMovieId='') {
   const excluded = String(excludeMovieId || '');
   return tasteEvidenceMovies()
@@ -5190,6 +5264,7 @@ function ratingEvidenceRows(excludeMovieId='') {
     .map(movie => ({
       movie,
       rating:Number(movie.rating),
+      formatClass:formatClass(movie),
       tags:recommendationScoringTags(movie),
       genres:movieGenres(movie)
     }));
@@ -5206,10 +5281,12 @@ function manualTagPreferenceEffect(tag) {
   return clamp(preference, -4, 4) * TASTE_MODEL_MANUAL_PREFERENCE_UNIT;
 }
 
-function trainTasteModel(excludeMovieId='') {
+function trainTasteModel(excludeMovieId='', targetFormatClass='all') {
   const rows = ratingEvidenceRows(excludeMovieId);
-  const fallbackRating = rows.length
-    ? rows.reduce((sum, row) => sum + row.rating, 0) / rows.length
+  const weightedRating = rows.reduce((sum, row) => sum + row.rating * formatTasteWeight(row, targetFormatClass), 0);
+  const totalWeight = rows.reduce((sum, row) => sum + formatTasteWeight(row, targetFormatClass), 0);
+  const fallbackRating = totalWeight
+    ? weightedRating / totalWeight
     : 3;
   const model = {
     baseline:fallbackRating,
@@ -5218,7 +5295,8 @@ function trainTasteModel(excludeMovieId='') {
     calibrationSlope:1,
     calibrationIntercept:0,
     evidenceCount:rows.length,
-    excludedMovieId:String(excludeMovieId || '')
+    excludedMovieId:String(excludeMovieId || ''),
+    targetFormatClass:targetFormatClass || 'all'
   };
 
   if (rows.length < 3) return model;
@@ -5228,12 +5306,13 @@ function trainTasteModel(excludeMovieId='') {
   for (let pass = 0; pass < TASTE_MODEL_PASSES; pass++) {
     const tagStats = {};
     rows.forEach((row, index) => {
+      const weight = formatTasteWeight(row, targetFormatClass);
       const residual = row.rating - rawPredictions[index];
       row.tags.forEach(tag => {
         const feature = tagFeatureValue(tag);
         const stat = tagStats[tag] || (tagStats[tag] = {sum:0, strength:0});
-        stat.sum += residual * feature;
-        stat.strength += feature * feature;
+        stat.sum += residual * feature * weight;
+        stat.strength += feature * feature * weight;
       });
     });
 
@@ -5256,11 +5335,12 @@ function trainTasteModel(excludeMovieId='') {
 
     const genreStats = {};
     rows.forEach((row, index) => {
+      const weight = formatTasteWeight(row, targetFormatClass);
       const residual = row.rating - rawPredictions[index];
       row.genres.forEach(genre => {
         const stat = genreStats[genre] || (genreStats[genre] = {sum:0, strength:0});
-        stat.sum += residual * GENRE_SCORE_FACTOR;
-        stat.strength += GENRE_SCORE_FACTOR * GENRE_SCORE_FACTOR;
+        stat.sum += residual * GENRE_SCORE_FACTOR * weight;
+        stat.strength += GENRE_SCORE_FACTOR * GENRE_SCORE_FACTOR * weight;
       });
     });
 
@@ -5286,14 +5366,16 @@ function trainTasteModel(excludeMovieId='') {
   // Calibrate the learned raw score against the actual 1–5 ratings. This makes
   // the displayed percentage a rating prediction rather than a relative overlap
   // score that merely makes the top title look like 100%.
-  const meanRaw = rawPredictions.reduce((sum, value) => sum + value, 0) / rawPredictions.length;
-  const meanActual = rows.reduce((sum, row) => sum + row.rating, 0) / rows.length;
+  const calibrationWeight = totalWeight || rows.length || 1;
+  const meanRaw = rawPredictions.reduce((sum, value, index) => sum + value * formatTasteWeight(rows[index], targetFormatClass), 0) / calibrationWeight;
+  const meanActual = rows.reduce((sum, row) => sum + row.rating * formatTasteWeight(row, targetFormatClass), 0) / calibrationWeight;
   let variance = 0;
   let covariance = 0;
   rawPredictions.forEach((value, index) => {
+    const weight = formatTasteWeight(rows[index], targetFormatClass);
     const rawDelta = value - meanRaw;
-    variance += rawDelta * rawDelta;
-    covariance += rawDelta * (rows[index].rating - meanActual);
+    variance += rawDelta * rawDelta * weight;
+    covariance += rawDelta * (rows[index].rating - meanActual) * weight;
   });
   if (variance > 0.001) {
     model.calibrationSlope = clamp(covariance / variance, 0.45, 2.4);
@@ -5303,9 +5385,10 @@ function trainTasteModel(excludeMovieId='') {
   return model;
 }
 
-function getTasteModel(excludeMovieId='') {
-  const key = String(excludeMovieId || '__full__');
-  if (!tasteModelCache.has(key)) tasteModelCache.set(key, trainTasteModel(excludeMovieId));
+function getTasteModel(excludeMovieId='', targetFormatClass='all') {
+  const formatKey = targetFormatClass || 'all';
+  const key = `${String(excludeMovieId || '__full__')}|${formatKey}`;
+  if (!tasteModelCache.has(key)) tasteModelCache.set(key, trainTasteModel(excludeMovieId, formatKey));
   return tasteModelCache.get(key);
 }
 
@@ -5378,7 +5461,7 @@ function updateReceptionCalibration() {
   const samples = [];
   Object.values(state.movies || {}).forEach(movie => {
     if (Number(movie?.rating || 0) <= 0 || !usableReception(movie)) return;
-    const model = getTasteModel(movie.id);
+    const model = getTasteModel(movie.id, formatClass(movie));
     const tasteOnly = predictTasteFit(movie, model, {tasteOnly:true});
     const reception = normaliseReceptionRecord(movie.reception);
     const signal = Number(reception.qualitySignal || 0) * Number(reception.strength || 0);
@@ -5414,10 +5497,11 @@ function scheduleReceptionCalibrationUpdate() {
   }, 300);
 }
 
-function predictTasteFit(movie, model=getTasteModel(), opts={}) {
+function predictTasteFit(movie, model=null, opts={}) {
+  const activeModel = model || getTasteModel('', formatClass(movie));
   const tags = recommendationScoringTags(movie);
   const genres = movieGenres(movie);
-  let rawRating = Number(model?.baseline || 3);
+  let rawRating = Number(activeModel?.baseline || 3);
   let posOverlap = 0;
   let genreOverlap = 0;
   let negativeOverlap = 0;
@@ -5427,7 +5511,7 @@ function predictTasteFit(movie, model=getTasteModel(), opts={}) {
   const matchedGenres = new Set();
 
   tags.forEach(tag => {
-    const contribution = ((Number(model?.tagEffects?.[tag] || 0) + manualTagPreferenceEffect(tag)) * tagFeatureValue(tag));
+    const contribution = ((Number(activeModel?.tagEffects?.[tag] || 0) + manualTagPreferenceEffect(tag)) * tagFeatureValue(tag));
     rawRating += contribution;
     if (contribution > 0.015) {
       posOverlap++;
@@ -5440,7 +5524,7 @@ function predictTasteFit(movie, model=getTasteModel(), opts={}) {
   });
 
   genres.forEach(genre => {
-    const contribution = Number(model?.genreEffects?.[genre] || 0) * GENRE_SCORE_FACTOR;
+    const contribution = Number(activeModel?.genreEffects?.[genre] || 0) * GENRE_SCORE_FACTOR;
     rawRating += contribution;
     if (contribution > 0.012) {
       genreOverlap++;
@@ -5452,12 +5536,15 @@ function predictTasteFit(movie, model=getTasteModel(), opts={}) {
   });
 
   const tasteOnlyPredictedRating = clamp(
-    Number(model?.calibrationIntercept || 0) + Number(model?.calibrationSlope || 1) * rawRating,
+    Number(activeModel?.calibrationIntercept || 0) + Number(activeModel?.calibrationSlope || 1) * rawRating,
     1,
     5
   );
   const shift = opts.tasteOnly ? 0 : receptionShift(movie, receptionLaneForMovie(movie), receptionCalibration());
-  let predictedRating = clamp(tasteOnlyPredictedRating + shift, 1, 5);
+  const withReception = clamp(tasteOnlyPredictedRating + shift, 1, 5);
+  const receptionEffect = withReception - tasteOnlyPredictedRating;
+  const languageBonus = (!opts.tasteOnly && movie?.language === 'English') ? ENGLISH_PREFERENCE_STAR_BONUS : 0;
+  let predictedRating = opts.tasteOnly ? tasteOnlyPredictedRating : clamp(withReception + languageBonus, 1, 5);
   let finalMatchScore = clamp((predictedRating - 1) / 4, 0, 1);
   if (!opts.tasteOnly && !usableReception(movie) && finalMatchScore > RECEPTION_UNCORROBORATED_CAP) {
     finalMatchScore = RECEPTION_UNCORROBORATED_CAP;
@@ -5470,6 +5557,8 @@ function predictTasteFit(movie, model=getTasteModel(), opts={}) {
     predictedRating,
     tasteOnlyPredictedRating,
     receptionShift:shift,
+    receptionEffect,
+    languageBonus,
     matchScore:finalMatchScore,
     tasteFit:finalMatchScore,
     posOverlap,
@@ -5499,14 +5588,13 @@ function computeTagWeights() {
 
 function scoreMovies() {
   if (scoredMovieCache) return scoredMovieCache;
-  const model = getTasteModel();
   computeTagWeights();
   const ranked = Object.values(state.movies)
     .filter(movie => movie.rating === 0 && scoringTags(movie).length > 0)
-    .map(movie => predictTasteFit(movie, model))
+    .map(movie => predictTasteFit(movie, getTasteModel('', formatClass(movie))))
     // Discovery still needs some learned positive evidence. We do not fill For
     // You with neutral baseline guesses merely because every title has a rating.
-    .filter(item => item.posOverlap > 0 && item.predictedRating > Number(model.baseline || 3));
+    .filter(item => item.posOverlap > 0 && item.predictedRating > Number(getTasteModel('', formatClass(item.movie)).baseline || 3));
 
   ranked.sort((a, b) =>
     b.predictedRating - a.predictedRating ||
