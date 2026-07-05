@@ -53,6 +53,10 @@ function tagPayload(prefix) {
 
 async function installCollectionOverrides(page, {aiMode='success'}={}) {
   await page.evaluate((mode) => {
+    if (autoExpandTimer) {
+      clearTimeout(autoExpandTimer);
+      autoExpandTimer = null;
+    }
     libraryWritesUnlocked = true;
     autoFetchPaused = false;
     fetchAbortRequested = false;
@@ -118,8 +122,19 @@ async function installCollectionOverrides(page, {aiMode='success'}={}) {
 }
 
 async function runCollection(page, t, aiMode='success') {
+  await page.evaluate(async () => {
+    if (poolExpansionInProgress || autoExpandTimer) {
+      stopFetching({silent:true});
+      await waitForPoolIdle(10000);
+    }
+    if (autoExpandTimer) {
+      clearTimeout(autoExpandTimer);
+      autoExpandTimer = null;
+    }
+  });
   await installCollectionOverrides(page, {aiMode});
   await page.evaluate(async () => { await expandPool(true); });
+  await page.evaluate(async () => { await waitForPoolIdle(10000); });
   await t.waitForNoPendingLocalSave();
 }
 
@@ -166,6 +181,7 @@ export default async function run(t) {
     profile:profile()
   });
   await t.openApp();
+  await t.waitForNoPendingLocalSave();
   await t.page.evaluate(() => { rateMovie('wiki_101', 4); });
   await t.waitForNoPendingLocalSave();
   await t.openApp();
@@ -180,8 +196,9 @@ export default async function run(t) {
   await t.openApp();
   const rendered = await t.page.evaluate(() => ({
     version:document.getElementById('appVersion')?.textContent || '',
+    expectedVersion:String(APP_VERSION),
     cards:document.querySelectorAll('.movie-card').length,
     title:state.movies.wiki_101?.title || ''
   }));
-  t.assert(rendered.version === '5' && rendered.title === 'Existing Duplicate', 'app reaches initial render from seeded IndexedDB cache with no console errors', JSON.stringify(rendered));
+  t.assert(rendered.version === rendered.expectedVersion && rendered.title === 'Existing Duplicate', 'app reaches initial render from seeded IndexedDB cache with no console errors', JSON.stringify(rendered));
 }

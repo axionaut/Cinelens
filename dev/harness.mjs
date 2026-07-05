@@ -477,9 +477,9 @@ async function main() {
         await page.waitForFunction(() => !!document.getElementById('appVersion')?.textContent && startupFinalized, 8000);
       },
       async waitForNoPendingLocalSave(timeoutMs=4000) {
-        await page.waitForFunction(() => !localDbSaveInProgress && !localDbSaveQueued, timeoutMs);
+        await page.waitForFunction(() => !localDbSaveInProgress && !localDbSaveQueued && !pendingDirtyMovieIds.size && !pendingFullSave, timeoutMs);
         await api.sleep(650);
-        await page.waitForFunction(() => !localDbSaveInProgress && !localDbSaveQueued, timeoutMs);
+        await page.waitForFunction(() => !localDbSaveInProgress && !localDbSaveQueued && !pendingDirtyMovieIds.size && !pendingFullSave, timeoutMs);
       }
     });
 

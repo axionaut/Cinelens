@@ -2455,6 +2455,60 @@ needs new shared capability, extend the harness instead of creating a
 throwaway rig. Workspace files, temporary browser profiles, logs, downloads,
 server output and generated artifacts must not be staged, committed or pushed.
 
+### 30.12 Reception-Aware Watch-Worthiness
+
+CineLens shows one recommendation percentage. That single score is final
+watch-worthiness: the existing personal tag/genre taste prediction corrected
+by compact Wikipedia reception evidence. Reception is never a second visible
+engine and must not add visible Taste Fit, Reception, Execution, Critic or
+Confidence chips, badges, filters or card sections.
+
+Reception extraction is parse-only for newly fetched titles. The Wikipedia
+fetch path already downloads the full article plaintext and wikitext, so new,
+manual and retagged titles reuse that same response and store only a compact
+`reception` object with parser version, aggregator figures when explicitly
+stated, consensus tier, execution praise/criticism facets, `qualitySignal`,
+`strength` and `parsedAt`. Raw reception text is not persisted. Old records
+without reception continue to render and score normally; `RECEPTION_VERSION`
+marks records eligible for selective future refresh.
+
+Reception adjusts score only, never eligibility. Documentary, disliked-ending
+or avoided tags, conventional horror, hidden, removed, wrong-pick,
+rolling-pool, Hindi-show, language and Wikipedia validation gates remain
+authoritative regardless of glowing reception.
+
+The blend happens in stars inside `predictTasteFit`, after the taste-only star
+prediction and before `matchScore`:
+
+```text
+shift = clamp(laneCoefficient * qualitySignal * strength,
+              -RECEPTION_MAX_DOWN,
+              +RECEPTION_MAX_UP)
+```
+
+The downward cap is larger than the upward cap, so bad execution can pull down
+an otherwise strong title while good execution gives only a modest lift.
+Missing or zero-strength reception has shift `0`; there is no penalty for
+absent Reception sections. A title with no usable reception evidence is capped
+below 100% for display and ranking, so a shown 100% requires both perfect taste
+fit and positive execution evidence.
+
+Lane coefficients are learned from the user's own rated titles as a residual
+correction: actual rating minus taste-only leave-one-out prediction regressed
+against `qualitySignal * strength`. The app stores only compact calibration
+metadata in the profile/meta path. Each lane (`hindiMovies`, `englishMovies`,
+`englishShows`) uses its own coefficient after the lane sample threshold,
+falls back to pooled global calibration after the global threshold, and uses a
+fixed conservative baseline below that. Learned coefficients are regularized
+and clamped so taste remains dominant.
+
+Existing-title reception backfill is bounded, idle, resumable and scoped. It
+does not refetch the whole library at startup, does not block initial render,
+Drive restore, IndexedDB hydration, rating, search or normal recommendation
+rendering, and persists only changed record ids through scoped IndexedDB saves.
+The local database remains opened version-less for `cinelens_local_v3`; do not
+reintroduce an explicit lower IndexedDB schema version.
+
 ## 26. Rejected Title Refresh Lane
 
 Rejected Wikipedia titles are not permanent dead ends. Pool expansion keeps a persisted count of successful new additions and, after every 500 additions, runs a bounded rejected-title refresh lane.

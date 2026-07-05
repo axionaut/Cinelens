@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 5;
+const APP_VERSION = 6;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -223,6 +223,16 @@ const AI_BACKGROUND_RETRY_MS = 2 * 60 * 1000;
 const FETCH_AUTO_ATTEMPT_BUDGET = 55;
 const FETCH_MANUAL_ATTEMPT_BUDGET = 100;
 const FETCH_MAX_ADDED_PER_RUN = 35;
+const RECEPTION_VERSION = 1;
+const RECEPTION_MAX_DOWN = 1.25;
+const RECEPTION_MAX_UP = 0.5;
+const RECEPTION_UNCORROBORATED_CAP = 0.97;
+const RECEPTION_BASELINE_COEFFICIENT = 0.9;
+const RECEPTION_COEFFICIENT_MIN = 0.25;
+const RECEPTION_COEFFICIENT_MAX = 1.1;
+const RECEPTION_LANE_MIN_SAMPLE = 25;
+const RECEPTION_GLOBAL_MIN_SAMPLE = 15;
+const RECEPTION_BACKFILL_BATCH_SIZE = 3;
 // The active unseen catalogue is intentionally bounded, but not by one global cap.
 // Ratings, watchlist items, manual additions and hidden records are personal history
 // and are never rotated. Automatic unseen titles compete within their own
@@ -242,6 +252,9 @@ let currentSleepCancel = null;
 let lastAiRequestAt = 0;
 let autoFetchPaused = false;
 let autoExpandTimer = null;
+let receptionBackfillTimer = null;
+let receptionBackfillInProgress = false;
+let receptionCalibrationTimer = null;
 let backgroundAiTaggingInProgress = false;
 let backgroundAiTimer = null;
 let startupDriveRestoreDone = false;
@@ -1445,6 +1458,7 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
     }
     runStartupMaintenance();
     scheduleTagCloudNormalization(1800);
+    scheduleReceptionBackfill(4500);
   }
 
   render();
@@ -1652,9 +1666,28 @@ function normaliseFetchedWikiMovie(movie, previous=null) {
   next.plotTags = cleanTagArray(next.plotTags && next.plotTags.length ? next.plotTags : next.tags, next, false);
   next.descriptorTags = cleanTagArray(next.descriptorTags && next.descriptorTags.length ? next.descriptorTags : next.tags, next, false);
   next.tagged = !!(next.tags.length || next.coreTags.length || next.plotTags.length || next.descriptorTags.length);
+  next.reception = normaliseReceptionRecord(next.reception);
   next.retagStatus = next.tagged ? 'verified' : 'needs-ai-tags';
   next.retagMessage = next.tagged ? '' : 'AI tags pending';
   return next;
+}
+
+function normaliseReceptionRecord(reception=null) {
+  if (!reception || typeof reception !== 'object') return null;
+  return {
+    version:Number(reception.version || 0) || 0,
+    present:!!reception.present,
+    rtScore:reception.rtScore == null ? null : clamp(Number(reception.rtScore), 0, 100),
+    rtCount:reception.rtCount == null ? null : Math.max(0, parseInt(reception.rtCount, 10) || 0),
+    mcScore:reception.mcScore == null ? null : clamp(Number(reception.mcScore), 0, 100),
+    mcCount:reception.mcCount == null ? null : Math.max(0, parseInt(reception.mcCount, 10) || 0),
+    consensus:['acclaimed','positive','mixed','negative'].includes(reception.consensus) ? reception.consensus : '',
+    praise:[...new Set((reception.praise || []).filter(facet => ['acting','direction','writing','dialogue','pacing','editing','coherence'].includes(facet)))],
+    criticism:[...new Set((reception.criticism || []).filter(facet => ['acting','direction','writing','dialogue','pacing','editing','coherence','melodrama'].includes(facet)))],
+    qualitySignal:clamp(Number(reception.qualitySignal || 0), -1, 1),
+    strength:clamp(Number(reception.strength || 0), 0, 1),
+    parsedAt:reception.parsedAt || ''
+  };
 }
 
 function normaliseStoredTitleRecord(movie) {
@@ -1677,6 +1710,7 @@ function normaliseStoredTitleRecord(movie) {
     movie.plotTags = cleanTagArray(movie.plotTags && movie.plotTags.length ? movie.plotTags : movie.tags, movie, false);
     movie.descriptorTags = cleanTagArray(movie.descriptorTags && movie.descriptorTags.length ? movie.descriptorTags : movie.tags, movie, false);
     movie.tagged = !!(movie.tags.length || movie.coreTags.length || movie.plotTags.length || movie.descriptorTags.length);
+    movie.reception = normaliseReceptionRecord(movie.reception);
     if (movie.tagged || movie.wikiUrl || movie.wikiPageId) {
       movie.needsManualUrl = false;
       if (movie.retagStatus === 'failed' || movie.retagStatus === 'needs-url') {
@@ -1691,6 +1725,7 @@ function normaliseStoredTitleRecord(movie) {
     movie.plotTags = cleanTagArray(movie.plotTags || [], movie, false);
     movie.descriptorTags = cleanTagArray(movie.descriptorTags || [], movie, false);
     movie.tagged = !!(movie.tags.length || movie.coreTags.length || movie.plotTags.length || movie.descriptorTags.length);
+    movie.reception = normaliseReceptionRecord(movie.reception);
     movie.needsManualUrl = true;
     if (!movie.retagStatus || movie.retagStatus === 'verified') movie.retagStatus = 'needs-refresh';
     if (!movie.retagMessage) movie.retagMessage = 'needs Wikipedia refresh';
@@ -2427,6 +2462,10 @@ function stopFetching(opts={}) {
   if (backgroundAiTimer) {
     clearTimeout(backgroundAiTimer);
     backgroundAiTimer = null;
+  }
+  if (receptionBackfillTimer) {
+    clearTimeout(receptionBackfillTimer);
+    receptionBackfillTimer = null;
   }
   if (currentWikiAbortController) currentWikiAbortController.abort();
   if (currentSleepCancel) currentSleepCancel();
@@ -3271,6 +3310,66 @@ async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
   return movie;
 }
 
+function needsReceptionBackfill(movie) {
+  if (!movie || movie.source !== 'wikipedia') return false;
+  if (!movie.storyText || (!movie.wikiPageId && !movie.wikiTitle && !movie.pageTitle)) return false;
+  return !movie.reception || Number(movie.reception.version || 0) < RECEPTION_VERSION;
+}
+
+function scheduleReceptionBackfill(delay=3500) {
+  if (!libraryWritesUnlocked || receptionBackfillInProgress || receptionBackfillTimer || autoFetchPaused) return;
+  const hasWork = Object.values(state.movies || {}).some(needsReceptionBackfill);
+  if (!hasWork) return;
+  const run = () => {
+    receptionBackfillTimer = null;
+    runReceptionBackfill();
+  };
+  if ('requestIdleCallback' in window) {
+    receptionBackfillTimer = setTimeout(() => requestIdleCallback(run, {timeout: 1500}), delay);
+  } else {
+    receptionBackfillTimer = setTimeout(run, delay);
+  }
+}
+
+async function runReceptionBackfill() {
+  if (!libraryWritesUnlocked || receptionBackfillInProgress || fetchAbortRequested || poolExpansionInProgress || backgroundAiTaggingInProgress) return;
+  const candidates = Object.values(state.movies || {}).filter(needsReceptionBackfill).sort((a,b) => String(a.id).localeCompare(String(b.id)));
+  if (!candidates.length) return;
+  receptionBackfillInProgress = true;
+  const cursor = String(state.meta?.receptionBackfillCursor || '');
+  const start = Math.max(0, candidates.findIndex(movie => String(movie.id) > cursor));
+  const ordered = [...candidates.slice(start), ...candidates.slice(0, start)];
+  const changedMovieIds = [];
+  try {
+    for (const movie of ordered.slice(0, RECEPTION_BACKFILL_BATCH_SIZE)) {
+      if (fetchAbortRequested || autoFetchPaused) break;
+      const mode = movie.format ? 'shows' : 'movies';
+      const fresh = movie.wikiPageId
+        ? await fetchWikiMovieByPageId(movie.wikiPageId, mode, {ai:false, directLink:!!movie.manualAdded})
+        : await fetchWikiMovie(movie.wikiTitle || movie.pageTitle || movie.title, mode, null, {ai:false, directLink:!!movie.manualAdded});
+      if (!fresh?.reception) continue;
+      movie.reception = normaliseReceptionRecord(fresh.reception);
+      movie.wikiParserVersion = Math.max(Number(movie.wikiParserVersion || 0), Number(fresh.wikiParserVersion || WIKI_PARSER_VERSION));
+      touchRecord(movie);
+      changedMovieIds.push(String(movie.id));
+      state.meta = state.meta || {};
+      state.meta.receptionBackfillCursor = String(movie.id);
+    }
+    if (changedMovieIds.length) {
+      updateReceptionCalibration();
+      saveLocalState({preserveUpdatedAt:true, changedMovieIds});
+      queueDriveSync();
+      invalidateTasteModel();
+      render();
+    }
+  } catch(error) {
+    console.warn('Reception backfill paused', error);
+  } finally {
+    receptionBackfillInProgress = false;
+    if (!fetchAbortRequested && !autoFetchPaused) scheduleReceptionBackfill(9000);
+  }
+}
+
 function rejectWikiParse(diagnostics, reason) {
   if (diagnostics) diagnostics.reason = reason;
   return null;
@@ -3307,6 +3406,7 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   if (!mediaEvidence.film && !mediaEvidence.show && !preliminaryFormat.strong && !infoboxMedia && !trustedLane) return rejectWikiParse(diagnostics, 'no film/show evidence');
   const storyText = extractNarrativeSection(extract);
   if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return rejectWikiParse(diagnostics, 'no usable narrative section');
+  const reception = parseReceptionFromExtract(extract);
 
   let language = languageFromInfobox(infobox);
   const languageEvidence = hasAllowedLanguageEvidence(cats, leadText);
@@ -3352,7 +3452,7 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
     id, title, year, director, language, country, format: format||null,
     genres, categoryText: cats.join(' '),
     tags: [], coreTags: [], plotTags: [], descriptorTags: [], rawDescriptors: [],
-    tagged: false, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, thumbnailUrl, storyText, leadText, wikiVerified: true, retagStatus: 'needs-ai-tags', retagMessage: 'AI tags pending',
+    tagged: false, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, thumbnailUrl, storyText, leadText, reception, wikiVerified: true, retagStatus: 'needs-ai-tags', retagMessage: 'AI tags pending',
     wikiParserVersion: WIKI_PARSER_VERSION
   };
   if (isConventionalHorrorTitle(candidate)) return rejectWikiParse(diagnostics, 'conventional horror is excluded');
@@ -3366,11 +3466,11 @@ function wikiHeadingInfo(line) {
   return { title:match[2].trim().toLowerCase(), level:match[1].length };
 }
 
-function extractNarrativeSection(extract) {
+function wikiSectionBlocks(extract) {
   const text = (extract || '').replace(/\r/g, '').trim();
-  if (!text) return '';
+  if (!text) return [];
   const lines = text.split('\n');
-  const candidates = [];
+  const blocks = [];
   for (let i = 0; i < lines.length; i++) {
     const headingInfo = wikiHeadingInfo(lines[i]);
     if (!headingInfo) continue;
@@ -3386,11 +3486,141 @@ function extractNarrativeSection(extract) {
       if (out.join(' ').length > 12000) break;
     }
     const section = out.join(' ').replace(/\s+/g, ' ').trim();
-    const score = narrativeSectionScore(headingInfo.title, section);
-    if (score > 0) candidates.push({ section, score });
+    blocks.push({ heading:headingInfo.title, level:headingInfo.level, section });
   }
+  return blocks;
+}
+
+function extractNarrativeSection(extract) {
+  const text = (extract || '').replace(/\r/g, '').trim();
+  if (!text) return '';
+  const candidates = [];
+  wikiSectionBlocks(text).forEach(({heading, section}) => {
+    const score = narrativeSectionScore(heading, section);
+    if (score > 0) candidates.push({ section, score });
+  });
   candidates.sort((a,b) => b.score - a.score || b.section.length - a.section.length);
   return candidates[0]?.section || extractInlineNarrative(text);
+}
+
+function emptyReception(present=false) {
+  return {
+    version:RECEPTION_VERSION,
+    present:!!present,
+    rtScore:null,
+    rtCount:null,
+    mcScore:null,
+    mcCount:null,
+    consensus:'',
+    praise:[],
+    criticism:[],
+    qualitySignal:0,
+    strength:0,
+    parsedAt:nowStamp()
+  };
+}
+
+function receptionSectionText(extract) {
+  const wanted = /\b(reception|critical response|critical reception|reviews?|response)\b/i;
+  const block = wikiSectionBlocks(extract).find(item => wanted.test(item.heading));
+  return block?.section || '';
+}
+
+function parseCountNear(text, index) {
+  const value = String(text || '');
+  const after = value.slice(index, index + 200);
+  const before = value.slice(Math.max(0, index - 120), index);
+  const match = after.match(/based on\s+([\d,]+)\s+(?:critic\s+)?reviews?/i)
+    || after.match(/([\d,]+)\s+(?:critic\s+)?reviews?/i)
+    || before.match(/based on\s+([\d,]+)\s+(?:critic\s+)?reviews?/i)
+    || before.match(/([\d,]+)\s+(?:critic\s+)?reviews?/i);
+  return match ? Math.max(0, parseInt(match[1].replace(/,/g, ''), 10) || 0) : null;
+}
+
+function parseAggregatorScores(text) {
+  const value = {rtScore:null, rtCount:null, mcScore:null, mcCount:null};
+  const compact = String(text || '').replace(/\s+/g, ' ');
+  const rtMatch = compact.match(/Rotten Tomatoes.{0,160}?(\d{1,3})\s*%/i);
+  if (rtMatch) {
+    value.rtScore = clamp(Number(rtMatch[1]), 0, 100);
+    value.rtCount = parseCountNear(compact, rtMatch.index || 0);
+  }
+  const mcMatch = compact.match(/Metacritic.{0,120}?(?:score|weighted average)?\s*(?:of|:)?\s*(\d{1,3})(?:\s*\/\s*100)?/i);
+  if (mcMatch) {
+    value.mcScore = clamp(Number(mcMatch[1]), 0, 100);
+    value.mcCount = parseCountNear(compact, mcMatch.index || 0);
+  }
+  return value;
+}
+
+function receptionConsensus(text) {
+  const value = String(text || '').toLowerCase();
+  if (/\b(?:critically|widely|universally)\s+acclaimed\b|\buniversal acclaim\b/.test(value)) return 'acclaimed';
+  if (/\bpositive reviews?\b|\bfavourable reviews?\b|\bfavorable reviews?\b/.test(value)) return 'positive';
+  if (/\bmixed (?:reviews?|reception)\b|\bmixed or average reviews?\b/.test(value)) return 'mixed';
+  if (/\bnegative reviews?\b|\bpanned\b|\bwidely criticis(?:ed|ized)\b|\bpoorly received\b/.test(value)) return 'negative';
+  return '';
+}
+
+function receptionFacets(text) {
+  const value = String(text || '').toLowerCase();
+  const praise = new Set();
+  const criticism = new Set();
+  const add = (set, facet) => set.add(facet);
+  if (/\bprais(?:ed|ing|es)[^.]{0,90}\b(?:performances?|acting|cast)\b|\b(?:performances?|acting|cast)[^.]{0,70}\bprais(?:ed|eworthy|ed)\b/.test(value)) add(praise, 'acting');
+  if (/\bprais(?:ed|ing|es)[^.]{0,90}\b(?:direction|directing|director)\b/.test(value)) add(praise, 'direction');
+  if (/\bprais(?:ed|ing|es)[^.]{0,90}\b(?:writing|screenplay|script)\b/.test(value)) add(praise, 'writing');
+  if (/\bprais(?:ed|ing|es)[^.]{0,90}\bdialogue\b/.test(value)) add(praise, 'dialogue');
+  if (/\bprais(?:ed|ing|es)[^.]{0,90}\bpacing\b/.test(value)) add(praise, 'pacing');
+  if (/\bprais(?:ed|ing|es)[^.]{0,90}\bediting\b/.test(value)) add(praise, 'editing');
+  if (/\b(?:coherent|well-structured|tightly constructed)\b/.test(value)) add(praise, 'coherence');
+  if (/\bcriticis(?:ed|ed|ing|es)[^.]{0,90}\b(?:performances?|acting|cast)\b|\bweak performances?\b|\bpoor acting\b/.test(value)) add(criticism, 'acting');
+  if (/\bcriticis(?:ed|ed|ing|es)[^.]{0,90}\b(?:direction|directing|director)\b/.test(value)) add(criticism, 'direction');
+  if (/\bcriticis(?:ed|ed|ing|es)[^.]{0,90}\b(?:writing|screenplay|script)\b|\bpoorly written\b/.test(value)) add(criticism, 'writing');
+  if (/\bcriticis(?:ed|ed|ing|es)[^.]{0,90}\bdialogue\b|\bclunky dialogue\b/.test(value)) add(criticism, 'dialogue');
+  if (/\bcriticis(?:ed|ed|ing|es)[^.]{0,90}\bpacing\b|\bslow pacing\b|\bpoorly paced\b/.test(value)) add(criticism, 'pacing');
+  if (/\bcriticis(?:ed|ed|ing|es)[^.]{0,90}\bediting\b|\bpoor editing\b/.test(value)) add(criticism, 'editing');
+  if (/\bincoherent\b|\bconfusing plot\b|\bnarrative incoherence\b/.test(value)) add(criticism, 'coherence');
+  if (/\bmelodramatic\b|\bmelodrama\b/.test(value)) add(criticism, 'melodrama');
+  return {praise:[...praise], criticism:[...criticism]};
+}
+
+function aggregatorSignal(score) {
+  if (score == null) return null;
+  return clamp((Number(score) - 58) / 42, -1, 1);
+}
+
+function parseReceptionFromExtract(extract) {
+  const section = receptionSectionText(extract);
+  if (!section || section.length < 24) return emptyReception(false);
+  const reception = emptyReception(true);
+  Object.assign(reception, parseAggregatorScores(section));
+  reception.consensus = receptionConsensus(section);
+  const facets = receptionFacets(section);
+  reception.praise = facets.praise;
+  reception.criticism = facets.criticism;
+
+  const signals = [];
+  const rt = aggregatorSignal(reception.rtScore);
+  const mc = aggregatorSignal(reception.mcScore);
+  if (rt != null) signals.push({value:rt, weight:reception.rtCount ? 3 : 2});
+  if (mc != null) signals.push({value:mc, weight:reception.mcCount ? 3 : 2});
+  const consensusSignal = {acclaimed:0.85, positive:0.45, mixed:0, negative:-0.75}[reception.consensus];
+  if (consensusSignal != null) signals.push({value:consensusSignal, weight:1.4});
+  const facetSignal = clamp((reception.praise.length - reception.criticism.length) / 4, -0.6, 0.6);
+  if (reception.praise.length || reception.criticism.length) signals.push({value:facetSignal, weight:0.8});
+  const totalWeight = signals.reduce((sum, item) => sum + item.weight, 0);
+  reception.qualitySignal = totalWeight ? clamp(signals.reduce((sum, item) => sum + item.value * item.weight, 0) / totalWeight, -1, 1) : 0;
+  const reviewCount = Math.max(Number(reception.rtCount || 0), Number(reception.mcCount || 0));
+  let strength = 0;
+  if (reviewCount) strength = 0.55 + Math.min(0.4, Math.log10(reviewCount + 1) / 5);
+  else if (reception.rtScore != null || reception.mcScore != null) strength = 0.55;
+  else if (reception.consensus) strength = 0.4;
+  else if (reception.praise.length || reception.criticism.length) strength = 0.25;
+  else strength = section.length > 140 ? 0.18 : 0.08;
+  reception.strength = clamp(strength, 0, 1);
+  if (!reception.strength) reception.present = false;
+  return reception;
 }
 
 function extractInlineNarrative(text) {
@@ -5039,7 +5269,112 @@ function getTasteModel(excludeMovieId='') {
   return tasteModelCache.get(key);
 }
 
-function predictTasteFit(movie, model=getTasteModel()) {
+function receptionLaneForMovie(movie) {
+  if (movie?.format) return 'englishShows';
+  return movie?.language === 'Hindi' ? 'hindiMovies' : 'englishMovies';
+}
+
+function usableReception(movie) {
+  const reception = normaliseReceptionRecord(movie?.reception);
+  return !!(reception?.present && reception.version >= RECEPTION_VERSION && reception.strength > 0);
+}
+
+function defaultReceptionCalibration() {
+  return {
+    version:RECEPTION_VERSION,
+    updatedAt:'',
+    global:{coefficient:RECEPTION_BASELINE_COEFFICIENT, sample:0},
+    lanes:{
+      hindiMovies:{coefficient:RECEPTION_BASELINE_COEFFICIENT, sample:0},
+      englishMovies:{coefficient:RECEPTION_BASELINE_COEFFICIENT, sample:0},
+      englishShows:{coefficient:RECEPTION_BASELINE_COEFFICIENT, sample:0}
+    }
+  };
+}
+
+function receptionCalibration() {
+  const base = defaultReceptionCalibration();
+  const current = state.meta?.receptionCalibration || {};
+  return {
+    ...base,
+    ...current,
+    global:{...base.global, ...(current.global || {})},
+    lanes:{
+      hindiMovies:{...base.lanes.hindiMovies, ...(current.lanes?.hindiMovies || {})},
+      englishMovies:{...base.lanes.englishMovies, ...(current.lanes?.englishMovies || {})},
+      englishShows:{...base.lanes.englishShows, ...(current.lanes?.englishShows || {})}
+    }
+  };
+}
+
+function laneCoefficient(lane, calibration=receptionCalibration()) {
+  const global = calibration.global || {};
+  const laneStat = calibration.lanes?.[lane] || {};
+  if (Number(laneStat.sample || 0) >= RECEPTION_LANE_MIN_SAMPLE) return clamp(Number(laneStat.coefficient || RECEPTION_BASELINE_COEFFICIENT), RECEPTION_COEFFICIENT_MIN, RECEPTION_COEFFICIENT_MAX);
+  if (Number(global.sample || 0) >= RECEPTION_GLOBAL_MIN_SAMPLE) return clamp(Number(global.coefficient || RECEPTION_BASELINE_COEFFICIENT), RECEPTION_COEFFICIENT_MIN, RECEPTION_COEFFICIENT_MAX);
+  return RECEPTION_BASELINE_COEFFICIENT;
+}
+
+function receptionShift(movie, lane=receptionLaneForMovie(movie), calibration=receptionCalibration()) {
+  const reception = normaliseReceptionRecord(movie?.reception);
+  if (!reception?.present || !reception.strength) return 0;
+  const rawShift = laneCoefficient(lane, calibration) * Number(reception.qualitySignal || 0) * Number(reception.strength || 0);
+  return clamp(rawShift, -RECEPTION_MAX_DOWN, RECEPTION_MAX_UP);
+}
+
+function fitReceptionCoefficient(samples=[]) {
+  if (!samples.length) return {coefficient:RECEPTION_BASELINE_COEFFICIENT, sample:0};
+  let xy = 0;
+  let xx = 0;
+  samples.forEach(sample => {
+    xy += sample.signal * sample.residual;
+    xx += sample.signal * sample.signal;
+  });
+  const slope = xy / (xx + 2.5);
+  return {coefficient:clamp(slope, RECEPTION_COEFFICIENT_MIN, RECEPTION_COEFFICIENT_MAX), sample:samples.length};
+}
+
+function updateReceptionCalibration() {
+  const samples = [];
+  Object.values(state.movies || {}).forEach(movie => {
+    if (Number(movie?.rating || 0) <= 0 || !usableReception(movie)) return;
+    const model = getTasteModel(movie.id);
+    const tasteOnly = predictTasteFit(movie, model, {tasteOnly:true});
+    const reception = normaliseReceptionRecord(movie.reception);
+    const signal = Number(reception.qualitySignal || 0) * Number(reception.strength || 0);
+    if (!signal) return;
+    samples.push({
+      lane:receptionLaneForMovie(movie),
+      signal,
+      residual:Number(movie.rating || 0) - Number(tasteOnly.tasteOnlyPredictedRating || tasteOnly.predictedRating || 3)
+    });
+  });
+  const lanes = {};
+  ['hindiMovies','englishMovies','englishShows'].forEach(lane => {
+    lanes[lane] = fitReceptionCoefficient(samples.filter(sample => sample.lane === lane));
+  });
+  const global = fitReceptionCoefficient(samples);
+  state.meta = state.meta || {};
+  state.meta.receptionCalibration = {
+    version:RECEPTION_VERSION,
+    updatedAt:nowStamp(),
+    global,
+    lanes
+  };
+  return state.meta.receptionCalibration;
+}
+
+function scheduleReceptionCalibrationUpdate() {
+  clearTimeout(receptionCalibrationTimer);
+  receptionCalibrationTimer = setTimeout(() => {
+    receptionCalibrationTimer = null;
+    updateReceptionCalibration();
+    saveLocalState({preserveUpdatedAt:true});
+    queueDriveSync();
+  }, 300);
+}
+
+function predictTasteFit(movie, model=getTasteModel(), opts={}) {
   const tags = recommendationScoringTags(movie);
   const genres = movieGenres(movie);
   let rawRating = Number(model?.baseline || 3);
@@ -5076,19 +5411,27 @@ function predictTasteFit(movie, model=getTasteModel()) {
     }
   });
 
-  const predictedRating = clamp(
+  const tasteOnlyPredictedRating = clamp(
     Number(model?.calibrationIntercept || 0) + Number(model?.calibrationSlope || 1) * rawRating,
     1,
     5
   );
-  const matchScore = clamp((predictedRating - 1) / 4, 0, 1);
+  const shift = opts.tasteOnly ? 0 : receptionShift(movie, receptionLaneForMovie(movie), receptionCalibration());
+  let predictedRating = clamp(tasteOnlyPredictedRating + shift, 1, 5);
+  let finalMatchScore = clamp((predictedRating - 1) / 4, 0, 1);
+  if (!opts.tasteOnly && !usableReception(movie) && finalMatchScore > RECEPTION_UNCORROBORATED_CAP) {
+    finalMatchScore = RECEPTION_UNCORROBORATED_CAP;
+    predictedRating = 1 + finalMatchScore * 4;
+  }
 
   return {
     movie,
     score:predictedRating,
     predictedRating,
-    matchScore,
-    tasteFit:matchScore,
+    tasteOnlyPredictedRating,
+    receptionShift:shift,
+    matchScore:finalMatchScore,
+    tasteFit:finalMatchScore,
     posOverlap,
     genreOverlap,
     negativeOverlap,
@@ -5151,6 +5494,7 @@ function rateMovie(id, rating) {
   collapseDuplicateMovies(state.movies);
   invalidateTasteModel();
   computeTagWeights();
+  scheduleReceptionCalibrationUpdate();
   if (nextRating > 0 && String(id) === pendingSearchResetAfterRatingId) {
     pendingSearchResetAfterRatingId = '';
     clearUnifiedTitleSearch();
@@ -6177,6 +6521,7 @@ function touchSettings(stamp=nowStamp()) {
 function syncMustWaitForForegroundWork() {
   return !!(
     poolExpansionInProgress ||
+    receptionBackfillInProgress ||
     backgroundAiTaggingInProgress ||
     tagCloudNormalizationInProgress ||
     tasteStoryInProgress
