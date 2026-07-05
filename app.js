@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 8;
+const APP_VERSION = 9;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -2806,6 +2806,7 @@ async function expandPool(manual=true) {
   const seenThisRun = new Set();
   const pendingAiMovies = [];
   let added = 0;
+  let rotatedOut = 0;
   let attempts = 0;
   let aiFailure = '';
   let collectionSatisfied = false;
@@ -2824,11 +2825,16 @@ async function expandPool(manual=true) {
   const progress = (label, title='') => {
     const health = collectionHealth();
     const pct = Math.min(98, Math.round((attempts / Math.max(1, attemptBudget)) * 100));
+    const kept = Math.max(0, added - rotatedOut);
     showFetchProgress(
       label,
       pct,
-      `${attempts}/${attemptBudget} checked · ${added} added · ${health.strongCount}/${health.target} strong matches${title ? ` · ${title}` : ''}`
+      `${attempts}/${attemptBudget} checked · ${added} fetched · ${rotatedOut} rotated out · +${kept} kept · ${health.strongCount}/${health.target} strong matches${title ? ` · ${title}` : ''}`
     );
+  };
+
+  const noteRotation = rotation => {
+    rotatedOut += Number(rotation?.evicted || 0);
   };
 
   const flushPendingAiMovies = async () => {
@@ -2847,6 +2853,7 @@ async function expandPool(manual=true) {
       const result = await requestAiTags(movies);
       outcomes.ai += Number(result?.failed || 0);
       const rotation = pruneRollingCandidatePool({reason:'collection'});
+      noteRotation(rotation);
       rebuildTagBrain();
       computeTagWeights();
       if (rotation.evicted) {
@@ -2981,6 +2988,7 @@ async function expandPool(manual=true) {
 
     hideFetchProgress();
     const finalRotation = pruneRollingCandidatePool({reason:'collection-finalize'});
+    noteRotation(finalRotation);
     rebuildTagBrain();
     computeTagWeights();
     if (finalRotation.evicted) {
@@ -2993,12 +3001,13 @@ async function expandPool(manual=true) {
     render();
 
     const outcomeSummary = `parser ${outcomes.parser}, duplicate ${outcomes.duplicate}, hidden ${outcomes.hidden}, filters ${outcomes.filtered}, AI pending ${outcomes.ai}`;
-    console.info('CineLens expansion outcomes', {attempts, added, outcomes, parserReasons, health:collectionHealth()});
+    const kept = Math.max(0, added - rotatedOut);
+    console.info('CineLens expansion outcomes', {attempts, added, rotatedOut, kept, outcomes, parserReasons, health:collectionHealth()});
 
     if (manual && aiFailure) {
-      showToast(`Checked ${attempts}, added ${added}. AI tagging deferred: ${aiFailure}`, 'error');
+      showToast(`Checked ${attempts}, fetched ${added}, rotated out ${rotatedOut}, kept +${kept}. AI tagging deferred: ${aiFailure}`, 'error');
     } else if (manual) {
-      showToast(`Checked ${attempts}, added ${added}. ${outcomeSummary}.`, added ? 'success' : '');
+      showToast(`Checked ${attempts}, fetched ${added}, rotated out ${rotatedOut}, kept +${kept}. ${outcomeSummary}.`, kept ? 'success' : '');
     } else if (stopped && aiFailure) {
       console.warn('Background expansion paused:', aiFailure);
     }
@@ -4315,19 +4324,19 @@ function updateControlDeck() {
 
 function updateLanguageFilter(language) {
   state.settings.languageFilter = language || 'all';
-  saveSettingsState();
+  saveViewState();
   renderActiveCards();
 }
 
 function updateGenreFilter(genre) {
   state.settings.genreFilter = genre || 'all';
-  saveSettingsState();
+  saveViewState();
   renderActiveCards();
 }
 
 function updateRatingFilter(rating) {
   state.settings.ratingFilter = String(rating || 'all');
-  saveSettingsState();
+  saveViewState();
   renderActiveCards();
 }
 
@@ -4340,7 +4349,7 @@ function filterByGenreFromCard(genre, event) {
 function updateSortMode(mode) {
   state.settings.sortMode = mode || 'recommended';
   if (state.settings.sortMode === 'random' && !state.settings.shuffleSeed) state.settings.shuffleSeed = Date.now();
-  saveSettingsState();
+  saveViewState();
   renderActiveCards();
   updateControlDeck();
 }
@@ -4348,7 +4357,7 @@ function updateSortMode(mode) {
 function shuffleAgain() {
   state.settings.sortMode = 'random';
   state.settings.shuffleSeed = Date.now();
-  saveSettingsState();
+  saveViewState();
   renderActiveCards();
   updateControlDeck();
 }
@@ -4369,7 +4378,7 @@ function clearUnifiedTitleSearch() {
   if (input) input.value = '';
   syncUnifiedSearchClearButton();
   renderWikiSearchResults();
-  saveSettingsState();
+  saveViewState();
   renderActiveCards();
 }
 
@@ -4390,8 +4399,7 @@ function updateTitleSearch(value) {
   touchSettings();
   clearTimeout(titleSearchPersistTimer);
   titleSearchPersistTimer = setTimeout(() => {
-    saveLocalState();
-    queueSettingsSync();
+    saveViewState();
   }, TITLE_SEARCH_PERSIST_DEBOUNCE_MS);
   clearTimeout(titleSearchRenderTimer);
   titleSearchRenderTimer = setTimeout(() => renderActiveCards(), TITLE_SEARCH_RENDER_DEBOUNCE_MS);
@@ -4399,7 +4407,7 @@ function updateTitleSearch(value) {
 
 function toggleControlDeck() {
   state.settings.controlDeckCollapsed = !state.settings.controlDeckCollapsed;
-  saveSettingsState();
+  saveViewState();
   updateControlDeck();
 }
 
@@ -6246,7 +6254,7 @@ function openTagFromCard(tag) {
 
 function toggleTagDeleteMode() {
   state.settings.tagDeleteMode=!state.settings.tagDeleteMode;
-  saveSettingsState();
+  saveViewState();
   renderActiveCards();
   updateControlDeck();
 }
@@ -6340,7 +6348,7 @@ function updateStats() {
   document.getElementById('statAvg').textContent=avg;
   updateHKStatus(tagStatusText());
 }
-function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveSettingsState(); renderRecs(); }
+function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveViewState(); renderRecs(); }
 function updateMinYear(val) {
   const year = Math.max(1900, Math.min(new Date().getFullYear(), parseInt(val, 10) || 1970));
   const changed = Number(state.settings.minYear) !== year;
@@ -6348,7 +6356,7 @@ function updateMinYear(val) {
   const input = document.getElementById('minYear');
   if (input) input.value = year;
   if (changed) resetYearBoundedDiscovery();
-  saveSettingsState();
+  saveViewState();
   renderActiveCards();
 }
 
@@ -6681,6 +6689,11 @@ function saveSettingsState() {
   touchSettings();
   saveLocalState();
   queueSettingsSync();
+}
+
+function saveViewState() {
+  touchSettings();
+  saveLocalState();
 }
 
 function ensureSyncMetadata({touchDataset=false}={}) {
@@ -7047,6 +7060,7 @@ let driveSyncDeferred=false;
 const DRIVE_SYNC_DEBOUNCE_MS=1200;
 const DRIVE_TOKEN_KEY='cinelens_drive_token_v1';
 const DRIVE_TOKEN_EXPIRY_KEY='cinelens_drive_token_expiry_v1';
+const DRIVE_SILENT_TOKEN_TIMEOUT_MS=8000;
 
 
 function rememberDriveToken(token, expiresInSeconds=3300) {
@@ -7160,6 +7174,7 @@ window.addEventListener('load', () => {
 
 async function connectDrive() {
   if (!GOOGLE_CLIENT_ID) { showToast('Missing Google client ID','error'); return; }
+  let connected = false;
   setDriveStatus('syncing');
   try {
     if (!googleIdentityReady()) await waitForGoogleIdentity();
@@ -7184,6 +7199,7 @@ async function connectDrive() {
       await syncChunkedDrive(false);
     }
     state.drive.connected=true;
+    connected = true;
     state.drive.lastConnectedAt=Date.now();
     saveLocalState({preserveUpdatedAt:true});
     setDriveStatus('connected');
@@ -7199,6 +7215,8 @@ async function connectDrive() {
     state.drive.connected=false;
     setDriveStatus('');
     showToast(driveErrorMessage(e),'error');
+  } finally {
+    if (!connected) setDriveStatus('');
   }
 }
 
@@ -7274,17 +7292,29 @@ async function waitForGoogleIdentity() {
   }
   throw new Error('Google Identity Services unavailable');
 }
-function tokenRequest(prompt) {
+function tokenRequest(prompt, opts={}) {
   initDriveTokenClient();
+  const timeoutMs = Number(opts.timeoutMs || 0);
   return new Promise((resolve,reject) => {
+    let settled = false;
+    let timer = null;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      fn(value);
+    };
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => finish(reject, new Error('Drive silent sign-in timed out')), timeoutMs);
+    }
     driveTokenClient.callback = resp => {
-      if (resp.error) { reject(resp); return; }
+      if (resp.error) { finish(reject, resp); return; }
       state.drive.accessToken=resp.access_token;
       rememberDriveToken(resp.access_token, resp.expires_in || 3300);
-      resolve(resp.access_token);
+      finish(resolve, resp.access_token);
     };
     try { driveTokenClient.requestAccessToken({prompt}); }
-    catch(e) { reject(e); }
+    catch(e) { finish(reject, e); }
   });
 }
 async function requestDriveTokenInteractive() {
@@ -7302,7 +7332,7 @@ async function requestDriveTokenSilent() {
   const stored=getStoredDriveToken();
   if (stored) { state.drive.accessToken=stored; return stored; }
   await waitForGoogleIdentity();
-  return tokenRequest('none');
+  return tokenRequest('none', {timeoutMs:DRIVE_SILENT_TOKEN_TIMEOUT_MS});
 }
 async function requestDriveToken(prompt='select_account') {
   return prompt === 'none' ? requestDriveTokenSilent() : requestDriveTokenInteractive();
@@ -7773,7 +7803,7 @@ async function syncDrive(manual=false) {
     console.error('Drive sync failed', error);
     state.drive.connected=false;
     setDriveStatus('');
-    showToast(driveErrorMessage(error) || 'Drive sync failed', 'error');
+    if (manual) showToast(driveErrorMessage(error) || 'Drive sync failed', 'error');
   } finally {
     finishSync();
   }
