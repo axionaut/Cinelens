@@ -683,3 +683,101 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
   .title-search-wrap .title-search-input{width:100%}
   .title-search-clear{width:28px;height:28px;font-size:22px;right:3px}
 }
+
+
+/* Card source links, similar-title click and generated palette support */
+.card-title-button{
+  appearance:none;
+  border:0;
+  background:transparent;
+  padding:0;
+  margin:0;
+  color:inherit;
+  font:inherit;
+  font-weight:600;
+  text-align:left;
+  cursor:pointer;
+}
+.card-title-button:hover,
+.card-title-button:focus-visible{
+  color:var(--accent);
+  text-decoration:underline;
+  outline:none;
+}
+.format-row{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  flex-wrap:wrap;
+  margin:0 0 5px;
+}
+.format-row .match-percent{
+  margin:0;
+  padding:2px 7px;
+  font-size:11px;
+  line-height:1.2;
+}
+.source-link-row{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  margin:0 0 5px;
+}
+.source-link-btn{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:21px;
+  padding:3px 8px;
+  border:1px solid rgba(255,255,255,.16);
+  border-radius:999px;
+  background:rgba(255,255,255,.045);
+  color:var(--muted);
+  font-family:'DM Mono',monospace;
+  font-size:10px;
+  text-decoration:none;
+}
+.source-link-btn:hover,
+.source-link-btn:focus-visible{
+  border-color:var(--accent);
+  color:var(--accent);
+  background:rgba(255,204,51,.10);
+  outline:none;
+}
+.inline-clear-btn{
+  margin-left:8px;
+  padding:2px 7px;
+  border:1px solid rgba(255,204,51,.24);
+  border-radius:999px;
+  background:rgba(255,204,51,.07);
+  color:var(--accent);
+  font-family:'DM Mono',monospace;
+  font-size:10px;
+  cursor:pointer;
+}
+.inline-clear-btn:hover{background:rgba(255,204,51,.16)}
+.movie-card.film-card{
+  background:var(--film-card-bg, linear-gradient(180deg,rgba(32,25,17,.93),rgba(15,13,10,.96))) !important;
+  border-left:5px solid var(--film-card-border, var(--accent)) !important;
+  box-shadow:0 14px 36px rgba(0,0,0,.22), inset 0 0 0 1px color-mix(in srgb, var(--film-card-border, var(--accent)) 14%, transparent) !important;
+}
+.movie-card.show-card{
+  background:var(--show-card-bg, linear-gradient(180deg,rgba(12,31,27,.94),rgba(8,17,16,.97))) !important;
+  border-left:5px solid var(--show-card-border, var(--green)) !important;
+  box-shadow:0 14px 36px rgba(0,0,0,.22), inset 0 0 0 1px color-mix(in srgb, var(--show-card-border, var(--green)) 16%, transparent) !important;
+}
+.movie-card.film-card .title-format{
+  border-color:color-mix(in srgb, var(--film-card-border, var(--accent)) 60%, transparent);
+  color:var(--film-card-border, var(--accent));
+  background:color-mix(in srgb, var(--film-card-border, var(--accent)) 13%, transparent);
+}
+.movie-card.show-card .title-format{
+  border-color:color-mix(in srgb, var(--show-card-border, var(--green)) 60%, transparent);
+  color:var(--show-card-border, var(--green));
+  background:color-mix(in srgb, var(--show-card-border, var(--green)) 13%, transparent);
+}
+@media(max-width:768px){
+  .source-link-row{margin-bottom:6px}
+  .source-link-btn{font-size:10px;min-height:23px;padding:3px 9px}
+  .format-row .match-percent{font-size:11px}
+}

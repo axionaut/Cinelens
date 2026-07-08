@@ -49,7 +49,7 @@
 <header>
   <div class="header-left">
     <div class="logo">CineLens <span>DISCOVERY</span></div>
-    <span class="app-version" id="appVersion" title="CineLens app version">11</span>
+    <span class="app-version" id="appVersion" title="CineLens app version">12</span>
     <button class="nav-toggle" id="navToggle" onclick="toggleMobileNav()">Menu</button>
     <div class="tab-bar">
       <button class="tab-btn active" onclick="setTab('all',this)">All</button>
@@ -149,6 +149,7 @@
     <input class="title-search-input" id="titleSearch" type="search" placeholder="search local + Wikipedia" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)">
     <button class="tb-filter-btn" id="unifiedSearchBtn" onclick="searchWikipediaFromUnifiedInput()">search wiki</button>
     <button class="tb-filter-btn tag-delete-mode" id="tagDeleteModeBtn" onclick="toggleTagDeleteMode()">Tag clicks: explore</button>
+    <button class="tb-filter-btn" id="randomPaletteBtn" onclick="generateRandomPalette(event)">Random palette</button>
   </div>
   <div class="wiki-search-results" id="wikiSearchResults" hidden></div>
 

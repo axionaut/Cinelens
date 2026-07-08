@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 11;
+const APP_VERSION = 12;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -280,6 +280,7 @@ let hiddenVisibleLimit = 80;
 let wikiSearchResults = [];
 let wikiSearchQuery = '';
 let localBlockedSearchResults = [];
+let similarTitleSourceId = '';
 // A searched title remains visible after adding. Its search is cleared only when
 // that same title is subsequently rated.
 let pendingSearchResetAfterRatingId = '';
@@ -561,6 +562,67 @@ function googleSearchUrlForMovie(movie) {
   if (movie.year) parts.push(String(movie.year));
   parts.push(isShow(movie) ? 'tv series' : 'movie');
   return `https://www.google.com/search?q=${encodeURIComponent(parts.join(' '))}`;
+}
+
+function cssHsl(h, s, l) {
+  return `hsl(${Math.round(((h % 360) + 360) % 360)} ${Math.round(s)}% ${Math.round(l)}%)`;
+}
+
+function buildRandomPalette() {
+  const hue = Math.floor(Math.random() * 360);
+  const showHue = hue + 112;
+  const warmHue = hue + 24;
+  return {
+    version:1,
+    hue,
+    updatedAt:nowStamp(),
+    colors:{
+      accent:cssHsl(hue, 96, 61),
+      accent2:cssHsl(warmHue, 92, 58),
+      surface:cssHsl(hue, 18, 8),
+      surface2:cssHsl(hue, 20, 12),
+      border:cssHsl(hue, 28, 24),
+      muted:cssHsl(hue, 18, 68),
+      muted2:cssHsl(hue, 14, 38),
+      tagBg:cssHsl(hue, 24, 10),
+      tagBorder:cssHsl(hue, 30, 24),
+      filmCardBg:`linear-gradient(180deg, ${cssHsl(hue, 20, 12)}, ${cssHsl(hue, 22, 7)})`,
+      filmCardBorder:cssHsl(hue, 92, 60),
+      showCardBg:`linear-gradient(180deg, ${cssHsl(showHue, 22, 12)}, ${cssHsl(showHue, 24, 7)})`,
+      showCardBorder:cssHsl(showHue, 72, 50)
+    }
+  };
+}
+
+function applyPalette(palette=state.settings?.palette) {
+  const colors = palette?.colors || {};
+  const root = document.documentElement;
+  const pairs = {
+    '--accent':colors.accent,
+    '--accent2':colors.accent2,
+    '--surface':colors.surface,
+    '--surface2':colors.surface2,
+    '--border':colors.border,
+    '--muted':colors.muted,
+    '--muted2':colors.muted2,
+    '--tag-bg':colors.tagBg,
+    '--tag-border':colors.tagBorder,
+    '--film-card-bg':colors.filmCardBg,
+    '--film-card-border':colors.filmCardBorder,
+    '--show-card-bg':colors.showCardBg,
+    '--show-card-border':colors.showCardBorder
+  };
+  Object.entries(pairs).forEach(([name, value]) => {
+    if (value) root.style.setProperty(name, value);
+  });
+}
+
+function generateRandomPalette(event) {
+  if (event) event.stopPropagation();
+  state.settings.palette = buildRandomPalette();
+  applyPalette(state.settings.palette);
+  saveSettingsState();
+  showToast('Random palette applied', 'success');
 }
 
 function canonicalTitle(s) {
@@ -1483,6 +1545,7 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
 window.addEventListener('DOMContentLoaded', async () => {
   renderAppVersion();
   loadLocalState();
+  applyPalette();
   await loadIndexedDbState();
   // Import a legacy localStorage library once, then remove its large payload only
   // after the IndexedDB write has been queued.
@@ -4330,6 +4393,7 @@ function renderAppVersion() {
 }
 
 function updateControlDeck() {
+  applyPalette();
   const modeBtn=document.getElementById('tagDeleteModeBtn');
   if (modeBtn) {
     modeBtn.classList.toggle('active', !!state.settings.tagDeleteMode);
@@ -4403,6 +4467,7 @@ function syncUnifiedSearchClearButton() {
 }
 
 function clearUnifiedTitleSearch() {
+  similarTitleSourceId = '';
   state.settings.titleSearch = '';
   wikiSearchQuery = '';
   wikiSearchResults = [];
@@ -4416,6 +4481,7 @@ function clearUnifiedTitleSearch() {
 }
 
 function updateTitleSearch(value) {
+  similarTitleSourceId = '';
   state.settings.titleSearch = String(value || '').trim();
   syncUnifiedSearchClearButton();
   if (!state.settings.titleSearch || state.settings.titleSearch !== wikiSearchQuery) {
@@ -4795,6 +4861,7 @@ function scheduleAutoExpand(delay = 2500) {
 function renderRecs() {
   if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rated' || activeTab === 'recent' || activeTab === 'tags') return;
   const grid = document.getElementById('recsGrid');
+  if (similarTitleActive() && renderSimilarTitles(grid)) return;
   if (titleSearchActive()) {
     renderGlobalTitleSearch(grid);
     return;
@@ -4879,6 +4946,98 @@ function renderGlobalTitleSearch(grid) {
 function showMoreSearchResults() {
   recVisibleLimit += REC_INFINITE_PAGE_SIZE;
   renderRecs();
+}
+
+function similarTitleActive() {
+  return !!similarTitleSourceId && !!state.movies?.[similarTitleSourceId];
+}
+
+function similarFingerprint(movie) {
+  return new Set([
+    ...recommendationScoringTags(movie),
+    ...movieGenres(movie).map(genre => `genre:${genre}`)
+  ]);
+}
+
+function similarTitleResults() {
+  const source = state.movies?.[similarTitleSourceId];
+  if (!source) return [];
+  const sourceTags = new Set(recommendationScoringTags(source));
+  const sourceGenres = new Set(movieGenres(source));
+  const sourceAll = similarFingerprint(source);
+  return Object.values(state.movies || {})
+    .filter(movie => movie.id !== source.id)
+    .filter(movie => !movie.skipped && matchesTab(movie) && recommendableTitle(movie))
+    .filter(movie => matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesRatingFilter(movie) && meetsYearCutoff(movie))
+    .map(movie => {
+      const tags = recommendationScoringTags(movie);
+      const genres = movieGenres(movie);
+      const matchedTags = new Set(tags.filter(tag => sourceTags.has(tag)));
+      const matchedGenres = new Set(genres.filter(genre => sourceGenres.has(genre)));
+      const targetAll = similarFingerprint(movie);
+      let union = new Set([...sourceAll, ...targetAll]).size || 1;
+      let shared = 0;
+      targetAll.forEach(token => { if (sourceAll.has(token)) shared++; });
+      const similarity = (shared / union) + (matchedTags.size * 0.08) + (matchedGenres.size * 0.04);
+      return {movie, matchedTags, matchedGenres, similarity, shared};
+    })
+    .filter(item => item.shared > 0)
+    .sort((a,b) => b.similarity - a.similarity || movieTime(b.movie) - movieTime(a.movie) || titleSortKey(a.movie).localeCompare(titleSortKey(b.movie)));
+}
+
+function showSimilarTitles(id, event) {
+  if (event) event.stopPropagation();
+  const movie = state.movies?.[id];
+  if (!movie) return;
+  similarTitleSourceId = id;
+  state.settings.titleSearch = '';
+  wikiSearchQuery = '';
+  wikiSearchResults = [];
+  localBlockedSearchResults = [];
+  recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
+  activeTab = 'all';
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+  const allBtn = [...document.querySelectorAll('.tab-btn')].find(btn => /all/i.test(btn.textContent || ''));
+  if (allBtn) allBtn.classList.add('active');
+  updateControlDeck();
+  renderWikiSearchResults();
+  renderRecs();
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+function clearSimilarTitles(event) {
+  if (event) event.stopPropagation();
+  similarTitleSourceId = '';
+  renderRecs();
+}
+
+function renderSimilarTitles(grid) {
+  const source = state.movies?.[similarTitleSourceId];
+  if (!source) { similarTitleSourceId = ''; return false; }
+  grid.innerHTML = '';
+  const results = similarTitleResults();
+  const top = results.slice(0, Math.max(recVisibleLimit, REC_INFINITE_PAGE_SIZE));
+  const count = document.getElementById('recCount');
+  if (count) {
+    count.innerHTML = `similar to ${attrSafe(source.title)} · showing ${top.length} of ${results.length} <button class="inline-clear-btn" onclick="clearSimilarTitles(event)">clear</button>`;
+  }
+  if (!top.length) {
+    grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Similar Titles Found</h3><p>Try another title or clear this view.</p></div>`;
+    return true;
+  }
+  const fragment = document.createDocumentFragment();
+  top.forEach((item, index) => fragment.appendChild(buildCard(item.movie, {
+    rank:index + 1,
+    matchedTags:item.matchedTags,
+    matchedGenres:item.matchedGenres,
+    posOverlap:item.matchedTags.size,
+    genreOverlap:item.matchedGenres.size,
+    tasteFit:Math.max(0, Math.min(1, item.similarity)),
+    matchScore:Math.max(0, Math.min(1, item.similarity)),
+    contextLabel:`Similar to ${source.title}`
+  })));
+  grid.appendChild(fragment);
+  return true;
 }
 
 function renderRatedGrid() {
@@ -5094,13 +5253,11 @@ function buildCard(movie, opts={}) {
   const wikiUrl = wikiUrlForMovie(movie);
   const googleUrl = googleSearchUrlForMovie(movie);
   const displayTitle = attrSafe(movie.title);
-  const wikiTitleHtml = wikiUrl
-    ? `<a class="card-title-link" href="${attrSafe(wikiUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${displayTitle}</a>`
-    : displayTitle;
-  const googleTitleHtml = googleUrl
-    ? ` <span class="card-title-sep">·</span> <a class="card-title-link card-title-google" href="${attrSafe(googleUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Search Google for ${displayTitle}">Google</a>`
-    : '';
-  const titleHtml = `${wikiTitleHtml}${googleTitleHtml}`;
+  const titleHtml = `<button class="card-title-button" onclick="showSimilarTitles('${safeId}',event)" title="Show similar titles">${displayTitle}</button>`;
+  const sourceLinksHtml = [
+    wikiUrl ? `<a class="source-link-btn" href="${attrSafe(wikiUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Wiki</a>` : '',
+    googleUrl ? `<a class="source-link-btn" href="${attrSafe(googleUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Search Google for ${displayTitle}">Google</a>` : ''
+  ].filter(Boolean).join('');
   card.innerHTML = `
     <div class="card-poster">
       <div class="card-poster-inner" style="background:${posterGrad(movie.title)}">
@@ -5115,8 +5272,8 @@ function buildCard(movie, opts={}) {
       <div class="card-head">
         ${movie.thumbnailUrl ? `<img class="card-thumb" src="${movie.thumbnailUrl}" alt="" loading="lazy" decoding="async">` : ''}
         <div class="card-head-copy"><div class="card-title">${titleHtml}</div>
-        <div class="format-row"><span class="title-format">${formatLabel}</span></div>
-        ${showMatch?`<div class="match-percent">${matchPct}% match</div>`:''}
+        <div class="format-row"><span class="title-format">${formatLabel}</span>${showMatch?`<span class="match-percent">${matchPct}% match</span>`:''}</div>
+        ${sourceLinksHtml ? `<div class="source-link-row">${sourceLinksHtml}</div>` : ''}
         <div class="card-meta">${movie.language}·${movie.country}·${movie.year||'?'}</div>
         ${showMatch?`<div class="match-label">${matchSummary}</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
       </div>
@@ -7884,9 +8041,11 @@ function handleScroll() {
   if (btn) btn.classList.toggle('visible', window.scrollY > 520);
   if (!recommendationPageActive()) return;
   if (window.innerHeight + window.scrollY < document.documentElement.scrollHeight - 700) return;
-  const total = titleSearchActive()
-    ? Object.values(state.movies || {}).filter(matchesTab).filter(matchesGlobalFilters).length
-    : personalizedEnough() ? recommendationCandidates().length : discoveryPool().length;
+  const total = similarTitleActive()
+    ? similarTitleResults().length
+    : titleSearchActive()
+      ? Object.values(state.movies || {}).filter(matchesTab).filter(matchesGlobalFilters).length
+      : personalizedEnough() ? recommendationCandidates().length : discoveryPool().length;
   if (recVisibleLimit >= total) return;
   recVisibleLimit += REC_INFINITE_PAGE_SIZE;
   renderRecs();
