@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 14;
+const APP_VERSION = 15;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -672,24 +672,33 @@ function paletteContrast(rgbA, rgbB) {
 }
 
 function readableTextForHsl(bgH, bgS, bgL) {
-  const dark = { h:wrapHue(bgH), s:paletteRandomFloat(10, 28), l:paletteRandomFloat(5, 12) };
-  const light = { h:wrapHue(bgH), s:paletteRandomFloat(8, 24), l:paletteRandomFloat(92, 98) };
-  const bg = hslToRgb(bgH, bgS, bgL);
-  const darkContrast = paletteContrast(bg, hslToRgb(dark.h, dark.s, dark.l));
-  const lightContrast = paletteContrast(bg, hslToRgb(light.h, light.s, light.l));
-  return darkContrast >= lightContrast ? dark : light;
+  return snapReadableHsl({
+    h:bgH,
+    s:paletteRandomFloat(10, 28),
+    l:bgL > 50 ? 12 : 94,
+    surfaces:[{ h:bgH, s:bgS, l:bgL }],
+    threshold:4.5
+  });
 }
 
-function mutedTextFor(text, bgH) {
-  return text.l < 50
-    ? cssHsl(bgH, paletteRandomFloat(12, 28), paletteRandomFloat(25, 39))
-    : cssHsl(bgH, paletteRandomFloat(10, 24), paletteRandomFloat(66, 82));
+function mutedTextFor(text, bgH, surfaces=null) {
+  return cssHslObject(snapReadableHsl({
+    h:bgH,
+    s:paletteRandomFloat(10, 24),
+    l:text.l < 50 ? 36 : 72,
+    surfaces:surfaces || [],
+    threshold:4.5
+  }));
 }
 
-function secondaryMutedTextFor(text, bgH) {
-  return text.l < 50
-    ? cssHsl(bgH, paletteRandomFloat(8, 22), paletteRandomFloat(42, 56))
-    : cssHsl(bgH, paletteRandomFloat(8, 20), paletteRandomFloat(50, 64));
+function secondaryMutedTextFor(text, bgH, surfaces=null) {
+  return cssHslObject(snapReadableHsl({
+    h:bgH,
+    s:paletteRandomFloat(8, 20),
+    l:text.l < 50 ? 49 : 61,
+    surfaces:surfaces || [],
+    threshold:4.5
+  }));
 }
 
 function normalizeSeedHsl(seedHex) {
@@ -728,140 +737,243 @@ function paletteSaturationFor(tone, role='page') {
   return paletteRandomFloat(range[0], range[1]);
 }
 
-function randomizedBackground({ h, s, l, h2=h + 120, s2=s, l2=l, role='page' }={}) {
-  const roll = Math.random();
-  let style = 'solid';
-  if (roll > 0.38 && roll <= 0.66) style = 'linear';
-  else if (roll > 0.66 && roll <= 0.84) style = 'radial';
-  else if (roll > 0.84) style = 'layered';
+function cssHslObject(color, alpha=null) {
+  return cssHsl(color.h, color.s, color.l, alpha);
+}
 
-  const first = cssHsl(h, s, l);
-  const second = cssHsl(h2, s2, l2);
-  const third = cssHsl(h + paletteRandomFloat(24, 70), Math.max(14, s * 0.72), l + paletteRandomFloat(-4, 4));
-  const angle = paletteRandomInt(8, 172);
-  if (style === 'solid') return { css:first, style };
-  if (style === 'linear') return { css:`linear-gradient(${angle}deg, ${first} 0%, ${second} 100%)`, style };
-  if (style === 'radial') {
-    const x = paletteRandomInt(8, 82);
-    const y = paletteRandomInt(-12, 44);
-    return { css:`radial-gradient(circle at ${x}% ${y}%, ${second} 0%, ${first} ${role === 'page' ? 58 : 72}%)`, style };
+function paletteContrastForHsl(fg, bg) {
+  return paletteContrast(hslToRgb(fg.h, fg.s, fg.l), hslToRgb(bg.h, bg.s, bg.l));
+}
+
+function minPaletteContrast(fg, surfaces) {
+  return surfaces.reduce((min, bg) => Math.min(min, paletteContrastForHsl(fg, bg)), Infinity);
+}
+
+function snapReadableHsl({ h, s, l, surfaces, threshold=4.5 }={}) {
+  const base = { h:wrapHue(h), s:clampPaletteNumber(s, 0, 100), l:clampPaletteNumber(l, 0, 100) };
+  const targets = (surfaces || []).filter(Boolean);
+  if (!targets.length || minPaletteContrast(base, targets) >= threshold) return base;
+  const directions = base.l >= 50 ? [1, -1] : [-1, 1];
+  for (const direction of directions) {
+    for (let step = 0; step <= 100; step++) {
+      const candidate = { ...base, l:clampPaletteNumber(base.l + direction * step, 0, 100) };
+      if (minPaletteContrast(candidate, targets) >= threshold) return candidate;
+    }
   }
+  return base;
+}
+
+function randomizedBackground({ h, s, l, h2=h + 120, s2=s, l2=l, role='page' }={}) {
+  const maxSpread = role === 'page' ? 8 : 6;
+  const baseL = clampPaletteNumber(l, 0, 100);
+  const stops = [
+    { h:wrapHue(h), s:clampPaletteNumber(s, 0, 100), l:baseL },
+    { h:wrapHue(h2), s:clampPaletteNumber(s2, 0, 100), l:clampPaletteNumber(l2, baseL - maxSpread, baseL + maxSpread) }
+  ];
+  const style = role === 'page' && Math.random() > 0.28 ? 'linear' : 'solid';
+  if (style === 'solid') return { css:cssHslObject(stops[0]), style, stops:[stops[0]] };
   return {
-    css:`radial-gradient(circle at ${paletteRandomInt(8, 28)}% ${paletteRandomInt(-12, 18)}%, ${cssHsl(h2, s2, l2, 0.78)}, transparent ${role === 'page' ? 36 : 48}%), radial-gradient(circle at ${paletteRandomInt(68, 94)}% ${paletteRandomInt(4, 38)}%, ${cssHsl(h + 210, s * 0.9, l + (l > 50 ? -10 : 10), 0.62)}, transparent ${role === 'page' ? 34 : 50}%), linear-gradient(${angle}deg, ${first}, ${third})`,
-    style
+    css:`linear-gradient(${paletteRandomInt(12, 168)}deg, ${cssHslObject(stops[0])} 0%, ${cssHslObject(stops[1])} 100%)`,
+    style,
+    stops
   };
 }
 
-function buildRandomPalette() {
-  // Main colour is a fresh random hex seed. Everything else is derived from
-  // numeric colour relationships, but background tone and gradient use are also
-  // randomized. Readability, not darkness, is the constraint.
+function paletteStopSpread(stops=[]) {
+  if (!stops.length) return 0;
+  const lights = stops.map(stop => Number(stop.l || 0));
+  return Math.max(...lights) - Math.min(...lights);
+}
+
+function defaultReadablePalette() {
+  return {
+    version:4,
+    seedHex:'#ffcc33',
+    mainHex:'#ffcc33',
+    tone:'dark',
+    cardTone:'dark',
+    fallback:true,
+    backgroundStyles:{ page:'solid', control:'solid', film:'solid', show:'solid' },
+    meta:{
+      surfaces:{
+        pageBg:[{ h:35, s:32, l:6 }],
+        headerBg:[{ h:35, s:30, l:8 }],
+        controlBg:[{ h:35, s:28, l:11 }],
+        filmCardBg:[{ h:35, s:29, l:13 }],
+        showCardBg:[{ h:168, s:28, l:12 }],
+        tagBg:[{ h:35, s:38, l:20 }],
+        chipBg:[{ h:35, s:34, l:22 }],
+        sourceBg:[{ h:18, s:38, l:21 }]
+      }
+    },
+    updatedAt:nowStamp(),
+    colors:{
+      accent:'#ffcc33',
+      accent2:'#ff6a3d',
+      text:'hsl(35 22% 94%)',
+      cardText:'hsl(35 22% 93%)',
+      surface:'hsl(35 26% 10%)',
+      surface2:'hsl(35 24% 15%)',
+      border:'hsl(24 76% 38% / 0.720)',
+      muted:'hsl(35 18% 78%)',
+      muted2:'hsl(35 14% 70%)',
+      cardMuted:'hsl(35 16% 76%)',
+      tagText:'hsl(35 20% 92%)',
+      buttonText:'hsl(35 30% 7%)',
+      tagBg:'hsl(35 38% 20%)',
+      tagBorder:'hsl(35 66% 46% / 0.820)',
+      pageBg:'hsl(35 32% 6%)',
+      headerBg:'hsl(35 30% 8%)',
+      controlBg:'hsl(35 28% 11%)',
+      controlBorder:'hsl(18 80% 56% / 0.480)',
+      filmCardBg:'hsl(35 29% 13%)',
+      filmCardBorder:'#ffcc33',
+      showCardBg:'hsl(168 28% 12%)',
+      showCardBorder:'#68ddb8',
+      chipBg:'hsl(35 34% 22%)',
+      chipBorder:'hsl(35 72% 52% / 0.680)',
+      sourceBg:'hsl(18 38% 21%)',
+      sourceBorder:'hsl(18 78% 54% / 0.620)'
+    }
+  };
+}
+
+function validateGeneratedPalette(palette) {
+  const c = palette?.colors || {};
+  const s = palette?.meta?.surfaces || {};
+  const color = value => parsePaletteColor(value);
+  const checks = [
+    [c.text, [...s.pageBg, ...s.headerBg, ...s.controlBg], 4.5, 'text'],
+    [c.muted, [...s.pageBg, ...s.headerBg, ...s.controlBg], 4.5, 'muted'],
+    [c.muted2, [...s.pageBg, ...s.headerBg, ...s.controlBg], 4.5, 'muted2'],
+    [c.cardText, [...s.filmCardBg, ...s.showCardBg], 4.5, 'cardText'],
+    [c.cardMuted, [...s.filmCardBg, ...s.showCardBg], 4.5, 'cardMuted'],
+    [c.tagText || c.cardText, [...s.tagBg, ...s.chipBg, ...s.sourceBg], 4.5, 'tagText'],
+    [c.accent, [...s.pageBg, ...s.headerBg, ...s.controlBg, ...s.sourceBg], 3, 'accent'],
+    [c.accent2, [...s.pageBg, ...s.headerBg, ...s.controlBg, ...s.sourceBg], 3, 'accent2'],
+    [c.buttonText || c.text, [color(c.accent), color(c.accent2)].filter(Boolean), 4.5, 'buttonText']
+  ];
+  const failed = checks.find(([fgCss, backgrounds, threshold]) => {
+    const fg = color(fgCss);
+    return !fg || !backgrounds.length || minPaletteContrast(fg, backgrounds) < threshold;
+  });
+  if (failed) return { ok:false, reason:failed[3] };
+  const allSurfaces = Object.values(s).flat();
+  const polarityOk = palette.tone === 'light'
+    ? allSurfaces.every(surface => surface.l > 50)
+    : allSurfaces.every(surface => surface.l < 50);
+  if (!polarityOk) return { ok:false, reason:'polarity' };
+  if (paletteStopSpread(s.pageBg || []) > 8) return { ok:false, reason:'gradient-spread' };
+  return { ok:true, reason:'' };
+}
+
+function parsePaletteColor(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  if (text.startsWith('#')) return rgbToHsl(hexToRgb(text));
+  const match = text.match(/hsla?\(\s*([\d.]+)(?:deg)?[\s,]+([\d.]+)%[\s,]+([\d.]+)%/i);
+  if (!match) return null;
+  return { h:wrapHue(Number(match[1])), s:clampPaletteNumber(Number(match[2]), 0, 100), l:clampPaletteNumber(Number(match[3]), 0, 100) };
+}
+
+function buildPaletteCandidate() {
   const seedHex = randomHexSeed();
   const seed = normalizeSeedHsl(seedHex);
   const hue = seed.h;
-  const scheme = [
-    [180, 32], [150, -36], [118, 238], [210, 46], [92, 196], [72, 228], [165, 288], [132, 24]
-  ][paletteRandomInt(0, 7)];
+  const scheme = [[180, 30], [150, -36], [118, 238], [210, 44], [92, 196], [72, 228]][paletteRandomInt(0, 5)];
   const appTone = Math.random() < 0.52 ? 'dark' : 'light';
-  const cardTone = Math.random() < 0.72 ? appTone : (appTone === 'dark' ? 'light' : 'dark');
-  const filmHue = hue + paletteRandomFloat(-18, 18);
-  let showHue = hue + scheme[0] + paletteRandomFloat(-18, 18);
-  const accent2Hue = hue + scheme[1] + paletteRandomFloat(-14, 14);
-  if (paletteHueDistance(filmHue, showHue) < 80) showHue = filmHue + 160 + paletteRandomFloat(-20, 20);
-
-  const pageL = paletteToneRange(appTone, 'page');
-  const pageS = paletteSaturationFor(appTone, 'page');
-  const surfaceL = paletteToneRange(appTone, 'surface');
-  const surface2L = appTone === 'light' ? Math.max(62, surfaceL - paletteRandomFloat(4, 11)) : Math.min(30, surfaceL + paletteRandomFloat(4, 10));
-  const controlL = paletteToneRange(appTone, 'control');
-  const cardL = paletteToneRange(cardTone, 'card');
-  const cardS = paletteSaturationFor(cardTone, 'card');
-  const accentL = appTone === 'light' ? paletteRandomFloat(36, 52) : paletteRandomFloat(56, 72);
-  const cardAccentL = cardTone === 'light' ? paletteRandomFloat(34, 50) : paletteRandomFloat(58, 74);
-  const accent = hslToHex(hue, seed.s, accentL);
-  const accent2 = hslToHex(accent2Hue, paletteRandomFloat(82, 98), appTone === 'light' ? paletteRandomFloat(34, 52) : paletteRandomFloat(55, 70));
-  const filmAccent = hslToHex(filmHue, paletteRandomFloat(86, 100), cardAccentL);
-  const showAccent = hslToHex(showHue, paletteRandomFloat(76, 98), cardAccentL);
-
-  const pageBg = randomizedBackground({
-    h:hue + paletteRandomFloat(-16, 16),
-    s:pageS,
-    l:pageL,
-    h2:accent2Hue,
-    s2:paletteSaturationFor(appTone, 'page'),
-    l2:paletteToneRange(appTone, 'page'),
-    role:'page'
-  });
-  const controlBg = randomizedBackground({
-    h:hue + paletteRandomFloat(-24, 24),
-    s:paletteSaturationFor(appTone, 'control'),
-    l:controlL,
-    h2:showHue,
-    s2:paletteSaturationFor(appTone, 'control'),
-    l2:paletteToneRange(appTone, 'control'),
-    role:'control'
-  });
-  const filmBg = randomizedBackground({
-    h:filmHue,
-    s:cardS,
-    l:cardL,
-    h2:filmHue + paletteRandomFloat(20, 72),
-    s2:Math.max(18, cardS - paletteRandomFloat(4, 18)),
-    l2:paletteToneRange(cardTone, 'card'),
-    role:'card'
-  });
-  const showBg = randomizedBackground({
-    h:showHue,
-    s:cardS,
-    l:cardL,
-    h2:showHue + paletteRandomFloat(-72, -20),
-    s2:Math.max(18, cardS - paletteRandomFloat(4, 18)),
-    l2:paletteToneRange(cardTone, 'card'),
-    role:'card'
-  });
-
-  const text = readableTextForHsl(hue, pageS, pageL);
-  const cardText = readableTextForHsl(filmHue, cardS, cardL);
-  const chipL = paletteToneRange(cardTone, 'chip');
-  const chipS = paletteSaturationFor(cardTone, 'chip');
-  const sourceL = appTone === 'light' ? paletteRandomFloat(68, 88) : paletteRandomFloat(14, 28);
-  const sourceS = paletteRandomFloat(42, 88);
-
-  return {
-    version:3,
+  const cardTone = appTone;
+  const accent2Hue = hue + scheme[1] + paletteRandomFloat(-10, 10);
+  const filmHue = hue + paletteRandomFloat(-10, 10);
+  let showHue = hue + scheme[0] + paletteRandomFloat(-10, 10);
+  if (paletteHueDistance(filmHue, showHue) < 70) showHue = filmHue + 150;
+  const ladder = appTone === 'dark'
+    ? { page:paletteRandomFloat(5, 10), header:paletteRandomFloat(8, 13), control:paletteRandomFloat(11, 17), card:paletteRandomFloat(13, 21), chip:paletteRandomFloat(19, 28) }
+    : { page:paletteRandomFloat(92, 97), header:paletteRandomFloat(88, 94), control:paletteRandomFloat(84, 91), card:paletteRandomFloat(78, 87), chip:paletteRandomFloat(70, 81) };
+  const pageS = paletteRandomFloat(18, 34);
+  const surfaceS = paletteRandomFloat(16, 32);
+  const cardS = paletteRandomFloat(18, 38);
+  const chipS = paletteRandomFloat(24, 46);
+  const pageBg = randomizedBackground({ h:hue, s:pageS, l:ladder.page, h2:accent2Hue, s2:pageS, l2:ladder.page + (appTone === 'dark' ? paletteRandomFloat(2, 7) : -paletteRandomFloat(2, 7)), role:'page' });
+  const headerBg = { h:hue, s:surfaceS, l:ladder.header };
+  const controlBg = { h:hue + 6, s:surfaceS, l:ladder.control };
+  const filmCardBg = { h:filmHue, s:cardS, l:ladder.card };
+  const showCardBg = { h:showHue, s:cardS, l:ladder.card + (appTone === 'dark' ? paletteRandomFloat(0, 2) : -paletteRandomFloat(0, 2)) };
+  const tagBg = { h:hue, s:chipS, l:ladder.chip };
+  const chipBg = { h:hue + 4, s:chipS, l:ladder.chip + (appTone === 'dark' ? paletteRandomFloat(0, 3) : -paletteRandomFloat(0, 3)) };
+  const sourceBg = { h:accent2Hue, s:chipS, l:ladder.chip + (appTone === 'dark' ? paletteRandomFloat(0, 3) : -paletteRandomFloat(0, 3)) };
+  const pageSurfaces = [...pageBg.stops, headerBg, controlBg];
+  const cardSurfaces = [filmCardBg, showCardBg];
+  const chipSurfaces = [tagBg, chipBg, sourceBg];
+  const text = snapReadableHsl({ h:hue, s:paletteRandomFloat(10, 22), l:appTone === 'dark' ? 92 : 10, surfaces:pageSurfaces, threshold:4.5 });
+  const muted = snapReadableHsl({ h:hue, s:paletteRandomFloat(8, 18), l:appTone === 'dark' ? 76 : 27, surfaces:pageSurfaces, threshold:4.5 });
+  const muted2 = snapReadableHsl({ h:hue, s:paletteRandomFloat(6, 16), l:appTone === 'dark' ? 68 : 34, surfaces:pageSurfaces, threshold:4.5 });
+  const cardText = snapReadableHsl({ h:filmHue, s:paletteRandomFloat(10, 22), l:appTone === 'dark' ? 92 : 10, surfaces:cardSurfaces, threshold:4.5 });
+  const cardMuted = snapReadableHsl({ h:filmHue, s:paletteRandomFloat(8, 18), l:appTone === 'dark' ? 74 : 28, surfaces:cardSurfaces, threshold:4.5 });
+  const tagText = snapReadableHsl({ h:hue, s:paletteRandomFloat(10, 20), l:appTone === 'dark' ? 92 : 10, surfaces:chipSurfaces, threshold:4.5 });
+  const accentL = appTone === 'dark' ? paletteRandomFloat(58, 70) : paletteRandomFloat(30, 43);
+  const accent = snapReadableHsl({ h:hue, s:seed.s, l:accentL, surfaces:[...pageSurfaces, sourceBg], threshold:3 });
+  const accent2 = snapReadableHsl({ h:accent2Hue, s:paletteRandomFloat(74, 92), l:accentL + (appTone === 'dark' ? -4 : 4), surfaces:[...pageSurfaces, sourceBg], threshold:3 });
+  const buttonText = snapReadableHsl({ h:hue, s:12, l:appTone === 'dark' ? 8 : 96, surfaces:[accent, accent2], threshold:4.5 });
+  const palette = {
+    version:4,
     seedHex,
-    mainHex:accent,
+    mainHex:hslToHex(accent.h, accent.s, accent.l),
     tone:appTone,
     cardTone,
-    backgroundStyles:{ page:pageBg.style, control:controlBg.style, film:filmBg.style, show:showBg.style },
+    backgroundStyles:{ page:pageBg.style, control:'solid', film:'solid', show:'solid' },
+    meta:{
+      surfaces:{
+        pageBg:pageBg.stops,
+        headerBg:[headerBg],
+        controlBg:[controlBg],
+        filmCardBg:[filmCardBg],
+        showCardBg:[showCardBg],
+        tagBg:[tagBg],
+        chipBg:[chipBg],
+        sourceBg:[sourceBg]
+      }
+    },
     updatedAt:nowStamp(),
     colors:{
-      accent,
-      accent2,
-      text:cssHsl(text.h, text.s, text.l),
-      cardText:cssHsl(cardText.h, cardText.s, cardText.l),
-      surface:hslToHex(hue, paletteSaturationFor(appTone, 'surface'), surfaceL),
-      surface2:hslToHex(hue + 8, paletteSaturationFor(appTone, 'surface'), surface2L),
-      border:cssHsl(accent2Hue, paletteRandomFloat(38, 78), appTone === 'light' ? paletteRandomFloat(46, 68) : paletteRandomFloat(26, 46), 0.72),
-      muted:mutedTextFor(text, hue),
-      muted2:secondaryMutedTextFor(text, hue),
-      cardMuted:mutedTextFor(cardText, filmHue),
-      tagBg:cssHsl(hue, chipS, chipL, appTone === 'light' ? 0.92 : 0.82),
-      tagBorder:cssHsl(hue, paletteRandomFloat(56, 86), appTone === 'light' ? paletteRandomFloat(42, 62) : paletteRandomFloat(34, 54), 0.82),
+      accent:cssHslObject(accent),
+      accent2:cssHslObject(accent2),
+      text:cssHslObject(text),
+      cardText:cssHslObject(cardText),
+      surface:cssHsl(hue, surfaceS, appTone === 'dark' ? ladder.header : ladder.header),
+      surface2:cssHsl(hue + 8, surfaceS, appTone === 'dark' ? ladder.control : ladder.control),
+      border:cssHsl(accent2Hue, 52, appTone === 'dark' ? 42 : 52, 0.72),
+      muted:cssHslObject(muted),
+      muted2:cssHslObject(muted2),
+      cardMuted:cssHslObject(cardMuted),
+      tagText:cssHslObject(tagText),
+      buttonText:cssHslObject(buttonText),
+      tagBg:cssHslObject(tagBg),
+      tagBorder:cssHsl(hue, 58, appTone === 'dark' ? 48 : 44, 0.82),
       pageBg:pageBg.css,
-      headerBg:cssHsl(hue, paletteRandomFloat(18, 52), appTone === 'light' ? paletteRandomFloat(86, 96) : paletteRandomFloat(4, 13), 0.94),
-      controlBg:controlBg.css,
-      controlBorder:cssHsl(accent2Hue, 80, appTone === 'light' ? paletteRandomFloat(42, 60) : paletteRandomFloat(48, 66), 0.48),
-      filmCardBg:filmBg.css,
-      filmCardBorder:filmAccent,
-      showCardBg:showBg.css,
-      showCardBorder:showAccent,
-      chipBg:cssHsl(hue, sourceS, sourceL, appTone === 'light' ? 0.62 : 0.36),
-      chipBorder:cssHsl(hue, 92, appTone === 'light' ? paletteRandomFloat(38, 54) : paletteRandomFloat(56, 72), 0.68),
-      sourceBg:cssHsl(accent2Hue, sourceS, sourceL, appTone === 'light' ? 0.72 : 0.36),
-      sourceBorder:cssHsl(accent2Hue, 90, appTone === 'light' ? paletteRandomFloat(34, 52) : paletteRandomFloat(56, 74), 0.62)
+      headerBg:cssHslObject(headerBg),
+      controlBg:cssHslObject(controlBg),
+      controlBorder:cssHsl(accent2Hue, 62, appTone === 'dark' ? 50 : 42, 0.48),
+      filmCardBg:cssHslObject(filmCardBg),
+      filmCardBorder:cssHslObject(accent),
+      showCardBg:cssHslObject(showCardBg),
+      showCardBorder:cssHslObject(accent2),
+      chipBg:cssHslObject(chipBg),
+      chipBorder:cssHsl(hue, 62, appTone === 'dark' ? 54 : 40, 0.68),
+      sourceBg:cssHslObject(sourceBg),
+      sourceBorder:cssHsl(accent2Hue, 66, appTone === 'dark' ? 56 : 38, 0.62)
     }
   };
+  return validateGeneratedPalette(palette).ok ? palette : null;
+}
+
+function buildRandomPalette(options={}) {
+  if (options.forceFallback) return defaultReadablePalette();
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const palette = buildPaletteCandidate();
+    if (palette) return palette;
+  }
+  return defaultReadablePalette();
 }
 
 function applyPalette(palette=state.settings?.palette) {
@@ -878,6 +990,8 @@ function applyPalette(palette=state.settings?.palette) {
     '--muted':colors.muted,
     '--muted2':colors.muted2,
     '--card-muted':colors.cardMuted,
+    '--tag-text':colors.tagText,
+    '--button-text':colors.buttonText,
     '--tag-bg':colors.tagBg,
     '--tag-border':colors.tagBorder,
     '--page-bg':colors.pageBg,
