@@ -794,3 +794,24 @@ header{background:var(--header-bg, rgba(7,6,5,.9));border-bottom-color:var(--con
 .movie-card.film-card,.movie-card.show-card{border-color:rgba(255,255,255,.11)}
 .movie-card.film-card:hover{border-color:color-mix(in srgb, var(--film-card-border, var(--accent)) 58%, rgba(255,255,255,.12))}
 .movie-card.show-card:hover{border-color:color-mix(in srgb, var(--show-card-border, var(--green)) 58%, rgba(255,255,255,.12))}
+
+
+/* Random palette v3 — backgrounds may be light, dark, flat or gradient. Readability wins. */
+body{background:var(--page-bg, linear-gradient(180deg,#101010 0%,#080808 48%,#050505 100%));color:var(--text)}
+header{background:var(--header-bg, rgba(7,6,5,.9));color:var(--text);border-bottom-color:var(--control-border, rgba(255,204,51,.13))}
+.control-deck{background:var(--control-bg, linear-gradient(180deg,#191919,#111));border-color:var(--control-border, #303030);color:var(--text)}
+.movie-card,.movie-card.rated{color:var(--card-text, var(--text))}
+.movie-card.film-card{background:var(--film-card-bg, linear-gradient(180deg,rgba(32,25,17,.93),rgba(15,13,10,.96))) !important;border-left-color:var(--film-card-border, var(--accent)) !important}
+.movie-card.show-card{background:var(--show-card-bg, linear-gradient(180deg,rgba(12,31,27,.94),rgba(8,17,16,.97))) !important;border-left-color:var(--show-card-border, var(--green)) !important}
+.card-title,.card-title-button,.movie-card .card-title,.movie-card .card-title-button,.section-title,.empty-state h3,.library-health-label{color:var(--card-text, var(--text))}
+header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
+.card-meta,.movie-card .card-meta,.match-label,.settings-bar label,.platform-label,.section-count,.stat-label,.tag-line-label,.genre-label,.fetch-sub,.empty-state,.maintenance-health{color:var(--card-muted, var(--muted))}
+.tab-bar,.platform-btn,.platform-select,.manual-title-input,.btn,.title-search-input,.year-input,.tag-search,.modal input{background:var(--surface2);border-color:var(--control-border, var(--border));color:var(--text)}
+.modal,.empty-state,.tag-brain-grid,.manual-tag-grid{background:var(--surface);border-color:var(--border);color:var(--text)}
+.source-link-btn{background:var(--source-link-bg, rgba(255,255,255,.045));border-color:var(--source-link-border, rgba(255,255,255,.16));color:var(--text)}
+.source-link-btn:hover,.source-link-btn:focus-visible{border-color:var(--accent);color:var(--accent)}
+.tag,.tag-insight-chip,.tb-tag,.genre-chip{background:var(--palette-chip-bg, rgba(255,255,255,.045));border-color:var(--palette-chip-border, rgba(255,255,255,.1));color:var(--card-text, var(--text))}
+.tag.matched,.tag-insight-chip.score-positive,.genre-chip.matched{color:var(--accent);border-color:var(--palette-chip-border)}
+.match-percent,.score-badge{background:var(--source-link-bg, rgba(255,204,51,.13));border-color:var(--source-link-border, rgba(255,204,51,.45))}
+.movie-card.film-card .title-format{color:var(--film-card-border, var(--accent));border-color:var(--film-card-border, var(--accent));background:var(--palette-chip-bg)}
+.movie-card.show-card .title-format{color:var(--show-card-border, var(--green));border-color:var(--show-card-border, var(--green));background:var(--palette-chip-bg)}
