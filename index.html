@@ -59,7 +59,6 @@
       <button class="tab-btn" onclick="setTab('recent',this)">Recently Added</button>
       <button class="tab-btn" onclick="setTab('tags',this)">Tags</button>
       <button class="tab-btn" onclick="setTab('pool',this)">Pool</button>
-      <button class="tab-btn" onclick="setTab('hidden',this)">Hidden</button>
     </div>
   </div>
   <div class="header-right">
@@ -208,13 +207,6 @@
   </div>
   <div class="movies-grid audit-only" id="poolGrid"></div>
 
-  <hr class="sep audit-only" id="hiddenSep">
-
-  <div class="section-header audit-only" id="hiddenHeader">
-    <div class="section-title">Hidden</div>
-    <div class="section-count" id="hiddenCount">nothing hidden</div>
-  </div>
-  <div class="movies-grid audit-only" id="hiddenGrid"></div>
 
   <hr class="sep tag-only" id="tagBrainSep">
 
@@ -242,7 +234,6 @@
       <button class="tb-filter-btn tag-detail-view-btn active" onclick="setTagDetailView('all',this)">All titles</button>
       <button class="tb-filter-btn tag-detail-view-btn" onclick="setTagDetailView('rated',this)">Rated</button>
       <button class="tb-filter-btn tag-detail-view-btn" onclick="setTagDetailView('pool',this)">In Pool</button>
-      <button class="tb-filter-btn tag-detail-view-btn" onclick="setTagDetailView('hidden',this)">Hidden</button>
     </div>
     <div class="movies-grid" id="tagMoviesGrid"></div>
   </div>

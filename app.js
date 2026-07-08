@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 15;
+const APP_VERSION = 16;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -276,7 +276,6 @@ let tasteStoryTimer = null;
 let tasteStoryInProgress = false;
 let tasteStoryRefreshPending = false;
 let poolVisibleLimit = 80;
-let hiddenVisibleLimit = 80;
 let wikiSearchResults = [];
 let wikiSearchQuery = '';
 let localBlockedSearchResults = [];
@@ -705,8 +704,8 @@ function normalizeSeedHsl(seedHex) {
   const seed = rgbToHsl(hexToRgb(seedHex));
   return {
     h:seed.h,
-    s:clampPaletteNumber(Math.max(seed.s, paletteRandomFloat(74, 96)), 72, 98),
-    l:clampPaletteNumber(seed.l < 35 || seed.l > 76 ? paletteRandomFloat(42, 66) : seed.l, 38, 72)
+    s:clampPaletteNumber(seed.s, 0, 100),
+    l:clampPaletteNumber(seed.l, 0, 100)
   };
 }
 
@@ -819,6 +818,8 @@ function defaultReadablePalette() {
       muted2:'hsl(35 14% 70%)',
       cardMuted:'hsl(35 16% 76%)',
       tagText:'hsl(35 20% 92%)',
+      filmTagText:'hsl(35 20% 92%)',
+      showTagText:'hsl(168 20% 92%)',
       buttonText:'hsl(35 30% 7%)',
       tagBg:'hsl(35 38% 20%)',
       tagBorder:'hsl(35 66% 46% / 0.820)',
@@ -832,6 +833,10 @@ function defaultReadablePalette() {
       showCardBorder:'#68ddb8',
       chipBg:'hsl(35 34% 22%)',
       chipBorder:'hsl(35 72% 52% / 0.680)',
+      filmChipBg:'hsl(35 36% 22%)',
+      filmChipBorder:'hsl(35 72% 52% / 0.680)',
+      showChipBg:'hsl(168 34% 21%)',
+      showChipBorder:'hsl(168 62% 54% / 0.680)',
       sourceBg:'hsl(18 38% 21%)',
       sourceBorder:'hsl(18 78% 54% / 0.620)'
     }
@@ -849,6 +854,8 @@ function validateGeneratedPalette(palette) {
     [c.cardText, [...s.filmCardBg, ...s.showCardBg], 4.5, 'cardText'],
     [c.cardMuted, [...s.filmCardBg, ...s.showCardBg], 4.5, 'cardMuted'],
     [c.tagText || c.cardText, [...s.tagBg, ...s.chipBg, ...s.sourceBg], 4.5, 'tagText'],
+    [c.filmTagText || c.tagText || c.cardText, s.filmChipBg || s.chipBg || [], 4.5, 'filmTagText'],
+    [c.showTagText || c.tagText || c.cardText, s.showChipBg || s.chipBg || [], 4.5, 'showTagText'],
     [c.accent, [...s.pageBg, ...s.headerBg, ...s.controlBg, ...s.sourceBg], 3, 'accent'],
     [c.accent2, [...s.pageBg, ...s.headerBg, ...s.controlBg, ...s.sourceBg], 3, 'accent2'],
     [c.buttonText || c.text, [color(c.accent), color(c.accent2)].filter(Boolean), 4.5, 'buttonText']
@@ -876,8 +883,8 @@ function parsePaletteColor(value) {
   return { h:wrapHue(Number(match[1])), s:clampPaletteNumber(Number(match[2]), 0, 100), l:clampPaletteNumber(Number(match[3]), 0, 100) };
 }
 
-function buildPaletteCandidate() {
-  const seedHex = randomHexSeed();
+function buildPaletteCandidate(seedHexOverride='') {
+  const seedHex = seedHexOverride || randomHexSeed();
   const seed = normalizeSeedHsl(seedHex);
   const hue = seed.h;
   const scheme = [[180, 30], [150, -36], [118, 238], [210, 44], [92, 196], [72, 228]][paletteRandomInt(0, 5)];
@@ -890,10 +897,11 @@ function buildPaletteCandidate() {
   const ladder = appTone === 'dark'
     ? { page:paletteRandomFloat(5, 10), header:paletteRandomFloat(8, 13), control:paletteRandomFloat(11, 17), card:paletteRandomFloat(13, 21), chip:paletteRandomFloat(19, 28) }
     : { page:paletteRandomFloat(92, 97), header:paletteRandomFloat(88, 94), control:paletteRandomFloat(84, 91), card:paletteRandomFloat(78, 87), chip:paletteRandomFloat(70, 81) };
-  const pageS = paletteRandomFloat(18, 34);
-  const surfaceS = paletteRandomFloat(16, 32);
-  const cardS = paletteRandomFloat(18, 38);
-  const chipS = paletteRandomFloat(24, 46);
+  const seedSurfaceS = clampPaletteNumber(seed.s * 0.42 + paletteRandomFloat(0, 8), 0, 52);
+  const pageS = clampPaletteNumber(seed.s * 0.34 + paletteRandomFloat(0, 5), 0, 42);
+  const surfaceS = seedSurfaceS;
+  const cardS = clampPaletteNumber(seed.s * 0.48 + paletteRandomFloat(0, 7), 0, 58);
+  const chipS = clampPaletteNumber(seed.s * 0.58 + paletteRandomFloat(0, 8), 0, 68);
   const pageBg = randomizedBackground({ h:hue, s:pageS, l:ladder.page, h2:accent2Hue, s2:pageS, l2:ladder.page + (appTone === 'dark' ? paletteRandomFloat(2, 7) : -paletteRandomFloat(2, 7)), role:'page' });
   const headerBg = { h:hue, s:surfaceS, l:ladder.header };
   const controlBg = { h:hue + 6, s:surfaceS, l:ladder.control };
@@ -902,15 +910,19 @@ function buildPaletteCandidate() {
   const tagBg = { h:hue, s:chipS, l:ladder.chip };
   const chipBg = { h:hue + 4, s:chipS, l:ladder.chip + (appTone === 'dark' ? paletteRandomFloat(0, 3) : -paletteRandomFloat(0, 3)) };
   const sourceBg = { h:accent2Hue, s:chipS, l:ladder.chip + (appTone === 'dark' ? paletteRandomFloat(0, 3) : -paletteRandomFloat(0, 3)) };
+  const filmChipBg = { h:filmHue, s:chipS, l:ladder.chip + (appTone === 'dark' ? paletteRandomFloat(0, 2) : -paletteRandomFloat(0, 2)) };
+  const showChipBg = { h:showHue, s:chipS, l:ladder.chip + (appTone === 'dark' ? paletteRandomFloat(0, 2) : -paletteRandomFloat(0, 2)) };
   const pageSurfaces = [...pageBg.stops, headerBg, controlBg];
   const cardSurfaces = [filmCardBg, showCardBg];
-  const chipSurfaces = [tagBg, chipBg, sourceBg];
+  const chipSurfaces = [tagBg, chipBg, sourceBg, filmChipBg, showChipBg];
   const text = snapReadableHsl({ h:hue, s:paletteRandomFloat(10, 22), l:appTone === 'dark' ? 92 : 10, surfaces:pageSurfaces, threshold:4.5 });
   const muted = snapReadableHsl({ h:hue, s:paletteRandomFloat(8, 18), l:appTone === 'dark' ? 76 : 27, surfaces:pageSurfaces, threshold:4.5 });
   const muted2 = snapReadableHsl({ h:hue, s:paletteRandomFloat(6, 16), l:appTone === 'dark' ? 68 : 34, surfaces:pageSurfaces, threshold:4.5 });
   const cardText = snapReadableHsl({ h:filmHue, s:paletteRandomFloat(10, 22), l:appTone === 'dark' ? 92 : 10, surfaces:cardSurfaces, threshold:4.5 });
   const cardMuted = snapReadableHsl({ h:filmHue, s:paletteRandomFloat(8, 18), l:appTone === 'dark' ? 74 : 28, surfaces:cardSurfaces, threshold:4.5 });
   const tagText = snapReadableHsl({ h:hue, s:paletteRandomFloat(10, 20), l:appTone === 'dark' ? 92 : 10, surfaces:chipSurfaces, threshold:4.5 });
+  const filmTagText = snapReadableHsl({ h:filmHue, s:paletteRandomFloat(8, 18), l:appTone === 'dark' ? 92 : 10, surfaces:[filmChipBg], threshold:4.5 });
+  const showTagText = snapReadableHsl({ h:showHue, s:paletteRandomFloat(8, 18), l:appTone === 'dark' ? 92 : 10, surfaces:[showChipBg], threshold:4.5 });
   const accentL = appTone === 'dark' ? paletteRandomFloat(58, 70) : paletteRandomFloat(30, 43);
   const accent = snapReadableHsl({ h:hue, s:seed.s, l:accentL, surfaces:[...pageSurfaces, sourceBg], threshold:3 });
   const accent2 = snapReadableHsl({ h:accent2Hue, s:paletteRandomFloat(74, 92), l:accentL + (appTone === 'dark' ? -4 : 4), surfaces:[...pageSurfaces, sourceBg], threshold:3 });
@@ -931,6 +943,8 @@ function buildPaletteCandidate() {
         showCardBg:[showCardBg],
         tagBg:[tagBg],
         chipBg:[chipBg],
+        filmChipBg:[filmChipBg],
+        showChipBg:[showChipBg],
         sourceBg:[sourceBg]
       }
     },
@@ -947,6 +961,8 @@ function buildPaletteCandidate() {
       muted2:cssHslObject(muted2),
       cardMuted:cssHslObject(cardMuted),
       tagText:cssHslObject(tagText),
+      filmTagText:cssHslObject(filmTagText),
+      showTagText:cssHslObject(showTagText),
       buttonText:cssHslObject(buttonText),
       tagBg:cssHslObject(tagBg),
       tagBorder:cssHsl(hue, 58, appTone === 'dark' ? 48 : 44, 0.82),
@@ -960,6 +976,10 @@ function buildPaletteCandidate() {
       showCardBorder:cssHslObject(accent2),
       chipBg:cssHslObject(chipBg),
       chipBorder:cssHsl(hue, 62, appTone === 'dark' ? 54 : 40, 0.68),
+      filmChipBg:cssHslObject(filmChipBg),
+      filmChipBorder:cssHsl(filmHue, 62, appTone === 'dark' ? 54 : 40, 0.68),
+      showChipBg:cssHslObject(showChipBg),
+      showChipBorder:cssHsl(showHue, 62, appTone === 'dark' ? 54 : 40, 0.68),
       sourceBg:cssHslObject(sourceBg),
       sourceBorder:cssHsl(accent2Hue, 66, appTone === 'dark' ? 56 : 38, 0.62)
     }
@@ -970,7 +990,7 @@ function buildPaletteCandidate() {
 function buildRandomPalette(options={}) {
   if (options.forceFallback) return defaultReadablePalette();
   for (let attempt = 0; attempt < 12; attempt++) {
-    const palette = buildPaletteCandidate();
+    const palette = buildPaletteCandidate(attempt === 0 ? options.seedHex : '');
     if (palette) return palette;
   }
   return defaultReadablePalette();
@@ -991,6 +1011,8 @@ function applyPalette(palette=state.settings?.palette) {
     '--muted2':colors.muted2,
     '--card-muted':colors.cardMuted,
     '--tag-text':colors.tagText,
+    '--film-tag-text':colors.filmTagText,
+    '--show-tag-text':colors.showTagText,
     '--button-text':colors.buttonText,
     '--tag-bg':colors.tagBg,
     '--tag-border':colors.tagBorder,
@@ -1004,6 +1026,10 @@ function applyPalette(palette=state.settings?.palette) {
     '--show-card-border':colors.showCardBorder,
     '--palette-chip-bg':colors.chipBg,
     '--palette-chip-border':colors.chipBorder,
+    '--film-chip-bg':colors.filmChipBg,
+    '--film-chip-border':colors.filmChipBorder,
+    '--show-chip-bg':colors.showChipBg,
+    '--show-chip-border':colors.showChipBorder,
     '--source-link-bg':colors.sourceBg,
     '--source-link-border':colors.sourceBorder
   };
@@ -2676,8 +2702,7 @@ function migrateVisibleWrongPicks() {
 function isMovieHidden(movie) {
   if (!movie) return false;
   if (wrongPickMatches(movie)) return true;
-  if (movie.id && state.hiddenTitles?.[movie.id]) return true;
-  return [movie.title, movie.wikiTitle, movie.pageTitle].some(title => hiddenTitleMatches(title));
+  return false;
 }
 
 function rollingPoolExclusionMatches(value) {
@@ -3793,7 +3818,7 @@ function saveManualTagChoices() {
 }
 
 async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) {
-  const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages|revisions&explaintext=1&exlimit=1&cllimit=80&pithumbsize=360&rvprop=content&rvslots=main&pithumbsize=360&formatversion=2&format=json&origin=*`;
+  const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages|revisions&piprop=thumbnail|name&explaintext=1&exlimit=1&cllimit=80&pithumbsize=500&rvprop=content&rvslots=main&formatversion=2&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, wikiTitle, mode, diagnostics, opts);
   if (movie && opts.ai !== false) await applyAiTags(movie);
@@ -3803,7 +3828,7 @@ async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) 
 async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
   const clean = String(pageId || '').replace(/^wiki_/, '');
   if (!clean) return null;
-  const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages|revisions&explaintext=1&exlimit=1&cllimit=80&rvprop=content&rvslots=main&pithumbsize=360&formatversion=2&format=json&origin=*`;
+  const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages|revisions&piprop=thumbnail|name&explaintext=1&exlimit=1&cllimit=80&rvprop=content&rvslots=main&pithumbsize=500&formatversion=2&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, clean, mode, opts.diagnostics || null, opts);
   if (movie && opts.ai !== false) await applyAiTags(movie);
@@ -3813,7 +3838,8 @@ async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
 function needsReceptionBackfill(movie) {
   if (!movie || movie.source !== 'wikipedia') return false;
   if (!movie.storyText || (!movie.wikiPageId && !movie.wikiTitle && !movie.pageTitle)) return false;
-  return !movie.reception || Number(movie.reception.version || 0) < RECEPTION_VERSION;
+  const needsThumbnail = !movie.thumbnailUrl && !movie.thumbnailBackfillAttemptedAt;
+  return needsThumbnail || !movie.reception || Number(movie.reception.version || 0) < RECEPTION_VERSION;
 }
 
 function receptionBackfillRecentlyAttempted(movie, now=Date.now()) {
@@ -3878,6 +3904,13 @@ async function runReceptionBackfill() {
         const fresh = movie.wikiPageId
           ? await fetchWikiMovieByPageId(movie.wikiPageId, mode, {ai:false, directLink:!!movie.manualAdded})
           : await fetchWikiMovie(movie.wikiTitle || movie.pageTitle || movie.title, mode, null, {ai:false, directLink:!!movie.manualAdded});
+        let changed = false;
+        if (fresh?.thumbnailUrl && fresh.thumbnailUrl !== movie.thumbnailUrl) {
+          movie.thumbnailUrl = fresh.thumbnailUrl;
+          delete movie.thumbnailBackfillAttemptedAt;
+        } else if (!movie.thumbnailUrl) {
+          movie.thumbnailBackfillAttemptedAt = nowStamp();
+        }
         if (!fresh?.reception) {
           movie.receptionBackfillAttemptedAt = nowStamp();
           touchRecord(movie);
@@ -4748,16 +4781,17 @@ async function tagAllUntagged() {
 // TABS
 // ─────────────────────────────────────────────
 function setTab(tab, btn) {
+  if (tab === 'hidden') tab = 'all';
   activeTab = tab;
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+  btn?.classList.add('active');
   document.querySelector('.tab-bar')?.classList.remove('open');
   recVisibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
   render();
 }
 function isShow(m) { return !!m.format; }
 function matchesTab(m) {
-  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rated' || activeTab === 'recent' || activeTab === 'tags') return true;
+  if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'rated' || activeTab === 'recent' || activeTab === 'tags') return true;
   if (activeTab === 'show') return isShow(m);
   if (activeTab === 'movie') return !isShow(m);
   return true;
@@ -4775,7 +4809,6 @@ function render() {
   else if (activeTab === 'recent') renderRecentlyAdded();
   else if (activeTab === 'tags') renderTagBrain();
   else if (activeTab === 'pool') renderPoolGrid();
-  else if (activeTab === 'hidden') renderHiddenGrid();
   else renderRecs();
   maybeAutoExpandPool();
 }
@@ -4886,7 +4919,6 @@ function updateTitleSearch(value) {
   }
   recVisibleLimit = Math.max(parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
   poolVisibleLimit = 80;
-  hiddenVisibleLimit = 80;
 
   // Typing must never serialize the entire catalogue or rescore it on every
   // keystroke. Persist and repaint after the user pauses briefly instead.
@@ -4915,7 +4947,6 @@ function toggleMobileNav() {
 
 function renderActiveCards() {
   if (activeTab === 'pool') renderPoolGrid();
-  else if (activeTab === 'hidden') renderHiddenGrid();
   else if (activeTab === 'tags') renderTagBrain();
   else if (activeTab === 'rated') renderRatedGrid();
   else if (activeTab === 'recent') renderRecentlyAdded();
@@ -4969,18 +5000,17 @@ function matchesTitleSearch(movie) {
 
 function localTitleSearchMatches() {
   const needle = titleSearchNeedle();
-  if (!needle) return {active:[], hidden:[], blocked:[]};
+  if (!needle) return {active:[], blocked:[]};
   const byNewest = (a, b) => movieAddedTime(b) - movieAddedTime(a) || movieTime(b) - movieTime(a) || titleSortKey(a).localeCompare(titleSortKey(b));
   const matchesRecord = record => [record?.title, record?.wikiTitle, record?.pageTitle]
     .some(value => canonicalTitle(value).includes(needle));
   const active = Object.values(state.movies || {}).filter(matchesTitleSearch).sort(byNewest);
-  const hidden = Object.values(state.hiddenTitles || {}).filter(matchesTitleSearch).sort(byNewest);
-  const represented = new Set([...active, ...hidden].map(movie => canonicalTitle(movie.title || movie.wikiTitle || movie.pageTitle)));
+  const represented = new Set(active.map(movie => canonicalTitle(movie.title || movie.wikiTitle || movie.pageTitle)));
   const blocked = [
     ...Object.values(state.wrongPicks || {}),
     ...Object.values(state.rollingPoolExclusions || {})
   ].filter(matchesRecord).filter(record => !represented.has(canonicalTitle(record.title || record.wikiTitle || record.pageTitle)));
-  return {active, hidden, blocked};
+  return {active, blocked};
 }
 
 async function reAddBlockedTitleFromSearch(index) {
@@ -5254,7 +5284,7 @@ function scheduleAutoExpand(delay = 2500) {
 }
 
 function renderRecs() {
-  if (activeTab === 'pool' || activeTab === 'hidden' || activeTab === 'rated' || activeTab === 'recent' || activeTab === 'tags') return;
+  if (activeTab === 'pool' || activeTab === 'rated' || activeTab === 'recent' || activeTab === 'tags') return;
   const grid = document.getElementById('recsGrid');
   if (similarTitleActive() && renderSimilarTitles(grid)) return;
   if (titleSearchActive()) {
@@ -5301,13 +5331,13 @@ function renderGlobalTitleSearch(grid) {
   // Search is a direct library lookup. It deliberately ignores the current tab,
   // Since, language, genre and rating filters so a title already saved in CineLens
   // can never look absent merely because another filter is active.
-  const {active, hidden, blocked} = localTitleSearchMatches();
+  const {active, blocked} = localTitleSearchMatches();
   localBlockedSearchResults = blocked;
   const results = active;
   const limit = Math.max(recVisibleLimit, REC_INFINITE_PAGE_SIZE);
-  const total = active.length + hidden.length + blocked.length;
+  const total = active.length + blocked.length;
   document.getElementById('recCount').textContent = total
-    ? `library search found ${total}${hidden.length ? ` · ${hidden.length} hidden` : ''}${blocked.length ? ` · ${blocked.length} previously removed` : ''}`
+    ? `library search found ${total}${blocked.length ? ` - ${blocked.length} previously removed` : ''}`
     : 'no title matches';
   grid.innerHTML = '';
   if (!total) {
@@ -5323,9 +5353,6 @@ function renderGlobalTitleSearch(grid) {
       poolView:Number(movie.rating || 0) === 0,
       contextLabel
     }));
-  });
-  hidden.forEach(movie => {
-    fragment.appendChild(buildCard(movie, { hiddenView:true, contextLabel:'Hidden' }));
   });
   grid.appendChild(fragment);
 
@@ -5484,9 +5511,6 @@ function updateVisibleSections() {
   if (activeTab === 'pool') {
     showAuditSection(['poolSep','poolHeader','poolGrid']);
   }
-  if (activeTab === 'hidden') {
-    showAuditSection(['hiddenSep','hiddenHeader','hiddenGrid']);
-  }
 }
 
 function showAuditSection(ids) {
@@ -5561,28 +5585,9 @@ function renderPoolGrid() {
   if (rows.length > visible.length) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMorePoolTitles()">Show ${Math.min(80, rows.length-visible.length)} more · ${rows.length-visible.length} remaining</button></div>`);
 }
 
-function renderHiddenGrid() {
-  const grid = document.getElementById('hiddenGrid');
-  if (!grid) return;
-  const rows = sortMovies(Object.values(state.hiddenTitles || {}).filter(matchesGlobalFilters), 'updated-desc');
-  const visible = rows.slice(0, hiddenVisibleLimit);
-  document.getElementById('hiddenCount').textContent = rows.length ? `showing ${visible.length} of ${rows.length} hidden` : 'nothing hidden';
-  grid.innerHTML = '';
-  if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">x</div><h3>Nothing Hidden</h3></div>`; return; }
-  const fragment = document.createDocumentFragment();
-  visible.forEach(m => fragment.appendChild(buildCard({ ...m, _expanded:true }, { hiddenView:true })));
-  grid.appendChild(fragment);
-  if (rows.length > visible.length) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreHiddenTitles()">Show ${Math.min(80, rows.length-visible.length)} more · ${rows.length-visible.length} remaining</button></div>`);
-}
-
 function showMorePoolTitles() {
   poolVisibleLimit += 80;
   renderPoolGrid();
-}
-
-function showMoreHiddenTitles() {
-  hiddenVisibleLimit += 80;
-  renderHiddenGrid();
 }
 
 function renderRateGrid() { renderRecs(); }
@@ -5638,6 +5643,7 @@ function buildCard(movie, opts={}) {
   const card = document.createElement('div');
   card.className = `movie-card ${isShow(movie) ? 'show-card' : 'film-card'}` + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
+  card.setAttribute('onclick', 'toggleCardReveal(event,this)');
   const matchPct = Math.round(resolvedMatchScore * 100);
   const receptionHint = usableReception(movie) ? ` · reception ${formatReceptionEffect(resolvedReceptionEffect)}` : '';
   const matchSummary = resolvedPosOverlap
@@ -5655,21 +5661,19 @@ function buildCard(movie, opts={}) {
   ].filter(Boolean).join('');
   card.innerHTML = `
     <div class="card-poster">
-      <div class="card-poster-inner" style="background:${posterGrad(movie.title)}">
-        <div class="card-poster-year">${movie.year||''}${movie.format?' · '+movie.format.toUpperCase():''}</div>
-        <div class="card-poster-title">${movie.title}</div>
-        <div class="card-poster-dir">${movie.director||''}</div>
+      ${movie.thumbnailUrl ? `<img class="card-poster-img" src="${attrSafe(movie.thumbnailUrl)}" alt="" loading="lazy" decoding="async">` : `<div class="card-poster-inner" style="background:${posterGrad(movie.title)}"></div>`}
+      <div class="card-front-copy">
+        <div class="card-front-title">${displayTitle}</div>
+        <div class="card-front-meta">${movie.year||'?'} - ${formatLabel}</div>
       </div>
       ${rank?`<div class="rank-badge">#${rank}</div>`:''}
-      ${movie.rating>0?`<div class="score-badge">${'★'.repeat(movie.rating)}${'☆'.repeat(5-movie.rating)}</div>`:''}
+      ${showMatch?`<div class="match-percent card-front-match">${matchPct}% match</div>`:''}
     </div>
     <div class="card-body">
       <div class="card-head">
-        ${movie.thumbnailUrl ? `<img class="card-thumb" src="${movie.thumbnailUrl}" alt="" loading="lazy" decoding="async">` : ''}
         <div class="card-head-copy"><div class="card-title">${titleHtml}</div>
-        <div class="format-row"><span class="title-format">${formatLabel}</span>${showMatch?`<span class="match-percent">${matchPct}% match</span>`:''}</div>
-        ${sourceLinksHtml ? `<div class="source-link-row">${sourceLinksHtml}</div>` : ''}
-        <div class="card-meta">${movie.language}·${movie.country}·${movie.year||'?'}</div>
+        <div class="format-row"><span class="title-format">${formatLabel}</span></div>
+        <div class="card-meta">${movie.language} - ${movie.country} - ${movie.year||'?'}</div>
         ${showMatch?`<div class="match-label">${matchSummary}</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
       </div>
       ${renderStars(safeId, movie.rating || 0)}
@@ -5679,8 +5683,8 @@ function buildCard(movie, opts={}) {
       <div class="card-actions">
         <button class="card-act retag" onclick="retagMovie('${safeId}',event)">↺ re-tag</button>
         ${!hiddenView && movie.storyText && !hasCurrentAiTags(movie) ? `<button class="card-act" onclick="openManualTagChooser('${safeId}',event)">choose tags</button>` : ''}
-        ${!hiddenView?`<button class="card-act" onclick="deleteMovie('${safeId}',event)">hide</button>`:''}
         <button class="card-act del" onclick="removeTitlePermanently('${safeId}',event)">remove</button>
+        ${sourceLinksHtml}
       </div>
       ${contextLabel ? `<div class="tag-status">${contextLabel}</div>` : ''}
     </div>`;
@@ -5701,6 +5705,12 @@ function buildCard(movie, opts={}) {
     if (actions) actions.innerHTML = `<button class="card-act retag" onclick="restoreHiddenMovie('${safeId}',event)">restore</button><button class="card-act del" onclick="forgetHiddenMovie('${safeId}',event)">forget</button>`;
   }
   return card;
+}
+
+function toggleCardReveal(event, card) {
+  const interactive = event?.target?.closest?.('button,a,input,select,textarea,.star,.card-act,.source-link-btn,.genre-chip,.tag-insight-chip');
+  if (interactive) return;
+  if (!matchMedia('(hover: hover)').matches) card?.classList.toggle('revealed');
 }
 
 function renderGenres(movie, matchedGenres=null) {
@@ -6239,19 +6249,6 @@ function rateMovie(id, rating) {
 // ─────────────────────────────────────────────
 // CARD ACTIONS
 // ─────────────────────────────────────────────
-function deleteMovie(id, e) {
-  if (e) e.stopPropagation();
-  const m = state.movies[id];
-  if (!m||!confirm(`Hide "${m.title}"? It will not be fetched again.`)) return;
-  const stamp = nowStamp();
-  state.hiddenTitles[id] = touchRecord({ ...m, hiddenAt: stamp }, stamp);
-  delete state.movies[id];
-  invalidateTagCaches();
-  computeTagWeights();
-  saveLocalState(); queueDriveSync(); render();
-  showToast(`Hidden "${m.title}"`, '');
-}
-
 function removeTitlePermanently(id, e) {
   if (e) e.stopPropagation();
   const m = state.movies[id] || state.hiddenTitles?.[id];
@@ -6460,14 +6457,18 @@ async function retagFromStoredData(id, opts={}) {
   showFetchProgress(opts.progressLabel || 'Refreshing AI tags...', 20, movie.wikiTitle || movie.pageTitle || movie.title);
   try {
     let updated = movie;
-    if (movie.storyText && Number(movie.wikiParserVersion || 0) >= WIKI_PARSER_VERSION) {
+    if (!movie.thumbnailUrl) {
+      const fresh = await refreshTitleFromWikipedia(movie, {ai:false});
+      if (fresh?.thumbnailUrl) updated = applyFreshWikiMovie(id, fresh, movie);
+    }
+    if (updated.storyText && Number(updated.wikiParserVersion || 0) >= WIKI_PARSER_VERSION) {
       try {
-        await applyAiTags(movie, {force:true});
+        await applyAiTags(updated, {force:true});
       } catch(firstError) {
         if (/daily cinelens tagging limit reached/i.test(String(firstError?.message || firstError))) throw firstError;
-        const fresh = await refreshTitleFromWikipedia(movie, {ai:false});
+        const fresh = await refreshTitleFromWikipedia(updated, {ai:false});
         if (!fresh) throw firstError;
-        updated = applyFreshWikiMovie(id, fresh, movie);
+        updated = applyFreshWikiMovie(id, fresh, updated);
         await applyAiTags(updated, {force:true});
       }
     } else {
@@ -6863,6 +6864,7 @@ function toggleTagDeleteMode() {
 }
 
 function setTagDetailView(view, btn) {
+  if (view === 'hidden') view = 'all';
   tagDetailView=view;
   tagDetailVisibleLimit=40;
   document.querySelectorAll('.tag-detail-view-btn').forEach(button=>button.classList.remove('active'));
@@ -6919,21 +6921,20 @@ function renderTagDetail() {
   computeTagWeights();
   document.getElementById('tagDetailName').textContent=selectedTag;
   const activeMovies=Object.values(state.movies || {}).filter(m=>m.tagged&&scoringTags(m).includes(selectedTag));
-  const hiddenMovies=Object.values(state.hiddenTitles || {}).filter(m=>m.tagged&&scoringTags(m).includes(selectedTag));
-  const all=[...activeMovies.map(movie=>({movie,status:movie.rating>0?'rated':'pool'})),...hiddenMovies.map(movie=>({movie,status:'hidden'}))];
+  const all=activeMovies.map(movie=>({movie,status:movie.rating>0?'rated':'pool'}));
   const weight=state.tagWeights[selectedTag]||0;
   const preference=tagPreferenceValue(selectedTag);
   const prefText=preference ? `, preference ${preference > 0 ? '+' : ''}${preference}` : '';
   const ws=weight>0?`+${weight} (you like this${prefText})`:weight<0?`${weight} (you dislike this${prefText})`:`~ unweighted${prefText}`;
-  const counts={rated:all.filter(x=>x.status==='rated').length,pool:all.filter(x=>x.status==='pool').length,hidden:all.filter(x=>x.status==='hidden').length};
-  document.getElementById('tagDetailStat').textContent=`weight ${ws} · ${all.length} titles · ${counts.rated} rated · ${counts.pool} pool · ${counts.hidden} hidden`;
+  const counts={rated:all.filter(x=>x.status==='rated').length,pool:all.filter(x=>x.status==='pool').length};
+  document.getElementById('tagDetailStat').textContent=`weight ${ws} - ${all.length} titles - ${counts.rated} rated - ${counts.pool} pool`;
   const prefSlot=document.getElementById('tagPreferenceControls');
   if (prefSlot) prefSlot.innerHTML=renderTagPreferenceControls(selectedTag);
   let rows=(tagDetailView==='all'?all:all.filter(item=>item.status===tagDetailView)).filter(item=>matchesGlobalFilters(item.movie));
   rows.sort((a,b)=>(a.status==='rated'?0:a.status==='pool'?1:2)-(b.status==='rated'?0:b.status==='pool'?1:2)||Number(b.movie.rating||0)-Number(a.movie.rating||0)||a.movie.title.localeCompare(b.movie.title));
   grid.innerHTML='';
   if (!rows.length) { grid.innerHTML='<div class="empty-state"><h3>No Titles In This Group</h3></div>'; return; }
-  rows.slice(0,tagDetailVisibleLimit).forEach(({movie,status})=>grid.appendChild(buildCard(movie,{hiddenView:status==='hidden',showEdit:status==='rated',poolView:status==='pool',contextLabel:status==='rated'?'Rated':status==='hidden'?'Hidden':'In Pool',contextTag:selectedTag})));
+  rows.slice(0,tagDetailVisibleLimit).forEach(({movie,status})=>grid.appendChild(buildCard(movie,{showEdit:status==='rated',poolView:status==='pool',contextLabel:status==='rated'?'Rated':'In Pool',contextTag:selectedTag})));
   if (rows.length>tagDetailVisibleLimit) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMoreTagTitles()">Show 40 more · ${rows.length-tagDetailVisibleLimit} remaining</button></div>`);
 }
 // ─────────────────────────────────────────────
@@ -7391,12 +7392,13 @@ function mergeDiscoveryCursor(local={}, remote={}) {
 function normaliseIncomingData(d={}) {
   const tagStats = d.tagStats || (d.canonicalTagStats ? {candidates:d.canonicalTagStats.raw||0,tags:d.canonicalTagStats.canonical||0,rebuiltAt:d.canonicalTagStats.rebuiltAt||''} : state.tagStats);
   const settings = {...(d.settings || {})};
+  const restored = restoreHiddenRecordsToMovies(d.movies || {}, d.hiddenTitles || {});
   settings.tagPreferences = settings.tagPreferences || {};
   return {
     meta: d.meta || (d.updatedAt ? {updatedAt:d.updatedAt} : {}),
-    movies: d.movies || {},
+    movies: restored.movies,
     settings,
-    hiddenTitles: d.hiddenTitles || {},
+    hiddenTitles: restored.hiddenTitles,
     wrongPicks: d.wrongPicks || {},
     deletedMovieRecords: d.deletedMovieRecords || {},
     rollingPoolExclusions: d.rollingPoolExclusions || {},
@@ -7407,6 +7409,18 @@ function normaliseIncomingData(d={}) {
     tasteStory: normaliseTasteStory(d.tasteStory || {}),
     discoveryCursor: normaliseDiscoveryCursor(d.discoveryCursor || {})
   };
+}
+
+function restoreHiddenRecordsToMovies(movies={}, hiddenTitles={}) {
+  const restoredMovies = {...(movies || {})};
+  Object.entries(hiddenTitles || {}).forEach(([id, movie]) => {
+    if (!movie || movie.wrongPick) return;
+    const {hiddenAt, hidden, ...restored} = movie;
+    const clean = {...restored, id:String(movie.id || id)};
+    const existing = restoredMovies[String(clean.id)];
+    restoredMovies[String(clean.id)] = newestRecord(existing, clean);
+  });
+  return {movies:restoredMovies, hiddenTitles:{}};
 }
 
 function replaceStateFromDataset(dataset) {
@@ -7603,10 +7617,11 @@ function loadLocalState() {
     const raw=localStorage.getItem('cinelens_v2_bootstrap') || localStorage.getItem('cinelens_v2');
     if (raw) {
       const s=JSON.parse(raw);
-      if (s.movies) state.movies=s.movies;
+      const restored = restoreHiddenRecordsToMovies(s.movies || {}, s.hiddenTitles || {});
+      if (s.movies || s.hiddenTitles) state.movies=restored.movies;
       if (s.settings) state.settings={...state.settings,...s.settings};
       state.settings.tagPreferences = state.settings.tagPreferences || {};
-      if (s.hiddenTitles) state.hiddenTitles=s.hiddenTitles;
+      if (s.hiddenTitles) state.hiddenTitles=restored.hiddenTitles;
       if (s.wrongPicks) state.wrongPicks=s.wrongPicks;
       if (s.deletedMovieRecords) state.deletedMovieRecords=s.deletedMovieRecords;
       if (s.unblockedTitleRecords) state.unblockedTitleRecords=s.unblockedTitleRecords;
@@ -8071,6 +8086,9 @@ function applyDriveProfile(profile,{merge=true,preferDrive=false}={}) {
     movie.watchlist=!!chosen.watchlist;
     movie.manualAdded=!!chosen.manualAdded;
   });
+  const restored = restoreHiddenRecordsToMovies(state.movies, state.hiddenTitles);
+  state.movies = restored.movies;
+  state.hiddenTitles = restored.hiddenTitles;
   if (profile.meta) state.meta={...state.meta,...profile.meta};
   invalidateTagCaches();
 }

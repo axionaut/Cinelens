@@ -222,8 +222,8 @@
   .card-tags{gap:4px;margin-top:6px}
   .genre-row{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin:7px 0 3px}
   .genre-label{font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted2);margin-right:2px}
-  .genre-chip{font-size:9px;color:var(--muted);border:1px solid #383838;border-radius:10px;padding:2px 7px;text-transform:capitalize;background:transparent;font-family:inherit;line-height:inherit}.genre-chip.clickable{cursor:pointer}.genre-chip.clickable:hover,.genre-chip.clickable:focus-visible{color:var(--accent);border-color:#806b12;background:#211d08;outline:none}
-  .genre-chip.matched{color:var(--accent);border-color:#806b12;background:#211d08}
+  .genre-chip{font-size:9px;color:var(--tag-text,var(--muted));border:1px solid var(--tag-border,var(--border));border-radius:10px;padding:2px 7px;text-transform:capitalize;background:var(--palette-chip-bg,transparent);font-family:inherit;line-height:inherit}.genre-chip.clickable{cursor:pointer}.genre-chip.clickable:hover,.genre-chip.clickable:focus-visible{color:var(--accent);border-color:var(--accent2);background:color-mix(in srgb,var(--accent) 12%,transparent);outline:none}
+  .genre-chip.matched{color:var(--accent);border-color:var(--accent2);background:color-mix(in srgb,var(--accent) 12%,transparent)}
   .tag{font-size:9px;border-radius:999px;padding:3px 7px;background:rgba(255,255,255,.045);border-color:rgba(255,255,255,.09);color:#bca895}
   .tag.matched{border-color:rgba(255,208,90,.56);color:#ffd05a;background:rgba(255,208,90,.1)}
   .card-actions{gap:6px;margin-top:10px}
@@ -815,3 +815,41 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .match-percent,.score-badge{background:var(--source-link-bg, rgba(255,204,51,.13));border-color:var(--source-link-border, rgba(255,204,51,.45))}
 .movie-card.film-card .title-format{color:var(--film-card-border, var(--accent));border-color:var(--film-card-border, var(--accent));background:var(--palette-chip-bg)}
 .movie-card.show-card .title-format{color:var(--show-card-border, var(--green));border-color:var(--show-card-border, var(--green));background:var(--palette-chip-bg)}
+
+/* v16 image-forward cards and palette-aware chrome */
+.movies-grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
+.movie-card{min-height:360px;aspect-ratio:2/3;border-radius:8px;overflow:hidden;perspective:1200px;cursor:pointer;background:var(--film-card-bg)!important}
+.movie-card.show-card{background:var(--show-card-bg)!important}
+.card-poster,.card-body{position:absolute;inset:0;display:flex;flex-direction:column;backface-visibility:hidden;transition:transform .24s ease,opacity .24s ease}
+.card-poster{display:flex!important;justify-content:flex-end;background:var(--film-card-bg);transform:rotateY(0);opacity:1}
+.show-card .card-poster{background:var(--show-card-bg)}
+.card-poster-img,.card-poster-inner{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.card-poster-inner{display:block;background-size:cover}
+.card-poster::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.08),rgba(0,0,0,.74));pointer-events:none}
+.card-front-copy{position:relative;z-index:2;padding:18px 16px;color:#fff;text-shadow:0 2px 18px rgba(0,0,0,.65)}
+.card-front-title{font-size:20px;font-weight:700;line-height:1.12}
+.card-front-meta{margin-top:5px;font-family:'DM Mono',monospace;font-size:11px;color:rgba(255,255,255,.82)}
+.card-front-match{position:absolute;z-index:3;left:12px;top:12px;margin:0}
+.rank-badge{z-index:4}
+.card-body{padding:14px;gap:8px;overflow:auto;background:var(--film-card-bg);color:var(--card-text);transform:rotateY(8deg) translateY(8px);opacity:0;pointer-events:none}
+.show-card .card-body{background:var(--show-card-bg)}
+@media (hover:hover){
+  .movie-card:hover .card-poster{transform:rotateY(-8deg);opacity:0;pointer-events:none}
+  .movie-card:hover .card-body{transform:rotateY(0);opacity:1;pointer-events:auto}
+}
+.movie-card.revealed .card-poster{transform:rotateY(-8deg);opacity:0;pointer-events:none}
+.movie-card.revealed .card-body{transform:rotateY(0);opacity:1;pointer-events:auto}
+.card-head{display:block}
+.format-row .match-percent{display:none}
+.source-link-row{display:none}
+.card-actions .source-link-btn{min-height:auto;padding:5px 8px}
+.card-actions .card-act,.card-actions .source-link-btn{background:var(--source-link-bg);border-color:var(--source-link-border);color:var(--tag-text)}
+.card-actions .card-act:hover,.card-actions .source-link-btn:hover{border-color:var(--accent);color:var(--accent)}
+.film-card .tag,.film-card .tag-insight-chip,.film-card .tb-tag,.film-card .genre-chip{background:var(--film-chip-bg,var(--palette-chip-bg));border-color:var(--film-chip-border,var(--palette-chip-border));color:var(--film-tag-text,var(--tag-text))}
+.show-card .tag,.show-card .tag-insight-chip,.show-card .tb-tag,.show-card .genre-chip{background:var(--show-chip-bg,var(--palette-chip-bg));border-color:var(--show-chip-border,var(--palette-chip-border));color:var(--show-tag-text,var(--tag-text))}
+.film-card .genre-chip.clickable:hover,.film-card .genre-chip.matched{color:var(--film-card-border);border-color:var(--film-card-border);background:color-mix(in srgb,var(--film-card-border) 16%,var(--film-chip-bg))}
+.show-card .genre-chip.clickable:hover,.show-card .genre-chip.matched{color:var(--show-card-border);border-color:var(--show-card-border);background:color-mix(in srgb,var(--show-card-border) 16%,var(--show-chip-bg))}
+@media(max-width:768px){
+  .movies-grid{grid-template-columns:1fr}
+  .movie-card{min-height:420px;aspect-ratio:3/4}
+}
