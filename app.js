@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 10;
+const APP_VERSION = 11;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -553,6 +553,14 @@ function wikiUrlForMovie(movie) {
   const title = movie.wikiTitle || movie.pageTitle;
   if (title) return wikiUrlFromTitle(title);
   return '';
+}
+
+function googleSearchUrlForMovie(movie) {
+  if (!movie || !movie.title) return '';
+  const parts = [movie.title];
+  if (movie.year) parts.push(String(movie.year));
+  parts.push(isShow(movie) ? 'tv series' : 'movie');
+  return `https://www.google.com/search?q=${encodeURIComponent(parts.join(' '))}`;
 }
 
 function canonicalTitle(s) {
@@ -5084,9 +5092,15 @@ function buildCard(movie, opts={}) {
   const safeId = movie.id.replace(/'/g,"\\'");
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';
   const wikiUrl = wikiUrlForMovie(movie);
-  const titleHtml = wikiUrl
-    ? `<a class="card-title-link" href="${wikiUrl}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${movie.title}</a>`
-    : movie.title;
+  const googleUrl = googleSearchUrlForMovie(movie);
+  const displayTitle = attrSafe(movie.title);
+  const wikiTitleHtml = wikiUrl
+    ? `<a class="card-title-link" href="${attrSafe(wikiUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${displayTitle}</a>`
+    : displayTitle;
+  const googleTitleHtml = googleUrl
+    ? ` <span class="card-title-sep">·</span> <a class="card-title-link card-title-google" href="${attrSafe(googleUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Search Google for ${displayTitle}">Google</a>`
+    : '';
+  const titleHtml = `${wikiTitleHtml}${googleTitleHtml}`;
   card.innerHTML = `
     <div class="card-poster">
       <div class="card-poster-inner" style="background:${posterGrad(movie.title)}">
