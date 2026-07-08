@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 12;
+const APP_VERSION = 13;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -564,32 +564,157 @@ function googleSearchUrlForMovie(movie) {
   return `https://www.google.com/search?q=${encodeURIComponent(parts.join(' '))}`;
 }
 
-function cssHsl(h, s, l) {
-  return `hsl(${Math.round(((h % 360) + 360) % 360)} ${Math.round(s)}% ${Math.round(l)}%)`;
+function clampPaletteNumber(value, min, max) {
+  return Math.min(max, Math.max(min, Number(value) || 0));
+}
+
+function wrapHue(hue) {
+  return ((Number(hue) % 360) + 360) % 360;
+}
+
+function cssHsl(h, s, l, alpha=null) {
+  const hue = Math.round(wrapHue(h));
+  const sat = Math.round(clampPaletteNumber(s, 0, 100));
+  const light = Math.round(clampPaletteNumber(l, 0, 100));
+  if (alpha === null || alpha === undefined) return `hsl(${hue} ${sat}% ${light}%)`;
+  return `hsl(${hue} ${sat}% ${light}% / ${clampPaletteNumber(alpha, 0, 1).toFixed(3)})`;
+}
+
+function paletteRandomInt(min, max) {
+  return Math.floor(min + Math.random() * (max - min + 1));
+}
+
+function paletteRandomFloat(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+function randomHexSeed() {
+  return `#${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
+}
+
+function hexToRgb(hex) {
+  const clean = String(hex || '').replace(/[^a-f0-9]/gi, '').slice(0, 6).padEnd(6, '0');
+  return {
+    r:parseInt(clean.slice(0, 2), 16),
+    g:parseInt(clean.slice(2, 4), 16),
+    b:parseInt(clean.slice(4, 6), 16)
+  };
+}
+
+function rgbToHsl({ r=0, g=0, b=0 }={}) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  let h = 0;
+  let s = 0;
+  const l = (max + min) / 2;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      default: h = (r - g) / d + 4; break;
+    }
+    h *= 60;
+  }
+  return { h:wrapHue(h), s:s * 100, l:l * 100 };
+}
+
+function hslToRgb(h, s, l) {
+  h = wrapHue(h) / 360;
+  s = clampPaletteNumber(s, 0, 100) / 100;
+  l = clampPaletteNumber(l, 0, 100) / 100;
+  if (s === 0) {
+    const grey = Math.round(l * 255);
+    return { r:grey, g:grey, b:grey };
+  }
+  const hue2rgb = (p, q, t) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return {
+    r:Math.round(hue2rgb(p, q, h + 1 / 3) * 255),
+    g:Math.round(hue2rgb(p, q, h) * 255),
+    b:Math.round(hue2rgb(p, q, h - 1 / 3) * 255)
+  };
+}
+
+function rgbToHex({ r=0, g=0, b=0 }={}) {
+  const part = value => clampPaletteNumber(Math.round(value), 0, 255).toString(16).padStart(2, '0');
+  return `#${part(r)}${part(g)}${part(b)}`;
+}
+
+function hslToHex(h, s, l) {
+  return rgbToHex(hslToRgb(h, s, l));
+}
+
+function normalizeSeedHsl(seedHex) {
+  const seed = rgbToHsl(hexToRgb(seedHex));
+  return {
+    h:seed.h,
+    s:clampPaletteNumber(Math.max(seed.s, paletteRandomFloat(74, 96)), 72, 98),
+    l:clampPaletteNumber(seed.l < 42 || seed.l > 72 ? paletteRandomFloat(54, 66) : seed.l, 48, 68)
+  };
+}
+
+function paletteHueDistance(a, b) {
+  const delta = Math.abs(wrapHue(a) - wrapHue(b));
+  return Math.min(delta, 360 - delta);
 }
 
 function buildRandomPalette() {
-  const hue = Math.floor(Math.random() * 360);
-  const showHue = hue + 112;
-  const warmHue = hue + 24;
+  // The seed is an actual random hex value. It is then pushed into a vivid,
+  // contrast-safe range before the rest of the theme is derived from it.
+  const seedHex = randomHexSeed();
+  const seed = normalizeSeedHsl(seedHex);
+  const hue = seed.h;
+  const scheme = [
+    [180, 32], [150, -36], [118, 238], [210, 46], [92, 196], [72, 228], [165, 288], [132, 24]
+  ][paletteRandomInt(0, 7)];
+  const filmHue = hue + paletteRandomFloat(-10, 10);
+  let showHue = hue + scheme[0] + paletteRandomFloat(-12, 12);
+  const accent2Hue = hue + scheme[1] + paletteRandomFloat(-10, 10);
+  if (paletteHueDistance(filmHue, showHue) < 80) showHue = filmHue + 160 + paletteRandomFloat(-14, 14);
+  const bgHue = hue + paletteRandomFloat(-18, 18);
+  const showAccent = hslToHex(showHue, paletteRandomFloat(72, 94), paletteRandomFloat(54, 64));
+  const filmAccent = hslToHex(filmHue, paletteRandomFloat(86, 98), paletteRandomFloat(56, 66));
+  const accent = hslToHex(hue, seed.s, seed.l);
+  const accent2 = hslToHex(accent2Hue, paletteRandomFloat(82, 98), paletteRandomFloat(55, 66));
+  const textHue = hue + paletteRandomFloat(-10, 10);
   return {
-    version:1,
-    hue,
+    version:2,
+    seedHex,
+    mainHex:accent,
     updatedAt:nowStamp(),
     colors:{
-      accent:cssHsl(hue, 96, 61),
-      accent2:cssHsl(warmHue, 92, 58),
-      surface:cssHsl(hue, 18, 8),
-      surface2:cssHsl(hue, 20, 12),
-      border:cssHsl(hue, 28, 24),
-      muted:cssHsl(hue, 18, 68),
-      muted2:cssHsl(hue, 14, 38),
-      tagBg:cssHsl(hue, 24, 10),
-      tagBorder:cssHsl(hue, 30, 24),
-      filmCardBg:`linear-gradient(180deg, ${cssHsl(hue, 20, 12)}, ${cssHsl(hue, 22, 7)})`,
-      filmCardBorder:cssHsl(hue, 92, 60),
-      showCardBg:`linear-gradient(180deg, ${cssHsl(showHue, 22, 12)}, ${cssHsl(showHue, 24, 7)})`,
-      showCardBorder:cssHsl(showHue, 72, 50)
+      accent,
+      accent2,
+      surface:hslToHex(bgHue, paletteRandomFloat(18, 34), paletteRandomFloat(6, 9)),
+      surface2:hslToHex(bgHue, paletteRandomFloat(20, 40), paletteRandomFloat(10, 14)),
+      border:hslToHex(bgHue, paletteRandomFloat(36, 58), paletteRandomFloat(24, 32)),
+      muted:hslToHex(textHue, paletteRandomFloat(18, 32), paletteRandomFloat(68, 78)),
+      muted2:hslToHex(textHue, paletteRandomFloat(14, 26), paletteRandomFloat(40, 50)),
+      tagBg:cssHsl(bgHue, paletteRandomFloat(26, 44), paletteRandomFloat(9, 13), 0.92),
+      tagBorder:cssHsl(hue, paletteRandomFloat(56, 78), paletteRandomFloat(32, 42), 0.72),
+      pageBg:`radial-gradient(circle at 15% -10%, ${cssHsl(filmHue, 90, 28, 0.48)}, transparent 34%), radial-gradient(circle at 86% 2%, ${cssHsl(showHue, 86, 26, 0.42)}, transparent 31%), linear-gradient(180deg, ${cssHsl(bgHue, 38, 8)} 0%, ${cssHsl(bgHue + 12, 36, 5)} 52%, #030303 100%)`,
+      headerBg:cssHsl(bgHue, 36, 5, 0.92),
+      controlBg:`linear-gradient(135deg, ${cssHsl(filmHue, 56, 14, 0.68)}, ${cssHsl(bgHue, 28, 7, 0.94)} 48%, ${cssHsl(showHue, 54, 12, 0.64)})`,
+      controlBorder:cssHsl(accent2Hue, 80, 56, 0.34),
+      filmCardBg:`linear-gradient(145deg, ${cssHsl(filmHue, 62, 15, 0.96)}, ${cssHsl(filmHue + 12, 46, 8, 0.98)})`,
+      filmCardBorder:filmAccent,
+      showCardBg:`linear-gradient(145deg, ${cssHsl(showHue, 58, 15, 0.96)}, ${cssHsl(showHue - 10, 44, 8, 0.98)})`,
+      showCardBorder:showAccent,
+      chipBg:cssHsl(hue, 72, 20, 0.22),
+      chipBorder:cssHsl(hue, 92, 62, 0.58),
+      sourceBg:cssHsl(accent2Hue, 80, 20, 0.22),
+      sourceBorder:cssHsl(accent2Hue, 90, 60, 0.48)
     }
   };
 }
@@ -607,10 +732,18 @@ function applyPalette(palette=state.settings?.palette) {
     '--muted2':colors.muted2,
     '--tag-bg':colors.tagBg,
     '--tag-border':colors.tagBorder,
+    '--page-bg':colors.pageBg,
+    '--header-bg':colors.headerBg,
+    '--control-bg':colors.controlBg,
+    '--control-border':colors.controlBorder,
     '--film-card-bg':colors.filmCardBg,
     '--film-card-border':colors.filmCardBorder,
     '--show-card-bg':colors.showCardBg,
-    '--show-card-border':colors.showCardBorder
+    '--show-card-border':colors.showCardBorder,
+    '--palette-chip-bg':colors.chipBg,
+    '--palette-chip-border':colors.chipBorder,
+    '--source-link-bg':colors.sourceBg,
+    '--source-link-border':colors.sourceBorder
   };
   Object.entries(pairs).forEach(([name, value]) => {
     if (value) root.style.setProperty(name, value);
@@ -7240,7 +7373,7 @@ function loadLocalState() {
       if (sortMode) sortMode.value=state.settings.sortMode||'recommended';
       const titleSearch=document.getElementById('titleSearch');
       if (titleSearch) titleSearch.value=state.settings.titleSearch||'';
-      
+
       Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
       Object.values(state.hiddenTitles || {}).forEach(normaliseStoredTitleRecord);
     }
