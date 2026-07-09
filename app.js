@@ -21,7 +21,6 @@ const CINELENS_COLORS = {
   cardText:          '#CDEDF6', // text on card backs (= Text)
   surface:           '#5EB1BF', // MAIN: Surface (Pacific Blue) — modals, dropdowns
   surface2:          '#5EB1BF', // buttons, secondary surfaces (= Surface)
-  border:            '#CDEDF640',
   muted:             '#CDEDF6B8', // secondary page text
   muted2:            '#CDEDF68C', // tertiary page text
   cardMuted:         '#CDEDF6AD', // secondary text on card backs
@@ -30,23 +29,15 @@ const CINELENS_COLORS = {
   showTagText:       '#CDEDF6D9', // tag text on show cards (= tagText)
   buttonText:        '#042A2B',   // text on solid accent buttons (= Background, for contrast on Primary)
   tagBg:             '#5EB1BF',   // (= Surface)
-  tagBorder:         '#EF7B458C',
   pageBg:            '#042A2B',   // MAIN: Background (Evergreen) — page background
   headerBg:          '#042A2B',   // (= Background)
   controlBg:         '#042A2B',   // control deck background (= Background)
-  controlBorder:     '#EF7B4573',
   filmCardBg:        '#042A2B',   // movie card background (= Background)
-  filmCardBorder:    '#EF7B45',   // = Primary
   showCardBg:        '#042A2B',   // show card background (= Background)
-  showCardBorder:    '#D84727',   // MAIN: Secondary (Burnt Tangerine) — show brand colour
   chipBg:            '#5EB1BF',   // generic tag/genre chips (= Surface)
-  chipBorder:        '#EF7B4573',
   filmChipBg:        '#5EB1BF',   // tag chips on movie cards (= Surface)
-  filmChipBorder:    '#EF7B458C',
   showChipBg:        '#5EB1BF',   // tag chips on show cards (= Surface)
-  showChipBorder:    '#D847278C',
   sourceBg:          '#5EB1BF',   // Wiki/TMDB/Google link buttons (= Surface)
-  sourceBorder:      '#EF7B4580',
   // MOVIE / SHOW poster badge — solid, opaque, legible over any image
   movieBadgeBg:      '#EF7B45',   // = Primary
   movieBadgeText:    '#042A2B',   // = Background
@@ -63,7 +54,6 @@ function applyPalette() {
     '--card-text':CINELENS_COLORS.cardText,
     '--surface':CINELENS_COLORS.surface,
     '--surface2':CINELENS_COLORS.surface2,
-    '--border':CINELENS_COLORS.border,
     '--muted':CINELENS_COLORS.muted,
     '--muted2':CINELENS_COLORS.muted2,
     '--card-muted':CINELENS_COLORS.cardMuted,
@@ -72,23 +62,17 @@ function applyPalette() {
     '--show-tag-text':CINELENS_COLORS.showTagText,
     '--button-text':CINELENS_COLORS.buttonText,
     '--tag-bg':CINELENS_COLORS.tagBg,
-    '--tag-border':CINELENS_COLORS.tagBorder,
     '--page-bg':CINELENS_COLORS.pageBg,
     '--header-bg':CINELENS_COLORS.headerBg,
     '--control-bg':CINELENS_COLORS.controlBg,
-    '--control-border':CINELENS_COLORS.controlBorder,
     '--film-card-bg':CINELENS_COLORS.filmCardBg,
     '--film-card-border':CINELENS_COLORS.filmCardBorder,
     '--show-card-bg':CINELENS_COLORS.showCardBg,
     '--show-card-border':CINELENS_COLORS.showCardBorder,
     '--palette-chip-bg':CINELENS_COLORS.chipBg,
-    '--palette-chip-border':CINELENS_COLORS.chipBorder,
     '--film-chip-bg':CINELENS_COLORS.filmChipBg,
-    '--film-chip-border':CINELENS_COLORS.filmChipBorder,
     '--show-chip-bg':CINELENS_COLORS.showChipBg,
-    '--show-chip-border':CINELENS_COLORS.showChipBorder,
     '--source-link-bg':CINELENS_COLORS.sourceBg,
-    '--source-link-border':CINELENS_COLORS.sourceBorder,
     '--movie-badge-bg':CINELENS_COLORS.movieBadgeBg,
     '--movie-badge-text':CINELENS_COLORS.movieBadgeText,
     '--show-badge-bg':CINELENS_COLORS.showBadgeBg,
