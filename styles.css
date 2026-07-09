@@ -829,11 +829,16 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
    plain poster tiles (no absolute-stacked faces, no 3D transform). Clicking
    a card adds .expanded: it spans the full grid row (grid-column:1/-1) and
    lays out poster (left, fixed width) + full detail body (right, flexes to
-   fill) side by side. CSS Grid reflows the other cards below it on its own —
-   that reflow itself is a discrete layout change, not a smoothly animated
-   one (no current browser can smoothly tween a grid-column span change);
-   the poster/body crossfade within the expanding card is what's animated.
-   Card width is fixed-compact only (CARD_MIN_WIDTH_PX, no size picker). */
+   fill) side by side. That layout shift itself is a discrete change, not a
+   smoothly animated one (no current browser can smoothly tween a
+   grid-column span change); the poster/body crossfade within the expanding
+   card is what's animated. Card width is fixed-compact only
+   (CARD_MIN_WIDTH_PX, no size picker).
+   v24: getting the *other* cards in the clicked card's row to compact with
+   no gap, and the expanded row to land directly below them, is handled in
+   JS (toggleCardReveal in app.js) by moving the card's DOM node before
+   adding this class — see the comment there. This class only owns the
+   visual styling of the expanded state, not its position in the grid. */
 .movies-grid{grid-template-columns:repeat(auto-fill,minmax(var(--card-min-width,200px),1fr));gap:12px}
 .movie-card{display:flex;align-items:stretch;aspect-ratio:2/3;border-radius:8px;overflow:hidden;cursor:pointer;background:var(--film-card-bg)!important;position:relative;grid-column:span 1;transition:grid-column .01s}
 .movie-card.show-card{background:var(--show-card-bg)!important}

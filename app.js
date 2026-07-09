@@ -1,57 +1,96 @@
 // ─────────────────────────────────────────────
-// COLOURS — the one place to edit CineLens's theme (v20)
-// The old random-palette generator (HSL math, contrast solving, per-session
-// randomisation) is removed entirely, per Nitin's request. Every colour in
-// the app now comes from this single hand-edited table. To change the
-// theme: edit a hex/hsl value below, save, reload — no other file or
-// function needs to change.
-//
-// Each entry is a plain CSS colour string (hex, hsl(), rgba(), anything CSS
-// accepts). `movieBadge*`/`showBadge*` are the small solid-background pills
-// on card posters that say MOVIE/SHOW — the movie/show visual distinction
-// used to be a whole-card background tint, which stopped being visible once
-// cards became poster images; a small opaque badge stays legible over any
-// image.
+// COLOURS — the one place to edit CineLens's theme (v24)
+// Four base hex colours, full stop. Every other colour the app uses (35 CSS
+// custom properties across cards/chips/badges/chrome) is derived from these
+// four by buildCineLensColors() below, using plain hex colour math (mix /
+// lighten / withAlpha / contrastText) — a small palette plus a systematic
+// scale, not 35 independently hand-picked values. To change the theme: edit
+// one of the four hex values below, save, reload. Every derived value is
+// hex too (including translucent ones, via 8-digit #RRGGBBAA — supported in
+// every browser CineLens targets).
+// To explore before committing: dev/theme-lab.html renders the same four
+// inputs against real card markup and copies out a ready-to-paste block.
 // ─────────────────────────────────────────────
-const CINELENS_COLORS = {
-  accent:            '#ffcc33', // primary accent (buttons, match %, links)
-  accent2:           '#ff6a3d', // secondary accent (hover states, borders)
-  text:              'hsl(35 22% 94%)',   // main page text
-  cardText:          'hsl(35 22% 93%)',   // text on card backs
-  surface:           'hsl(35 26% 10%)',   // modals, dropdowns
-  surface2:          'hsl(35 24% 15%)',   // buttons, secondary surfaces
-  border:            'hsl(24 76% 38% / 0.72)',
-  muted:             'hsl(35 18% 78%)',   // secondary page text
-  muted2:            'hsl(35 14% 70%)',   // tertiary page text
-  cardMuted:         'hsl(35 16% 76%)',   // secondary text on card backs
-  tagText:           'hsl(35 20% 92%)',
-  filmTagText:       'hsl(35 20% 92%)',   // tag text on movie cards
-  showTagText:       'hsl(168 20% 92%)',  // tag text on show cards
-  buttonText:        'hsl(35 30% 7%)',    // text on solid accent buttons
-  tagBg:             'hsl(35 38% 20%)',
-  tagBorder:         'hsl(35 66% 46% / 0.82)',
-  pageBg:            'hsl(35 32% 6%)',    // page background
-  headerBg:          'hsl(35 30% 8%)',
-  controlBg:         'hsl(35 28% 11%)',   // control deck background
-  controlBorder:     'hsl(18 80% 56% / 0.48)',
-  filmCardBg:        'hsl(35 29% 13%)',   // movie card background
-  filmCardBorder:    '#ffcc33',
-  showCardBg:        'hsl(168 28% 12%)',  // show card background
-  showCardBorder:    '#68ddb8',
-  chipBg:            'hsl(35 34% 22%)',   // generic tag/genre chips
-  chipBorder:        'hsl(35 72% 52% / 0.68)',
-  filmChipBg:        'hsl(35 36% 22%)',   // tag chips on movie cards
-  filmChipBorder:    'hsl(35 72% 52% / 0.68)',
-  showChipBg:        'hsl(168 34% 21%)',  // tag chips on show cards
-  showChipBorder:    'hsl(168 62% 54% / 0.68)',
-  sourceBg:          'hsl(18 38% 21%)',   // Wiki/TMDB/Google link buttons
-  sourceBorder:      'hsl(18 78% 54% / 0.62)',
-  // MOVIE / SHOW poster badge — solid, opaque, legible over any image
-  movieBadgeBg:      '#ffcc33',
-  movieBadgeText:    'hsl(35 30% 7%)',
-  showBadgeBg:       '#68ddb8',
-  showBadgeText:     'hsl(168 40% 8%)'
+const CINELENS_BASE_COLORS = {
+  bg:         '#582707', // page background — every dark surface derives from this
+  text:       '#F3F0EC', // page/card text — every light text tone derives from this
+  filmAccent: '#FF4B3E', // movie brand colour — accent, film card/chip/badge family
+  showAccent: '#FFE548'  // show brand colour — show card/chip/badge family
 };
+
+function hexToRgb(hex) {
+  const clean = String(hex).replace('#', '');
+  const full = clean.length === 3 ? clean.split('').map(c => c + c).join('') : clean;
+  const num = parseInt(full.slice(0, 6), 16);
+  return { r:(num >> 16) & 255, g:(num >> 8) & 255, b:num & 255 };
+}
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+}
+function mixHex(hexA, hexB, weight) {
+  const a = hexToRgb(hexA), b = hexToRgb(hexB);
+  return rgbToHex(a.r + (b.r - a.r) * weight, a.g + (b.g - a.g) * weight, a.b + (b.b - a.b) * weight);
+}
+function lightenHex(hex, amount) { return mixHex(hex, '#ffffff', amount); }
+function withAlpha(hex, alpha) {
+  const a = Math.round(Math.max(0, Math.min(1, alpha)) * 255).toString(16).padStart(2, '0');
+  return hex + a;
+}
+function contrastText(hex) {
+  const { r, g, b } = hexToRgb(hex);
+  const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return luminance > 0.55 ? '#150f08' : '#f4ece1';
+}
+
+function buildCineLensColors(base = CINELENS_BASE_COLORS) {
+  const { bg, text, filmAccent, showAccent } = base;
+  const buttonText = contrastText(filmAccent);
+  return {
+    // page chrome
+    pageBg:            bg,
+    headerBg:          lightenHex(bg, 0.03),
+    controlBg:         lightenHex(bg, 0.06),
+    controlBorder:     withAlpha(filmAccent, 0.45),
+    surface:           lightenHex(bg, 0.05),
+    surface2:          lightenHex(bg, 0.10),
+    border:            withAlpha(text, 0.14),
+    // text
+    text,
+    muted:             withAlpha(text, 0.72),
+    muted2:            withAlpha(text, 0.55),
+    cardText:          text,
+    cardMuted:         withAlpha(text, 0.68),
+    tagText:           withAlpha(text, 0.85),
+    filmTagText:       mixHex(text, filmAccent, 0.08),
+    showTagText:       mixHex(text, showAccent, 0.08),
+    // accent / buttons
+    accent:            filmAccent,
+    accent2:           mixHex(filmAccent, showAccent, 0.35),
+    buttonText,
+    sourceBg:          lightenHex(mixHex(bg, filmAccent, 0.15), 0.06),
+    sourceBorder:      withAlpha(filmAccent, 0.5),
+    // generic tags/chips
+    tagBg:             lightenHex(bg, 0.12),
+    tagBorder:         withAlpha(filmAccent, 0.55),
+    chipBg:            lightenHex(bg, 0.14),
+    chipBorder:        withAlpha(filmAccent, 0.45),
+    // MOVIE / SHOW poster badge — solid, opaque, legible over any image
+    filmCardBg:        mixHex(bg, filmAccent, 0.10),
+    filmCardBorder:    filmAccent,
+    filmChipBg:        mixHex(bg, filmAccent, 0.18),
+    filmChipBorder:    withAlpha(filmAccent, 0.55),
+    movieBadgeBg:      filmAccent,
+    movieBadgeText:    buttonText,
+    showCardBg:        mixHex(bg, showAccent, 0.10),
+    showCardBorder:    showAccent,
+    showChipBg:        mixHex(bg, showAccent, 0.18),
+    showChipBorder:    withAlpha(showAccent, 0.55),
+    showBadgeBg:       showAccent,
+    showBadgeText:     contrastText(showAccent)
+  };
+}
+
+const CINELENS_COLORS = buildCineLensColors();
 
 function applyPalette() {
   const root = document.documentElement;
@@ -120,7 +159,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 23;
+const APP_VERSION = 24;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -5563,10 +5602,56 @@ function buildCard(movie, opts={}) {
 // (the card spans the full grid row, pushing siblings down) can't safely be
 // hover-triggered — the pointer would end up over whatever card the reflow
 // left underneath it. Click/tap toggles on every device instead.
+//
+// v24: only one card expands at a time, and expanding physically moves the
+// card's DOM node to right after the last card in its own row (restored to
+// its original spot on collapse) instead of toggling grid-column in place.
+// Toggling in place left the card in the middle of its row in the DOM, and
+// CSS Grid's auto-placement can't back-fill a gap earlier in the flow once
+// a later item has already claimed a full-width row of its own — the rest
+// of that row got pushed into a completely different row, leaving a gap
+// where they used to sit. Moving the node to the end of its row first means
+// the row's other cards compact together with no gap ("fill the vacuum"),
+// then the expanded card opens as a clean new row directly beneath them.
+let expandedCardState = null; // {card, parent, nextSibling} — restore point for collapse
+
+function gridColumnCount(grid) {
+  const tracks = (getComputedStyle(grid).gridTemplateColumns || '').trim().split(/\s+/).filter(Boolean);
+  return Math.max(1, tracks.length);
+}
+
+function collapseExpandedCard() {
+  if (!expandedCardState) return;
+  const { card, parent, nextSibling } = expandedCardState;
+  expandedCardState = null;
+  card.classList.remove('expanded');
+  if (!card.isConnected || !parent?.isConnected) return;
+  if (nextSibling?.isConnected && nextSibling.parentNode === parent) parent.insertBefore(card, nextSibling);
+  else parent.appendChild(card);
+}
+
 function toggleCardReveal(event, card) {
   const interactive = event?.target?.closest?.('button,a,input,select,textarea,.star,.card-act,.source-link-btn,.genre-chip,.tag-insight-chip');
   if (interactive) return;
-  card?.classList.toggle('expanded');
+  if (!card) return;
+  const collapsingSelf = card.classList.contains('expanded');
+  collapseExpandedCard();
+  if (collapsingSelf) return;
+
+  const parent = card.parentElement;
+  const cards = parent ? Array.from(parent.children).filter(el => el.classList.contains('movie-card')) : [];
+  const index = cards.indexOf(card);
+  if (!parent || index === -1) { card.classList.add('expanded'); return; }
+
+  const columns = gridColumnCount(parent);
+  const rowEndIndex = Math.min(cards.length - 1, Math.floor(index / columns) * columns + columns - 1);
+  const rowLastCard = cards[rowEndIndex];
+  const anchor = rowLastCard === card ? card.nextElementSibling : rowLastCard.nextElementSibling;
+
+  expandedCardState = { card, parent, nextSibling: card.nextElementSibling };
+  if (anchor) parent.insertBefore(card, anchor);
+  else parent.appendChild(card);
+  card.classList.add('expanded');
 }
 
 function renderGenres(movie, matchedGenres=null) {
