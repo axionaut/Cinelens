@@ -99,7 +99,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 28;
+const APP_VERSION = 29;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -427,7 +427,7 @@ let state = {
   movies: {},
   tagWeights: {},
   genreWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', ratingFilter:'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{} },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', ratingFilter:'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, tmdbBackfillPaused:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', manifestFileId:'', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   wrongPicks: {},
@@ -1663,6 +1663,7 @@ function renderWatchPlatformPicker() {
 window.addEventListener('DOMContentLoaded', async () => {
   renderAppVersion();
   renderWatchPlatformPicker();
+  initExpandedCardObserver();
   loadLocalState();
   applyPalette();
   applyCardSize();
@@ -3786,8 +3787,27 @@ function tmdbBackfillCandidates() {
   return sortByBackfillPriority(candidates);
 }
 
+function tmdbBackfillStatusText() {
+  if (!TMDB_API_KEY) return '';
+  const paused = !!state.settings.tmdbBackfillPaused;
+  const remaining = tmdbBackfillCandidates().length;
+  if (paused) return remaining ? `TMDB refresh paused · ${remaining} pending (posters/genres/availability)` : 'TMDB refresh paused';
+  if (!remaining) return '';
+  if (tmdbBackfillInProgress) return `TMDB refresh running · ${remaining} pending`;
+  if (poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) return `TMDB refresh waiting · ${remaining} pending (behind other background work)`;
+  return `TMDB refresh queued · ${remaining} pending`;
+}
+
+function toggleTmdbBackfillPaused() {
+  state.settings.tmdbBackfillPaused = !state.settings.tmdbBackfillPaused;
+  saveSettingsState();
+  if (!state.settings.tmdbBackfillPaused) scheduleTmdbBackfill(500);
+  updateLibraryHealth();
+  showToast(state.settings.tmdbBackfillPaused ? 'TMDB refresh paused' : 'TMDB refresh resumed', 'success');
+}
+
 function scheduleTmdbBackfill(delay=4000) {
-  if (!libraryWritesUnlocked || tmdbBackfillInProgress) return;
+  if (!libraryWritesUnlocked || tmdbBackfillInProgress || state.settings.tmdbBackfillPaused) return;
   const hasWork = Object.values(state.movies || {}).some(needsTmdbBackfill);
   if (!hasWork) return;
   if (tmdbBackfillTimer) {
@@ -3805,7 +3825,13 @@ function scheduleTmdbBackfill(delay=4000) {
   }
 }
 
+// v29: TMDB backfill (posters/watch-availability/genres) ran with no visible
+// status and no way to pause it — pausing/resuming and knowing whether it's
+// running, blocked behind other background work, or just caught up, are now
+// surfaced in the maintenance panel. See tmdbBackfillStatusText() and
+// toggleTmdbBackfillPaused().
 async function runTmdbBackfill() {
+  if (state.settings.tmdbBackfillPaused) return;
   if (!libraryWritesUnlocked || tmdbBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) {
     scheduleTmdbBackfill(3000);
     return;
@@ -5004,6 +5030,8 @@ function updateLibraryHealth() {
   const drive = state.drive?.connected ? 'Drive synced' : state.drive?.enabled ? 'Drive reconnect needed' : 'Local only';
   const receptionNeedCount = Object.values(state.movies || {}).filter(needsReceptionBackfill).length;
   const receptionSegment = receptionNeedCount ? ` · ${receptionNeedCount} titles need quality data` : '';
+  const tmdbStatus = tmdbBackfillStatusText();
+  const tmdbSegment = tmdbStatus ? ` · ${tmdbStatus}` : '';
 
   let text;
   if (autoFetchPaused) text = 'Collection paused';
@@ -5015,7 +5043,13 @@ function updateLibraryHealth() {
 
   if (label) label.textContent = text;
   if (maintenance) {
-    maintenance.textContent = `${text} · ${health.pendingTags} pending AI tags${receptionSegment} · ${drive}`;
+    maintenance.textContent = `${text} · ${health.pendingTags} pending AI tags${receptionSegment}${tmdbSegment} · ${drive}`;
+  }
+  const tmdbBtn = document.getElementById('tmdbBackfillToggleBtn');
+  if (tmdbBtn) {
+    const paused = !!state.settings.tmdbBackfillPaused;
+    tmdbBtn.textContent = paused ? 'Resume TMDB refresh' : 'Pause TMDB refresh';
+    tmdbBtn.classList.toggle('active', paused);
   }
 }
 
@@ -5661,6 +5695,7 @@ function activeGridElement() {
   const gridId = activeTab === 'rated' ? 'ratedGrid'
     : activeTab === 'recent' ? 'recentGrid'
     : activeTab === 'pool' ? 'poolGrid'
+    : activeTab === 'tags' ? 'tagMoviesGrid'
     : 'recsGrid';
   return document.getElementById(gridId);
 }
@@ -5675,6 +5710,24 @@ function reapplyExpandedCardAfterRender() {
   // discarded; expandCardElement below captures a fresh restore point.
   expandedCardState = null;
   expandCardElement(card);
+}
+
+// v29: render() isn't the only place a grid gets rebuilt from scratch —
+// renderTagDetail() (the Tags tab's per-tag title list) does its own
+// grid.innerHTML='' + rebuild and was never routed through render(), so the
+// v28 fix above didn't reach it. Rather than keep hunting down every place
+// that rebuilds a grid (this is already the second one found), a
+// MutationObserver on every card grid catches all of them structurally:
+// any childList change anywhere re-runs the same reapply check above, which
+// is already a cheap no-op when there's nothing to do.
+let expandedCardObserver = null;
+function initExpandedCardObserver() {
+  if (expandedCardObserver) return;
+  expandedCardObserver = new MutationObserver(() => reapplyExpandedCardAfterRender());
+  ['recsGrid', 'ratedGrid', 'recentGrid', 'poolGrid', 'tagMoviesGrid'].forEach(id => {
+    const grid = document.getElementById(id);
+    if (grid) expandedCardObserver.observe(grid, {childList: true});
+  });
 }
 
 function renderGenres(movie, matchedGenres=null) {
