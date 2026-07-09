@@ -1,96 +1,58 @@
 // ─────────────────────────────────────────────
-// COLOURS — the one place to edit CineLens's theme (v24)
-// Four base hex colours, full stop. Every other colour the app uses (35 CSS
-// custom properties across cards/chips/badges/chrome) is derived from these
-// four by buildCineLensColors() below, using plain hex colour math (mix /
-// lighten / withAlpha / contrastText) — a small palette plus a systematic
-// scale, not 35 independently hand-picked values. To change the theme: edit
-// one of the four hex values below, save, reload. Every derived value is
-// hex too (including translucent ones, via 8-digit #RRGGBBAA — supported in
-// every browser CineLens targets).
-// To explore before committing: dev/theme-lab.html renders the same four
-// inputs against real card markup and copies out a ready-to-paste block.
+// COLOURS — the one place to edit CineLens's theme (v26)
+// Every value below is a literal hex string, typed by hand. Nothing here is
+// computed at runtime — no mixing, no lightening, no derivation function.
+// If you want to change a colour, edit that one line; nothing else moves.
+// Five source colours drive this table (Nitin's palette):
+//   Evergreen #042A2B, Pacific Blue #5EB1BF, Light Cyan #CDEDF6,
+//   Atomic Tangerine #EF7B45, Burnt Tangerine #D84727
+// mapped to Background / Surface / Text / Primary / Secondary. Every entry
+// below is either one of those five exactly, or one of those five with a
+// hand-typed alpha suffix for translucency (still plain hex, just 8-digit
+// #RRGGBBAA instead of 6). Nothing is blended or lightened by code.
+// To explore before committing: dev/theme-lab.html has one colour picker
+// per role plus every other field below, all independently editable, and
+// copies out a ready-to-paste block.
 // ─────────────────────────────────────────────
-const CINELENS_BASE_COLORS = {
-  bg:         '#582707', // page background — every dark surface derives from this
-  text:       '#F3F0EC', // page/card text — every light text tone derives from this
-  filmAccent: '#FF4B3E', // movie brand colour — accent, film card/chip/badge family
-  showAccent: '#FFE548'  // show brand colour — show card/chip/badge family
+const CINELENS_COLORS = {
+  accent:            '#EF7B45', // MAIN: Primary (Atomic Tangerine) — buttons, match %, links, film brand colour
+  accent2:           '#EF7B45', // MAIN: Accent — hover states, secondary borders (= Primary)
+  text:              '#CDEDF6', // MAIN: Text (Light Cyan) — main page text
+  cardText:          '#CDEDF6', // text on card backs (= Text)
+  surface:           '#5EB1BF', // MAIN: Surface (Pacific Blue) — modals, dropdowns
+  surface2:          '#5EB1BF', // buttons, secondary surfaces (= Surface)
+  border:            '#CDEDF640',
+  muted:             '#CDEDF6B8', // secondary page text
+  muted2:            '#CDEDF68C', // tertiary page text
+  cardMuted:         '#CDEDF6AD', // secondary text on card backs
+  tagText:           '#CDEDF6D9',
+  filmTagText:       '#CDEDF6D9', // tag text on movie cards (= tagText)
+  showTagText:       '#CDEDF6D9', // tag text on show cards (= tagText)
+  buttonText:        '#042A2B',   // text on solid accent buttons (= Background, for contrast on Primary)
+  tagBg:             '#5EB1BF',   // (= Surface)
+  tagBorder:         '#EF7B458C',
+  pageBg:            '#042A2B',   // MAIN: Background (Evergreen) — page background
+  headerBg:          '#042A2B',   // (= Background)
+  controlBg:         '#042A2B',   // control deck background (= Background)
+  controlBorder:     '#EF7B4573',
+  filmCardBg:        '#042A2B',   // movie card background (= Background)
+  filmCardBorder:    '#EF7B45',   // = Primary
+  showCardBg:        '#042A2B',   // show card background (= Background)
+  showCardBorder:    '#D84727',   // MAIN: Secondary (Burnt Tangerine) — show brand colour
+  chipBg:            '#5EB1BF',   // generic tag/genre chips (= Surface)
+  chipBorder:        '#EF7B4573',
+  filmChipBg:        '#5EB1BF',   // tag chips on movie cards (= Surface)
+  filmChipBorder:    '#EF7B458C',
+  showChipBg:        '#5EB1BF',   // tag chips on show cards (= Surface)
+  showChipBorder:    '#D847278C',
+  sourceBg:          '#5EB1BF',   // Wiki/TMDB/Google link buttons (= Surface)
+  sourceBorder:      '#EF7B4580',
+  // MOVIE / SHOW poster badge — solid, opaque, legible over any image
+  movieBadgeBg:      '#EF7B45',   // = Primary
+  movieBadgeText:    '#042A2B',   // = Background
+  showBadgeBg:       '#D84727',   // = Secondary
+  showBadgeText:     '#042A2B'    // = Background
 };
-
-function hexToRgb(hex) {
-  const clean = String(hex).replace('#', '');
-  const full = clean.length === 3 ? clean.split('').map(c => c + c).join('') : clean;
-  const num = parseInt(full.slice(0, 6), 16);
-  return { r:(num >> 16) & 255, g:(num >> 8) & 255, b:num & 255 };
-}
-function rgbToHex(r, g, b) {
-  return '#' + [r, g, b].map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
-}
-function mixHex(hexA, hexB, weight) {
-  const a = hexToRgb(hexA), b = hexToRgb(hexB);
-  return rgbToHex(a.r + (b.r - a.r) * weight, a.g + (b.g - a.g) * weight, a.b + (b.b - a.b) * weight);
-}
-function lightenHex(hex, amount) { return mixHex(hex, '#ffffff', amount); }
-function withAlpha(hex, alpha) {
-  const a = Math.round(Math.max(0, Math.min(1, alpha)) * 255).toString(16).padStart(2, '0');
-  return hex + a;
-}
-function contrastText(hex) {
-  const { r, g, b } = hexToRgb(hex);
-  const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-  return luminance > 0.55 ? '#150f08' : '#f4ece1';
-}
-
-function buildCineLensColors(base = CINELENS_BASE_COLORS) {
-  const { bg, text, filmAccent, showAccent } = base;
-  const buttonText = contrastText(filmAccent);
-  return {
-    // page chrome
-    pageBg:            bg,
-    headerBg:          lightenHex(bg, 0.03),
-    controlBg:         lightenHex(bg, 0.06),
-    controlBorder:     withAlpha(filmAccent, 0.45),
-    surface:           lightenHex(bg, 0.05),
-    surface2:          lightenHex(bg, 0.10),
-    border:            withAlpha(text, 0.14),
-    // text
-    text,
-    muted:             withAlpha(text, 0.72),
-    muted2:            withAlpha(text, 0.55),
-    cardText:          text,
-    cardMuted:         withAlpha(text, 0.68),
-    tagText:           withAlpha(text, 0.85),
-    filmTagText:       mixHex(text, filmAccent, 0.08),
-    showTagText:       mixHex(text, showAccent, 0.08),
-    // accent / buttons
-    accent:            filmAccent,
-    accent2:           mixHex(filmAccent, showAccent, 0.35),
-    buttonText,
-    sourceBg:          lightenHex(mixHex(bg, filmAccent, 0.15), 0.06),
-    sourceBorder:      withAlpha(filmAccent, 0.5),
-    // generic tags/chips
-    tagBg:             lightenHex(bg, 0.12),
-    tagBorder:         withAlpha(filmAccent, 0.55),
-    chipBg:            lightenHex(bg, 0.14),
-    chipBorder:        withAlpha(filmAccent, 0.45),
-    // MOVIE / SHOW poster badge — solid, opaque, legible over any image
-    filmCardBg:        mixHex(bg, filmAccent, 0.10),
-    filmCardBorder:    filmAccent,
-    filmChipBg:        mixHex(bg, filmAccent, 0.18),
-    filmChipBorder:    withAlpha(filmAccent, 0.55),
-    movieBadgeBg:      filmAccent,
-    movieBadgeText:    buttonText,
-    showCardBg:        mixHex(bg, showAccent, 0.10),
-    showCardBorder:    showAccent,
-    showChipBg:        mixHex(bg, showAccent, 0.18),
-    showChipBorder:    withAlpha(showAccent, 0.55),
-    showBadgeBg:       showAccent,
-    showBadgeText:     contrastText(showAccent)
-  };
-}
-
-const CINELENS_COLORS = buildCineLensColors();
 
 function applyPalette() {
   const root = document.documentElement;
@@ -159,7 +121,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 24;
+const APP_VERSION = 26;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
