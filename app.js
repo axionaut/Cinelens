@@ -99,7 +99,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 27;
+const APP_VERSION = 28;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -329,7 +329,7 @@ const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // Hotstar" in India), so each canonical platform is matched by pattern
 // rather than exact string, and the derived per-platform country list is the
 // only thing stored — never the full raw multi-region response.
-const TMDB_DATA_VERSION = 2;
+const TMDB_DATA_VERSION = 3;
 // JioHotstar's own pattern is checked before Disney+'s: Disney+'s pattern
 // matches "hotstar" generically (regional naming, e.g. "Disney+ Hotstar" in
 // India before the 2025 merger), and "JioHotstar" contains that same
@@ -515,6 +515,32 @@ const GENRE_RULES = [
   ['western', /\bwestern(?:-|\s)(?:film|drama|series)\b/]
 ];
 const GENRE_SCORE_FACTOR = 0.35;
+
+// TMDB genre IDs (stable, documented in their API reference — movie and TV
+// genre lists overlap but aren't identical) mapped to CineLens's own genre
+// slugs above. Real TMDB classification, not the GENRE_RULES text-guessing
+// fallback, is used whenever TMDB returns genres for a title — see
+// attachTmdbDetails. A couple of combo genres (10759, 10765) map to two
+// slugs at once; a few TMDB-only categories (TV Movie, News, Reality, Soap,
+// Talk) have no CineLens equivalent and are dropped.
+const TMDB_GENRE_MAP = {
+  28: ['action'], 12: ['adventure'], 16: ['animation'], 35: ['comedy'], 80: ['crime'],
+  99: ['documentary'], 18: ['drama'], 10751: ['family'], 14: ['fantasy'], 36: ['historical'],
+  27: ['horror'], 10402: ['musical'], 9648: ['mystery'], 10749: ['romance'], 878: ['science-fiction'],
+  53: ['thriller'], 10752: ['war'], 37: ['western'],
+  10759: ['action', 'adventure'], // TV "Action & Adventure"
+  10762: ['kids'],
+  10765: ['science-fiction', 'fantasy'], // TV "Sci-Fi & Fantasy"
+  10768: ['war'] // TV "War & Politics"
+};
+
+function tmdbGenresToCanonical(genres) {
+  const out = new Set();
+  (Array.isArray(genres) ? genres : []).forEach(g => {
+    (TMDB_GENRE_MAP[Number(g?.id)] || []).forEach(slug => out.add(slug));
+  });
+  return [...out];
+}
 
 function deriveGenres(leadText='', categories=[]) {
   const categoryText = Array.isArray(categories) ? categories.join(' ') : String(categories || '');
@@ -3556,7 +3582,8 @@ async function tmdbDetailsWithAvailability(id, mediaType) {
   const posterPath = data.poster_path || '';
   return {
     posterUrl: posterPath ? TMDB_IMAGE_BASE + posterPath : '',
-    watchAvailability: buildWatchAvailability(data['watch/providers']?.results)
+    watchAvailability: buildWatchAvailability(data['watch/providers']?.results),
+    genres: tmdbGenresToCanonical(data.genres)
   };
 }
 
@@ -3572,7 +3599,8 @@ async function fetchTmdbDetails(title, year, format) {
       tmdbId: candidate.id,
       tmdbMediaType: mediaType,
       posterUrl: details?.posterUrl || fallbackPoster || '',
-      watchAvailability: details?.watchAvailability || null
+      watchAvailability: details?.watchAvailability || null,
+      genres: details?.genres || []
     };
   } catch(_) {
     return null;
@@ -3586,6 +3614,9 @@ async function attachTmdbDetails(movie) {
     if (tmdb.posterUrl) movie.posterUrl = tmdb.posterUrl;
     if (tmdb.tmdbId) { movie.tmdbId = tmdb.tmdbId; movie.tmdbMediaType = tmdb.tmdbMediaType; }
     movie.watchAvailability = tmdb.watchAvailability || null;
+    // Real TMDB classification replaces the GENRE_RULES text-guessing
+    // fallback whenever TMDB actually returns genres for this title.
+    if (tmdb.genres && tmdb.genres.length) movie.genres = tmdb.genres;
     movie.tmdbDataVersion = TMDB_DATA_VERSION;
   }
   delete movie.watchProviders;
@@ -4609,6 +4640,7 @@ function render() {
   else if (activeTab === 'pool') renderPoolGrid();
   else renderRecs();
   maybeAutoExpandPool();
+  reapplyExpandedCardAfterRender();
 }
 
 function renderAppVersion() {
@@ -5292,10 +5324,15 @@ function renderSimilarTitles(grid) {
 function renderRatedGrid() {
   const grid = document.getElementById('ratedGrid');
   if (!grid) return;
-  const rated = Object.values(state.movies || {})
+  const filtered = Object.values(state.movies || {})
     .filter(m => Number(m.rating || 0) > 0)
-    .filter(matchesGlobalFilters)
-    .sort((a,b) => (ratingTimestamp(b) || recordTimestamp(b) || movieAddedTime(b)) - (ratingTimestamp(a) || recordTimestamp(a) || movieAddedTime(a)) || titleSortKey(a).localeCompare(titleSortKey(b)));
+    .filter(matchesGlobalFilters);
+  // "Newest rated first" is only this tab's *default* view (sortMode
+  // 'recommended', i.e. no explicit choice made) — any other sort picked
+  // from the control deck still applies here same as everywhere else.
+  const rated = (state.settings.sortMode || 'recommended') === 'recommended'
+    ? filtered.sort((a,b) => (ratingTimestamp(b) || recordTimestamp(b) || movieAddedTime(b)) - (ratingTimestamp(a) || recordTimestamp(a) || movieAddedTime(a)) || titleSortKey(a).localeCompare(titleSortKey(b)))
+    : sortMovies(filtered, 'title-asc');
   updateAiTagButton();
   const count = document.getElementById('ratedCount');
   if (count) count.textContent = rated.length ? `${rated.length} titles` : 'none yet';
@@ -5309,11 +5346,16 @@ function renderRatedGrid() {
 function renderRecentlyAdded() {
   const grid = document.getElementById('recentGrid');
   if (!grid) return;
-  const recent = Object.values(state.movies || {})
-    .filter(m => matchesGlobalFilters(m))
-    .sort((a, b) => movieAddedTime(b) - movieAddedTime(a) || movieTime(b) - movieTime(a) || titleSortKey(a).localeCompare(titleSortKey(b)));
+  const filtered = Object.values(state.movies || {}).filter(m => matchesGlobalFilters(m));
+  // "Newest added first" is only this tab's *default* view (sortMode
+  // 'recommended', i.e. no explicit choice made) — any other sort picked
+  // from the control deck still applies here same as everywhere else.
+  const sortIsDefault = (state.settings.sortMode || 'recommended') === 'recommended';
+  const recent = sortIsDefault
+    ? filtered.sort((a, b) => movieAddedTime(b) - movieAddedTime(a) || movieTime(b) - movieTime(a) || titleSortKey(a).localeCompare(titleSortKey(b)))
+    : sortMovies(filtered, 'title-asc');
   const count = document.getElementById('recentCount');
-  if (count) count.textContent = recent.length ? `${recent.length} titles · newest first` : 'nothing added yet';
+  if (count) count.textContent = recent.length ? `${recent.length} titles${sortIsDefault ? ' · newest first' : ''}` : 'nothing added yet';
   grid.innerHTML = '';
   if (!recent.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">+</div><h3>Nothing Added Yet</h3></div>`; return; }
   const fragment = document.createDocumentFragment();
@@ -5495,6 +5537,7 @@ function buildCard(movie, opts={}) {
       <div class="card-front-copy">
         <div class="card-front-title">${displayTitle}</div>
         <div class="card-front-meta">${movie.year||'?'} - ${formatLabel}</div>
+        ${!hiddenView ? `<div class="card-front-actions">${renderStars(safeId, movie.rating || 0)}<button class="card-act front-remove" onclick="removeTitlePermanently('${safeId}',event)" title="Remove ${displayTitle}">&#10005;</button></div>` : ''}
       </div>
       <div class="card-type-badge">${formatLabel}</div>
       ${showMatch?`<div class="match-percent card-front-match">${matchPct}% match</div>`:''}
@@ -5553,6 +5596,15 @@ function buildCard(movie, opts={}) {
 // where they used to sit. Moving the node to the end of its row first means
 // the row's other cards compact together with no gap ("fill the vacuum"),
 // then the expanded card opens as a clean new row directly beneath them.
+//
+// v28: background work (backfills, tag normalisation, pool expansion) calls
+// render(), which rebuilds the active grid from scratch — a fresh DOM node
+// with no .expanded class, collapsing whatever the user had open mid-read.
+// expandedMovieId tracks *which movie* is expanded (survives a rebuild,
+// unlike a DOM reference); reapplyExpandedCardAfterRender() re-expands that
+// movie's freshly-built card after every render() call, so the only way to
+// actually collapse a card is to click it again.
+let expandedMovieId = '';
 let expandedCardState = null; // {card, parent, nextSibling} — restore point for collapse
 
 function gridColumnCount(grid) {
@@ -5570,14 +5622,7 @@ function collapseExpandedCard() {
   else parent.appendChild(card);
 }
 
-function toggleCardReveal(event, card) {
-  const interactive = event?.target?.closest?.('button,a,input,select,textarea,.star,.card-act,.source-link-btn,.genre-chip,.tag-insight-chip');
-  if (interactive) return;
-  if (!card) return;
-  const collapsingSelf = card.classList.contains('expanded');
-  collapseExpandedCard();
-  if (collapsingSelf) return;
-
+function expandCardElement(card) {
   const parent = card.parentElement;
   const cards = parent ? Array.from(parent.children).filter(el => el.classList.contains('movie-card')) : [];
   const index = cards.indexOf(card);
@@ -5592,6 +5637,44 @@ function toggleCardReveal(event, card) {
   if (anchor) parent.insertBefore(card, anchor);
   else parent.appendChild(card);
   card.classList.add('expanded');
+}
+
+function toggleCardReveal(event, card) {
+  const interactive = event?.target?.closest?.('button,a,input,select,textarea,.star,.card-act,.source-link-btn,.genre-chip,.tag-insight-chip');
+  if (interactive) return;
+  if (!card) return;
+  const collapsingSelf = card.classList.contains('expanded');
+  collapseExpandedCard();
+  if (collapsingSelf) { expandedMovieId = ''; return; }
+  expandCardElement(card);
+  expandedMovieId = card.id.replace(/^card-/, '');
+}
+
+// Every tab's grid element stays in the DOM at once (hidden via CSS, not
+// removed) and only the active tab's grid gets rebuilt by render() — so an
+// inactive tab can be sitting on a stale card with the same "card-<id>" id
+// as the freshly-rendered one in the active tab. document.getElementById
+// would silently resolve to whichever copy comes first in the DOM, which
+// may not be the visible one, so this looks inside the active tab's own
+// grid specifically instead.
+function activeGridElement() {
+  const gridId = activeTab === 'rated' ? 'ratedGrid'
+    : activeTab === 'recent' ? 'recentGrid'
+    : activeTab === 'pool' ? 'poolGrid'
+    : 'recsGrid';
+  return document.getElementById(gridId);
+}
+
+function reapplyExpandedCardAfterRender() {
+  if (!expandedMovieId) return;
+  const grid = activeGridElement();
+  const targetId = 'card-' + expandedMovieId;
+  const card = grid ? Array.from(grid.children).find(el => el.id === targetId) : null;
+  if (!card || card.classList.contains('expanded')) return;
+  // The old expandedCardState (if any) points at a node a full render just
+  // discarded; expandCardElement below captures a fresh restore point.
+  expandedCardState = null;
+  expandCardElement(card);
 }
 
 function renderGenres(movie, matchedGenres=null) {

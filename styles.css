@@ -61,7 +61,7 @@
   .year-input{width:72px}
   .manual-title-input{width:220px}
 
-  .movies-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:7px}
+  .movies-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:7px}
 
   .movie-card{background:linear-gradient(180deg,rgba(36,28,23,.96),rgba(20,16,14,.96));border:1px solid var(--border);border-radius:4px;overflow:hidden;transition:border-color .2s,background .2s;position:relative}
   .movie-card:hover{border-color:var(--muted2)}
@@ -202,7 +202,7 @@
   .section-title{font-size:24px;color:#fff2df}
   .section-count{color:#b6a08d}
   hr.sep{border-top-color:rgba(242,193,78,.1);margin:26px 0 6px}
-  .movies-grid{grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:10px}
+  .movies-grid{grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:10px}
   .movie-card{background:rgba(18,17,18,.78);border-color:rgba(255,255,255,.09);border-radius:8px;box-shadow:0 12px 34px rgba(0,0,0,.18)}
   .movie-card:hover{border-color:rgba(255,208,90,.42);background:rgba(28,24,22,.9)}
   .movie-card.rated{background:rgba(21,20,21,.82)}
@@ -275,7 +275,7 @@
   @media(max-width:768px){
     header{padding:0 14px}
     .container{padding:0 14px}
-    .movies-grid{grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:10px}
+    .movies-grid{grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px}
     .logo span{display:none}
     .tab-btn{padding:4px 9px;font-size:10px}
   }
@@ -832,7 +832,7 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
    JS (toggleCardReveal in app.js) by moving the card's DOM node before
    adding this class — see the comment there. This class only owns the
    visual styling of the expanded state, not its position in the grid. */
-.movies-grid{grid-template-columns:repeat(auto-fill,minmax(var(--card-min-width,200px),1fr));gap:12px}
+.movies-grid{grid-template-columns:repeat(auto-fit,minmax(var(--card-min-width,200px),1fr));gap:12px}
 .movie-card{display:flex;align-items:stretch;aspect-ratio:2/3;border-radius:8px;overflow:hidden;cursor:pointer;background:var(--film-card-bg)!important;position:relative;grid-column:span 1;transition:grid-column .01s}
 .movie-card.show-card{background:var(--show-card-bg)!important}
 .card-poster{position:relative;flex:1 1 auto;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;background:var(--film-card-bg)}
@@ -844,6 +844,15 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .card-front-title{font-size:13px;font-weight:700;line-height:1.15}
 .card-front-meta{margin-top:3px;font-family:'DM Mono',monospace;font-size:9px;color:rgba(255,255,255,.82)}
 .card-front-match{position:absolute;z-index:3;left:8px;top:8px;margin:0}
+/* Rate/remove without expanding the card. z-index above ::after so the
+   dark scrim doesn't dim these; pointer-events limited to the controls
+   themselves so the rest of the poster still opens/closes the card. */
+.card-front-actions{position:relative;z-index:3;display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:6px}
+.card-front-actions .star-rating{gap:2px;margin:0}
+.card-front-actions .star{font-size:13px;color:rgba(255,255,255,.4);text-shadow:0 1px 4px rgba(0,0,0,.7)}
+.card-front-actions .star:hover,.card-front-actions .star.active{color:#ffd05a}
+.front-remove{appearance:none;border:0;background:rgba(0,0,0,.5);color:rgba(255,255,255,.85);width:22px;height:22px;border-radius:50%;line-height:1;cursor:pointer;flex:0 0 auto;display:flex;align-items:center;justify-content:center;padding:0}
+.front-remove:hover{background:rgba(224,82,82,.9);color:#fff}
 /* Unique name deliberately: a prior bug here came from reusing an existing
    class name ("format-badge") that still had CSS elsewhere — CSS cascades
    per PROPERTY, not per rule, so this element inherited that old rule's
@@ -885,3 +894,31 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
    layout, not just colour), so borders still take up space, they're just
    invisible. */
 *,*::before,*::after{border-color:transparent!important}
+
+/* "No borders" meant no boxes drawn around cards/buttons/chips/inputs — it
+   was never meant to erase structural separator lines between sections
+   (header/content, stats bar, search results, the danger-zone divider).
+   Those need their own higher-specificity !important to win back over the
+   blanket rule above. */
+header,.stats-bar,.wiki-search-results,.tag-detail,.manual-add-row,.maintenance-danger,.platform-bar.manual-add-row{
+  border-color:var(--border,rgba(255,255,255,.08))!important;
+}
+hr.sep{border-top-color:var(--border,rgba(255,255,255,.08))!important}
+.stats-bar{border-right-color:var(--border,rgba(255,255,255,.08))!important}
+
+/* Card text was too small everywhere, especially in the expanded body which
+   has a huge amount of unused horizontal space. This file redefines the
+   same handful of selectors at several points from older, abandoned card
+   designs, so plain specificity is unreliable — !important here guarantees
+   these are the sizes that actually render regardless of what else exists
+   above. */
+.card-front-title{font-size:17px!important}
+.card-front-meta{font-size:11px!important}
+.card-title,.card-title-button{font-size:22px!important}
+.card-meta{font-size:13px!important}
+.match-label{font-size:12px!important}
+.title-format{font-size:11px!important}
+.card-type-badge{font-size:10px!important}
+.tag,.tag-insight-chip,.tb-tag,.genre-chip,.watch-chip{font-size:12px!important}
+.watch-countries{font-size:12px!important}
+.card-act,.source-link-btn{font-size:12px!important}
