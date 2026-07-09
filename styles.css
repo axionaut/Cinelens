@@ -514,7 +514,8 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
   font-size:11px;
 }
 .maintenance-panel > summary,
-.maintenance-danger > summary {
+.maintenance-danger > summary,
+.watch-platform-picker > summary {
   cursor:pointer;
   list-style:none;
 }
@@ -525,7 +526,8 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
   color:var(--muted);
 }
 .maintenance-panel > summary::-webkit-details-marker,
-.maintenance-danger > summary::-webkit-details-marker { display:none; }
+.maintenance-danger > summary::-webkit-details-marker,
+.watch-platform-picker > summary::-webkit-details-marker { display:none; }
 .maintenance-panel > summary::before { content:'+'; color:var(--accent); font-size:15px; line-height:1; }
 .maintenance-panel[open] > summary::before { content:'−'; }
 .maintenance-health { margin:9px 0; color:var(--muted); line-height:1.5; }
@@ -534,8 +536,12 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
 .maintenance-danger > summary { color:#ff8a86; }
 .maintenance-danger p { margin:7px 0 9px; color:var(--muted); max-width:620px; line-height:1.45; }
 .tmdb-attribution{margin-top:10px;font-size:10px;color:var(--muted2,var(--muted));line-height:1.4;max-width:620px}
-.watch-platform-picker{margin-top:12px}
-.watch-platform-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+/* Collapsed by default — ten platform chips is a lot of visual weight to
+   dump on every open of an already-busy panel, especially on a phone
+   screen, when most visits don't need to touch platform selection at all. */
+.watch-platform-picker{margin-top:12px; padding-top:10px; border-top:1px solid rgba(255,255,255,.08)}
+.watch-platform-picker > summary{color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em}
+.watch-platform-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .watch-platform-chip{font-size:11px;padding:5px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);cursor:pointer;font-family:inherit;transition:all .15s}
 .watch-platform-chip:hover{border-color:var(--accent);color:var(--text)}
 .watch-platform-chip.active{border-color:var(--accent);color:var(--button-text,#000);background:var(--accent)}
@@ -545,6 +551,12 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
   .fetch-progress { top:96px; margin-bottom:10px; }
   body.fetching .control-deck { top:calc(96px + var(--fetch-progress-height, 104px)); }
   .maintenance-panel { grid-column:1 / -1; }
+  /* A ragged flex-wrap row of differently-sized buttons is a big part of
+     why this panel feels crowded on a phone — a fixed two-column grid of
+     equal-width buttons reads as organised instead of huddled. */
+  .maintenance-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .maintenance-actions .platform-btn { width:100%; text-align:center; }
+  .maintenance-health { font-size:10.5px; }
 }
 
 /* Taste Story — compact reading card, independent from recommendation and tag tools */
@@ -900,7 +912,7 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
    (header/content, stats bar, search results, the danger-zone divider).
    Those need their own higher-specificity !important to win back over the
    blanket rule above. */
-header,.stats-bar,.wiki-search-results,.tag-detail,.manual-add-row,.maintenance-danger,.platform-bar.manual-add-row{
+header,.stats-bar,.wiki-search-results,.tag-detail,.manual-add-row,.maintenance-danger,.platform-bar.manual-add-row,.watch-platform-picker{
   border-color:var(--border,rgba(255,255,255,.08))!important;
 }
 hr.sep{border-top-color:var(--border,rgba(255,255,255,.08))!important}

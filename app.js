@@ -99,7 +99,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 29;
+const APP_VERSION = 30;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -294,6 +294,15 @@ const CARD_REFRESH_BATCH_SIZE = 20;
 const WIKI_PARSER_VERSION = 5;
 const REC_INFINITE_PAGE_SIZE = 20;
 const STRONG_REC_TARGET = 40;
+
+// "138/40 strong matches" reads like a broken fraction once the count passes
+// target — a manual "Expand now" run deliberately keeps going past target
+// (unlike automatic collection, which stops there), so this isn't rare.
+function formatStrongMatchCount(strongCount, target) {
+  const count = Number(strongCount || 0);
+  const goal = Number(target || 0);
+  return count >= goal ? `${count} strong matches (past the ${goal} target)` : `${count}/${goal} strong matches`;
+}
 const STRONG_REC_REFILL_THRESHOLD = 20;
 const STRONG_REC_MIN_OVERLAP = 3;
 const STRONG_REC_MIN_MATCH_SCORE = 0.55;
@@ -3023,7 +3032,7 @@ async function expandPool(manual=true) {
     showFetchProgress(
       label,
       pct,
-      `${attempts}/${attemptBudget} checked · ${added} fetched · ${rotatedOut} rotated out · +${kept} kept · ${health.strongCount}/${health.target} strong matches${title ? ` · ${title}` : ''}`
+      `${attempts}/${attemptBudget} checked · ${added} fetched · ${rotatedOut} rotated out · +${kept} kept · ${formatStrongMatchCount(health.strongCount, health.target)}${title ? ` · ${title}` : ''}`
     );
   };
 
@@ -3683,6 +3692,14 @@ function receptionBackfillCandidates() {
   return sortByBackfillPriority(candidates);
 }
 
+function receptionBackfillStatusText() {
+  const remaining = receptionBackfillCandidates().length;
+  if (!remaining) return '';
+  if (receptionBackfillInProgress) return `reception refresh running · ${remaining} pending`;
+  if (poolExpansionInProgress || backgroundAiTaggingInProgress) return `reception refresh waiting · ${remaining} pending (behind other background work)`;
+  return `${remaining} titles need quality data`;
+}
+
 function scheduleReceptionBackfill(delay=3500) {
   if (!libraryWritesUnlocked || receptionBackfillInProgress) return;
   const hasWork = Object.values(state.movies || {}).some(needsReceptionBackfill);
@@ -3703,7 +3720,11 @@ function scheduleReceptionBackfill(delay=3500) {
 }
 
 async function runReceptionBackfill() {
-  if (!libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress) {
+  // Pool expansion and AI tagging outrank this; TMDB backfill is lower
+  // priority than this (see runTmdbBackfill's own guard) so the two never
+  // run at the same time either — exactly one background fetch loop owns
+  // the shared progress bar at any moment.
+  if (!libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || tmdbBackfillInProgress) {
     scheduleReceptionBackfill(3000);
     return;
   }
@@ -3711,9 +3732,17 @@ async function runReceptionBackfill() {
   if (!candidates.length) return;
   receptionBackfillInProgress = true;
   const changedMovieIds = [];
+  const batch = candidates.slice(0, RECEPTION_BACKFILL_BATCH_SIZE);
   try {
-    for (const movie of candidates.slice(0, RECEPTION_BACKFILL_BATCH_SIZE)) {
+    let index = 0;
+    for (const movie of batch) {
       if (poolExpansionInProgress || backgroundAiTaggingInProgress) break;
+      index++;
+      showFetchProgress(
+        `Reception data refresh · ${index}/${batch.length}`,
+        Math.round((index / batch.length) * 100),
+        movie.title
+      );
       try {
         const mode = movie.format ? 'shows' : 'movies';
         const fresh = movie.wikiPageId
@@ -3754,6 +3783,7 @@ async function runReceptionBackfill() {
     console.warn('Reception backfill paused', error);
   } finally {
     receptionBackfillInProgress = false;
+    hideFetchProgress();
     scheduleReceptionBackfill(9000);
   }
 }
@@ -3840,9 +3870,17 @@ async function runTmdbBackfill() {
   if (!candidates.length) return;
   tmdbBackfillInProgress = true;
   const changedMovieIds = [];
+  const batch = candidates.slice(0, TMDB_BACKFILL_BATCH_SIZE);
   try {
-    for (const movie of candidates.slice(0, TMDB_BACKFILL_BATCH_SIZE)) {
+    let index = 0;
+    for (const movie of batch) {
       if (poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) break;
+      index++;
+      showFetchProgress(
+        `TMDB refresh · ${index}/${batch.length}`,
+        Math.round((index / batch.length) * 100),
+        `${movie.title} · posters, genres, availability`
+      );
       try {
         await attachTmdbDetails(movie);
         touchRecord(movie);
@@ -3862,6 +3900,7 @@ async function runTmdbBackfill() {
     console.warn('TMDB backfill paused', error);
   } finally {
     tmdbBackfillInProgress = false;
+    hideFetchProgress();
     scheduleTmdbBackfill(6000);
   }
 }
@@ -5028,18 +5067,18 @@ function updateLibraryHealth() {
   const label = document.getElementById('libraryHealthLabel');
   const maintenance = document.getElementById('maintenanceHealth');
   const drive = state.drive?.connected ? 'Drive synced' : state.drive?.enabled ? 'Drive reconnect needed' : 'Local only';
-  const receptionNeedCount = Object.values(state.movies || {}).filter(needsReceptionBackfill).length;
-  const receptionSegment = receptionNeedCount ? ` · ${receptionNeedCount} titles need quality data` : '';
+  const receptionStatus = receptionBackfillStatusText();
+  const receptionSegment = receptionStatus ? ` · ${receptionStatus}` : '';
   const tmdbStatus = tmdbBackfillStatusText();
   const tmdbSegment = tmdbStatus ? ` · ${tmdbStatus}` : '';
 
   let text;
   if (autoFetchPaused) text = 'Collection paused';
-  else if (poolExpansionInProgress) text = `Collecting ${health.strongCount}/${health.target} strong matches`;
+  else if (poolExpansionInProgress) text = `Collecting ${formatStrongMatchCount(health.strongCount, health.target)}`;
   else if (backgroundAiTaggingInProgress) text = `Tagging ${health.pendingTags} pending titles`;
   else if (health.personalized && health.strongCount >= STRONG_REC_TARGET) text = `Library healthy · ${health.strongCount} strong matches`;
   else if (!health.personalized) text = `Building starter pool · ${health.taggedUnseen}/${INITIAL_TAGGED_POOL_FLOOR}`;
-  else text = `Refilling strong matches · ${health.strongCount}/${health.target}`;
+  else text = `Refilling strong matches · ${formatStrongMatchCount(health.strongCount, health.target)}`;
 
   if (label) label.textContent = text;
   if (maintenance) {
@@ -7746,23 +7785,39 @@ function rememberDriveToken(token, expiresInSeconds=3300) {
   scheduleDriveTokenRefresh(expiry);
 }
 
+async function silentlyRenewDriveToken() {
+  if (!state.drive.enabled && !state.drive.connected) return;
+  try {
+    state.drive.accessToken = '';
+    await requestDriveTokenSilent({allowPromptlessRequest:true});
+    state.drive.connected = true;
+    setDriveStatus('connected');
+  } catch(e) {
+    state.drive.connected = false;
+    setDriveStatus('');
+  }
+}
+
 function scheduleDriveTokenRefresh(expiry=0) {
   clearTimeout(driveTokenRefreshTimer);
   if (!expiry) return;
   const delay = Math.max(60000, Number(expiry) - Date.now() - DRIVE_TOKEN_REFRESH_LEEWAY_MS);
-  driveTokenRefreshTimer = setTimeout(async () => {
-    if (!state.drive.enabled && !state.drive.connected) return;
-    try {
-      state.drive.accessToken = '';
-      await requestDriveTokenSilent({allowPromptlessRequest:true});
-      state.drive.connected = true;
-      setDriveStatus('connected');
-    } catch(e) {
-      state.drive.connected = false;
-      setDriveStatus('');
-    }
-  }, delay);
+  driveTokenRefreshTimer = setTimeout(silentlyRenewDriveToken, delay);
 }
+
+// A backgrounded tab/app routinely has its setTimeout throttled or fully
+// suspended by the browser (especially on mobile — locking the phone or
+// switching apps for a while is exactly when this happens), so the timer
+// above can't be trusted to fire anywhere near the token's real expiry.
+// Checking again the moment the tab becomes visible catches the case the
+// timer missed, so "reconnect" only shows up when a silent renewal
+// genuinely fails (e.g. third-party cookies blocked) rather than routinely.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (!state.drive.enabled) return;
+  const expiry = Number(localStorage.getItem(DRIVE_TOKEN_EXPIRY_KEY) || 0);
+  if (!expiry || expiry - Date.now() < DRIVE_TOKEN_REFRESH_LEEWAY_MS) silentlyRenewDriveToken();
+});
 
 function getStoredDriveToken() {
   try {
