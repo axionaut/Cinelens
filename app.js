@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 18;
+const APP_VERSION = 19;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -2015,6 +2015,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   renderWatchPlatformPicker();
   loadLocalState();
   applyPalette();
+  applyCardSize(state.settings.cardSize || 'comfortable');
   await loadIndexedDbState();
   // Import a legacy localStorage library once, then remove its large payload only
   // after the IndexedDB write has been queued.
@@ -5085,6 +5086,7 @@ function renderAppVersion() {
 
 function updateControlDeck() {
   applyPalette();
+  applyCardSize(state.settings.cardSize || 'comfortable');
   const modeBtn=document.getElementById('tagDeleteModeBtn');
   if (modeBtn) {
     modeBtn.classList.toggle('active', !!state.settings.tagDeleteMode);
@@ -5124,6 +5126,28 @@ function updateGenreFilter(genre) {
   state.settings.genreFilter = genre || 'all';
   saveViewState();
   renderActiveCards();
+}
+
+// Card width is a display preference, not a recommendation signal — purely
+// how many pixels a grid column gets. Persisted like any other view setting
+// (v9 sync discipline): local-only, rides along passively with the next real
+// sync. Applied via one CSS variable so the existing grid/card rules don't
+// need duplicating per size.
+const CARD_SIZE_PRESETS = {compact:220, comfortable:300, large:400};
+
+function applyCardSize(size) {
+  const px = CARD_SIZE_PRESETS[size] || CARD_SIZE_PRESETS.comfortable;
+  document.documentElement.style.setProperty('--card-min-width', px + 'px');
+  document.querySelectorAll('.card-size-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.size === (CARD_SIZE_PRESETS[size] ? size : 'comfortable'));
+  });
+}
+
+function updateCardSize(size) {
+  if (!CARD_SIZE_PRESETS[size]) return;
+  state.settings.cardSize = size;
+  applyCardSize(size);
+  saveViewState();
 }
 
 // Which platforms to check availability for is a personal viewing-service
