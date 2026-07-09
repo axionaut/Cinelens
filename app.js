@@ -120,7 +120,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 22;
+const APP_VERSION = 23;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -1665,6 +1665,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Import a legacy localStorage library once, then remove its large payload only
   // after the IndexedDB write has been queued.
   if (libraryRecordCount() > 0) queueIndexedDbSave(0);
+  // A genuinely empty install (no local data at all) loads the shipped seed
+  // catalogue instead of starting blank. Never runs for an existing library.
+  await loadSeedCatalogueIfEmpty();
   const startupRemovedHindiShows = purgeDisallowedHindiShows();
   const startupRemovedConventionalHorror = purgeDisallowedConventionalHorror();
   const startupAddedAtMigrated = ensureAddedAtMetadata();
@@ -1697,77 +1700,52 @@ window.addEventListener('DOMContentLoaded', async () => {
 });
 
 // ─────────────────────────────────────────────
-// SEED (hardcoded starter pack — always present)
+// SEED CATALOGUE — ships titles/tags/metadata with the app, never Nitin's
+// personal ratings/hidden state/preferences (v22)
+// A fresh install with an empty local library fetches seed-catalogue.json
+// (a static file sitting next to index.html, generated via the "Export
+// seed catalogue" maintenance button and committed to the repo) and loads
+// it as the starting library. An install that already has local data
+// never touches this path, so it can never overwrite a real user's
+// library. If seed-catalogue.json isn't present (no seed has been
+// exported yet), the fetch 404s and the app starts empty, same as today.
 // ─────────────────────────────────────────────
-const SEED = [
-  {id:'tt0111161',title:'The Shawshank Redemption',year:1994,director:'Frank Darabont',language:'English',country:'USA'},
-  {id:'tt0068646',title:'The Godfather',year:1972,director:'Francis Ford Coppola',language:'English',country:'USA'},
-  {id:'tt0468569',title:'The Dark Knight',year:2008,director:'Christopher Nolan',language:'English',country:'USA'},
-  {id:'tt0137523',title:'Fight Club',year:1999,director:'David Fincher',language:'English',country:'USA'},
-  {id:'tt0816692',title:'Interstellar',year:2014,director:'Christopher Nolan',language:'English',country:'USA'},
-  {id:'tt1375666',title:'Inception',year:2010,director:'Christopher Nolan',language:'English',country:'USA'},
-  {id:'tt0110912',title:'Pulp Fiction',year:1994,director:'Quentin Tarantino',language:'English',country:'USA'},
-  {id:'tt0133093',title:'The Matrix',year:1999,director:'The Wachowskis',language:'English',country:'USA'},
-  {id:'tt0114369',title:'Se7en',year:1995,director:'David Fincher',language:'English',country:'USA'},
-  {id:'tt0102926',title:'The Silence of the Lambs',year:1991,director:'Jonathan Demme',language:'English',country:'USA'},
-  {id:'tt0317248',title:'City of God',year:2002,director:'Fernando Meirelles',language:'English',country:'Brazil'},
-  {id:'tt0482571',title:'The Prestige',year:2006,director:'Christopher Nolan',language:'English',country:'USA'},
-  {id:'tt0209144',title:'Memento',year:2000,director:'Christopher Nolan',language:'English',country:'USA'},
-  {id:'tt2267998',title:'Gone Girl',year:2014,director:'David Fincher',language:'English',country:'USA'},
-  {id:'tt1291584',title:'Prisoners',year:2013,director:'Denis Villeneuve',language:'English',country:'USA'},
-  {id:'tt6751668',title:'Parasite',year:2019,director:'Bong Joon-ho',language:'English',country:'South Korea'},
-  {id:'tt2582802',title:'Whiplash',year:2014,director:'Damien Chazelle',language:'English',country:'USA'},
-  {id:'tt0816711',title:'Arrival',year:2016,director:'Denis Villeneuve',language:'English',country:'USA'},
-  {id:'tt0364569',title:'Oldboy',year:2003,director:'Park Chan-wook',language:'English',country:'South Korea'},
-  {id:'tt0338013',title:'Eternal Sunshine of the Spotless Mind',year:2004,director:'Michel Gondry',language:'English',country:'USA'},
-  {id:'tt0172495',title:'Gladiator',year:2000,director:'Ridley Scott',language:'English',country:'USA'},
-  {id:'tt0120689',title:'The Green Mile',year:1999,director:'Frank Darabont',language:'English',country:'USA'},
-  {id:'tt1853728b',title:'Django Unchained',year:2012,director:'Quentin Tarantino',language:'English',country:'USA'},
-  {id:'tt0120586',title:'American History X',year:1998,director:'Tony Kaye',language:'English',country:'USA'},
-  {id:'tt1853728c',title:'Blade Runner 2049',year:2017,director:'Denis Villeneuve',language:'English',country:'USA'},
-  {id:'tt0047478',title:'Seven Samurai',year:1954,director:'Akira Kurosawa',language:'English',country:'Japan'},
-  {id:'tt0087843',title:'Once Upon a Time in America',year:1984,director:'Sergio Leone',language:'English',country:'USA'},
-  {id:'tt0253474',title:'The Pianist',year:2002,director:'Roman Polanski',language:'English',country:'Poland'},
-  {id:'tt0405094',title:'The Lives of Others',year:2006,director:'Florian Henckel',language:'English',country:'Germany'},
-  {id:'tt0050083',title:'12 Angry Men',year:1957,director:'Sidney Lumet',language:'English',country:'USA'},
-  // Hindi
-  {id:'in001',title:'Sholay',year:1975,director:'Ramesh Sippy',language:'Hindi',country:'India'},
-  {id:'in002',title:'Dil Chahta Hai',year:2001,director:'Farhan Akhtar',language:'Hindi',country:'India'},
-  {id:'in003',title:'Lagaan',year:2001,director:'Ashutosh Gowariker',language:'Hindi',country:'India'},
-  {id:'in004',title:'3 Idiots',year:2009,director:'Rajkumar Hirani',language:'Hindi',country:'India'},
-  {id:'in005',title:'Gangs of Wasseypur',year:2012,director:'Anurag Kashyap',language:'Hindi',country:'India'},
-  {id:'in006',title:'Andhadhun',year:2018,director:'Sriram Raghavan',language:'Hindi',country:'India'},
-  {id:'in007',title:'Tumbbad',year:2018,director:'Rahi Barve',language:'Hindi',country:'India'},
-  {id:'in008',title:'Article 15',year:2019,director:'Anubhav Sinha',language:'Hindi',country:'India'},
-  {id:'in009',title:'Masaan',year:2015,director:'Neeraj Ghaywan',language:'Hindi',country:'India'},
-  {id:'in010',title:'Dangal',year:2016,director:'Nitesh Tiwari',language:'Hindi',country:'India'},
-  {id:'in011',title:'Rang De Basanti',year:2006,director:'Rakeysh Mehra',language:'Hindi',country:'India'},
-  {id:'in012',title:'Taare Zameen Par',year:2007,director:'Aamir Khan',language:'Hindi',country:'India'},
-  {id:'in013',title:'Raazi',year:2018,director:'Meghna Gulzar',language:'Hindi',country:'India'},
-  {id:'in014',title:'Pink',year:2016,director:'Aniruddha Roy Chowdhury',language:'Hindi',country:'India'},
-  {id:'in015',title:'Kahaani',year:2012,director:'Sujoy Ghosh',language:'Hindi',country:'India'},
-  // Shows
-  {id:'tv001',title:'Breaking Bad',year:2008,director:'Vince Gilligan',language:'English',country:'USA',format:'series'},
-  {id:'tv002',title:'Chernobyl',year:2019,director:'Johan Renck',language:'English',country:'UK',format:'miniseries'},
-  {id:'tv003',title:'True Detective S1',year:2014,director:'Cary Fukunaga',language:'English',country:'USA',format:'series'},
-  {id:'tv004',title:'Succession',year:2018,director:'Jesse Armstrong',language:'English',country:'USA',format:'series'},
-  {id:'tv005',title:'The Wire',year:2002,director:'David Simon',language:'English',country:'USA',format:'series'},
-  {id:'tv006',title:'Mindhunter',year:2017,director:'David Fincher',language:'English',country:'USA',format:'series'},
-  {id:'tv007',title:'Dark',year:2017,director:'Baran bo Odar',language:'English',country:'Germany',format:'series'},
-  {id:'tv008',title:'Scam 1992',year:2020,director:'Hansal Mehta',language:'Hindi',country:'India',format:'series'},
-  {id:'tv009',title:'Mirzapur',year:2018,director:'Karan Anshuman',language:'Hindi',country:'India',format:'series'},
-  {id:'tv010',title:'Panchayat',year:2020,director:'Deepak Kumar Mishra',language:'Hindi',country:'India',format:'series'},
-  {id:'tv011',title:'Sacred Games',year:2018,director:'Anurag Kashyap',language:'Hindi',country:'India',format:'series'},
-  {id:'tv012',title:'Peaky Blinders',year:2013,director:'Steven Knight',language:'English',country:'UK',format:'series'},
-  {id:'tv013',title:'The Sopranos',year:1999,director:'David Chase',language:'English',country:'USA',format:'series'},
-  {id:'tv014',title:'Band of Brothers',year:2001,director:'Steven Spielberg',language:'English',country:'USA',format:'miniseries'},
-  {id:'tv015',title:'Severance',year:2022,director:'Ben Stiller',language:'English',country:'USA',format:'series'},
-];
+const SEED_CATALOGUE_URL = 'seed-catalogue.json';
 
-function seedPool() {
-  // Seeds disabled: fetched Wikipedia items only. Existing legacy seed items are preserved but not rehydrated.
+async function loadSeedCatalogueIfEmpty() {
+  if (libraryRecordCount() > 0) return false;
+  try {
+    const response = await fetch(SEED_CATALOGUE_URL, {cache:'no-store'});
+    if (!response.ok) return false;
+    const data = await response.json();
+    const movies = data?.movies || {};
+    if (!Object.keys(movies).length) return false;
+    state.movies = movies;
+    Object.values(state.movies).forEach(normaliseStoredTitleRecord);
+    queueIndexedDbSave(0);
+    return true;
+  } catch (error) {
+    return false;
+  }
 }
 
+function exportSeedCatalogue() {
+  const movies = {};
+  Object.values(state.movies || {}).forEach(movie => {
+    movies[String(movie.id)] = catalogueMovieForDrive(movie);
+  });
+  const payload = {seedVersion:APP_VERSION, generatedAt:nowStamp(), movies};
+  const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'seed-catalogue.json';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  showToast(`Seed catalogue exported: ${Object.keys(movies).length} titles, no personal data.`, 'success');
+}
 
 // ─────────────────────────────────────────────
 // WIKIPEDIA POOL EXPANSION
@@ -4450,74 +4428,6 @@ function hideFetchProgress() {
   document.body.classList.remove('fetching');
   document.documentElement.style.removeProperty('--fetch-progress-height');
 }
-
-// ─────────────────────────────────────────────
-// HARDCODED TAGS for seed movies (instant, no fetch needed)
-// ─────────────────────────────────────────────
-const SEED_TAGS = {
-  'tt0111161':['drama','english-language','usa','1990s','film','wrongful-imprisonment','prison-setting','friendship-bond','hope-and-redemption','institutional-oppression','slow-burn','uplifting-tone','moral-courage','based-on-novella','corrupt-authority','long-haul-narrative'],
-  'tt0068646':['crime-thriller','english-language','usa','1970s','film','organised-crime-saga','family-dynasty','power-and-ambition','morally-ambiguous-protagonist','loyalty-and-betrayal','slow-burn','dark-tone','ensemble-cast','operatic-tone','patriarch-protagonist'],
-  'tt0468569':['superhero','english-language','usa','2000s','film','compelling-villain','moral-philosophy','chaos-vs-order','dark-tone','cat-and-mouse-thriller','morally-ambiguous-protagonist','action-thriller','psychological','nolan-style','iconic-villain'],
-  'tt0137523':['psychological-thriller','english-language','usa','1990s','film','unreliable-narration','twist-ending','identity-crisis','dark-comedy','satirical','non-linear-narrative','morally-ambiguous-protagonist','anti-establishment','fincher-style','dark-tone'],
-  'tt0816692':['space-sci-fi','english-language','usa','2010s','film','time-manipulation','parent-child-relationship','grief-and-loss','hard-sci-fi','emotionally-devastating','non-linear-narrative','nolan-style','visually-striking','slow-burn'],
-  'tt1375666':['space-sci-fi','english-language','usa','2010s','film','surreal-dreamlike','heist-thriller','non-linear-narrative','nolan-style','ensemble-cast','twist-ending','action-thriller','layered-reality'],
-  'tt0110912':['crime-thriller','english-language','usa','1990s','film','non-linear-narrative','dark-comedy','ensemble-cast','tarantino-style','multiple-storylines','morally-ambiguous-protagonist','violence-and-humor','dialogue-driven'],
-  'tt0133093':['space-sci-fi','english-language','usa','1990s','film','dystopian','chosen-one','action-thriller','philosophical','twist-ending','artificial-intelligence','cyberpunk','visually-striking'],
-  'tt0114369':['crime-thriller','english-language','usa','1990s','film','serial-killer-thriller','detective-protagonist','dark-tone','urban-setting','fincher-style','cat-and-mouse-thriller','seven-deadly-sins','bleak-worldview'],
-  'tt0102926':['psychological-thriller','english-language','usa','1990s','film','serial-killer-thriller','female-lead-protagonist','cat-and-mouse-thriller','compelling-villain','suspense','gender-dynamics'],
-  'tt0317248':['crime-thriller','english-language','brazil','2000s','film','coming-of-age-story','urban-poverty','non-linear-narrative','ensemble-cast','based-on-true-story','gang-culture','kinetic-direction','dark-tone'],
-  'tt0482571':['mystery-thriller','english-language','usa','2000s','film','twist-ending','rivalry','obsession','non-linear-narrative','unreliable-narration','nolan-style','period-drama','dark-tone'],
-  'tt0209144':['psychological-thriller','english-language','usa','2000s','film','unreliable-narration','non-linear-narrative','twist-ending','identity-crisis','nolan-style','revenge-driven'],
-  'tt2267998':['psychological-thriller','english-language','usa','2010s','film','unreliable-narration','twist-ending','toxic-marriage','dark-tone','fincher-style','female-villain','media-manipulation','suburban-setting'],
-  'tt1291584':['crime-thriller','english-language','usa','2010s','film','missing-child','moral-dilemma','vigilante-justice','dark-tone','villeneuve-style','emotionally-devastating','parallel-investigation'],
-  'tt6751668':['crime-thriller','english-language','south-korea','2010s','film','class-divide','dark-comedy','twist-ending','ensemble-cast','satirical','emotionally-devastating','visually-striking'],
-  'tt2582802':['drama','english-language','usa','2010s','film','music-world','obsession','mentor-student','psychological','dark-tone','intense-pacing','coming-of-age-story'],
-  'tt0816711':['space-sci-fi','english-language','usa','2010s','film','linguistics','time-manipulation','grief-and-loss','slow-burn','female-lead-protagonist','philosophical','villeneuve-style'],
-  'tt0364569':['psychological-thriller','english-language','south-korea','2000s','film','revenge-driven','twist-ending','dark-tone','identity-crisis','disturbing','isolation'],
-  'tt0338013':['romance','english-language','usa','2000s','film','memory-and-identity','non-linear-narrative','grief-and-loss','surreal-dreamlike','emotionally-devastating'],
-  'tt0172495':['historical-action','english-language','usa','2000s','film','ancient-rome','revenge-driven','epic-scale','compelling-villain','honour-and-duty'],
-  'tt0120689':['drama','english-language','usa','1990s','film','death-row','prison-setting','supernatural','empathy-and-compassion','slow-burn','uplifting-tone'],
-  'tt1853728b':['western','english-language','usa','2010s','film','slavery','revenge-driven','dark-comedy','tarantino-style','violence-and-humor','morally-ambiguous-protagonist'],
-  'tt0120586':['drama','english-language','usa','1990s','film','social-discrimination','redemption-arc','prison','dark-tone','emotionally-devastating'],
-  'tt1853728c':['space-sci-fi','english-language','usa','2010s','film','artificial-intelligence','identity-crisis','slow-burn','visually-striking','dystopian','villeneuve-style'],
-  'tt0047478':['historical-action','english-language','japan','1950s','film','honour-and-duty','class-divide','ensemble-cast','kurosawa-style','action-choreography','slow-burn'],
-  'tt0087843':['crime-thriller','english-language','usa','1980s','film','organised-crime-saga','memory-and-identity','friendship-bond','non-linear-narrative','slow-burn','period-drama'],
-  'tt0253474':['war-drama','english-language','poland','2000s','film','world-war-ii','survival','based-on-true-story','emotionally-devastating','historical-drama','slow-burn'],
-  'tt0405094':['political-thriller','english-language','germany','2000s','film','surveillance','cold-war','redemption-arc','slow-burn','dark-tone'],
-  'tt0050083':['courtroom-drama','english-language','usa','1950s','film','single-location','ensemble-cast','justice-system','class-divide','slow-burn','moral-courage'],
-  // Hindi seeds
-  'in001':['action-adventure','hindi-language','india','1970s','film','revenge-driven','friendship-bond','rural-setting','ensemble-cast','classic-bollywood','dacoit-western'],
-  'in002':['coming-of-age-story','hindi-language','india','2000s','film','friendship-bond','romance','urban-setting','feel-good','dialogue-driven'],
-  'in003':['sports-drama','hindi-language','india','2000s','film','underdog-story','epic-scale','based-on-true-story','period-drama','ensemble-cast','uplifting-tone'],
-  'in004':['comedy','hindi-language','india','2000s','film','coming-of-age-story','friendship-bond','satirical','uplifting-tone','ensemble-cast'],
-  'in005':['crime-thriller','hindi-language','india','2010s','film','organised-crime-saga','revenge-driven','dark-tone','non-linear-narrative','anurag-kashyap-style','ensemble-cast'],
-  'in006':['crime-thriller','hindi-language','india','2010s','film','twist-ending','unreliable-narration','dark-comedy','cat-and-mouse-thriller','non-linear-narrative'],
-  'in007':['horror','hindi-language','india','2010s','film','mythology-folklore','greed-and-curse','slow-burn','visually-striking','supernatural-horror','dark-tone'],
-  'in008':['political-thriller','hindi-language','india','2010s','film','social-discrimination','police-procedural','dark-tone','institutional-corruption','based-on-true-story'],
-  'in009':['drama','hindi-language','india','2010s','film','grief-and-loss','class-divide','slow-burn','emotionally-devastating','romance'],
-  'in010':['sports-drama','hindi-language','india','2010s','film','father-child-relationship','based-on-true-story','female-lead-protagonist','underdog-story','uplifting-tone'],
-  'in011':['political-drama','hindi-language','india','2000s','film','youth-activism','india-setting','ensemble-cast','non-linear-narrative','emotionally-devastating'],
-  'in012':['drama','hindi-language','india','2000s','film','disability-representation','child-protagonist','mentor-student','emotionally-devastating','uplifting-tone'],
-  'in013':['spy-thriller','hindi-language','india','2010s','film','based-on-true-story','female-lead-protagonist','india-setting','emotional','cold-war'],
-  'in014':['drama','hindi-language','india','2010s','film','social-discrimination','female-lead-protagonist','courtroom-drama','dark-tone','india-setting'],
-  'in015':['crime-thriller','hindi-language','india','2010s','film','missing-person','mystery','twist-ending','female-lead-protagonist','india-setting'],
-  // Shows
-  'tv001':['crime-thriller','english-language','usa','2000s','series','prestige-tv','drug-trade','anti-hero','transformation-arc','morally-ambiguous-protagonist','slow-burn','dark-tone','ensemble-cast'],
-  'tv002':['historical-drama','english-language','uk','2010s','miniseries','prestige-tv','nuclear-disaster','based-on-true-story','slow-burn','emotionally-devastating','ensemble-cast'],
-  'tv003':['crime-thriller','english-language','usa','2010s','series','prestige-tv','detective-protagonist','psychological','serial-killer-thriller','slow-burn','non-linear-narrative','dark-tone'],
-  'tv004':['drama','english-language','usa','2010s','series','prestige-tv','family-dynamics','power-and-ambition','dark-comedy','satirical','ensemble-cast'],
-  'tv005':['crime-thriller','english-language','usa','2000s','series','prestige-tv','drug-trade','ensemble-cast','social-discrimination','slow-burn','institutional-corruption'],
-  'tv006':['crime-thriller','english-language','usa','2010s','series','prestige-tv','serial-killer-profiling','psychological','based-on-true-story','slow-burn','dark-tone'],
-  'tv007':['mystery-thriller','english-language','germany','2010s','series','prestige-tv','time-manipulation','non-linear-narrative','family-mystery','dark-tone','ensemble-cast'],
-  'tv008':['biographical-drama','hindi-language','india','2020s','series','prestige-tv','based-on-true-story','financial-thriller','india-setting','ensemble-cast'],
-  'tv009':['crime-drama','hindi-language','india','2010s','series','prestige-tv','organised-crime-saga','power-and-ambition','ensemble-cast','dark-tone','india-setting'],
-  'tv010':['comedy','hindi-language','india','2020s','series','prestige-tv','rural-setting','satirical','feel-good','india-setting','ensemble-cast'],
-  'tv011':['crime-thriller','hindi-language','india','2010s','series','prestige-tv','political-thriller','dark-tone','india-setting','ensemble-cast'],
-  'tv012':['crime-thriller','english-language','uk','2010s','series','prestige-tv','organised-crime-saga','period-drama','family-dynasty','anti-hero'],
-  'tv013':['crime-thriller','english-language','usa','2000s','series','prestige-tv','organised-crime-saga','family-dynamics','anti-hero','ensemble-cast','slow-burn'],
-  'tv014':['war-drama','english-language','usa','2000s','miniseries','prestige-tv','world-war-ii','based-on-true-story','ensemble-cast','heroism','emotionally-devastating'],
-  'tv015':['mystery-thriller','english-language','usa','2020s','series','prestige-tv','corporate-dystopia','identity-crisis','slow-burn','visually-striking','ensemble-cast'],
-};
 
 function aiTagCandidates() {
   return [
