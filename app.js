@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 20;
+const APP_VERSION = 21;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -5608,7 +5608,7 @@ function buildCard(movie, opts={}) {
         <div class="card-front-title">${displayTitle}</div>
         <div class="card-front-meta">${movie.year||'?'} - ${formatLabel}</div>
       </div>
-      <div class="format-badge">${formatLabel}</div>
+      <div class="card-type-badge">${formatLabel}</div>
       ${rank?`<div class="rank-badge">#${rank}</div>`:''}
       ${showMatch?`<div class="match-percent card-front-match">${matchPct}% match</div>`:''}
     </div>

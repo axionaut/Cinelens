@@ -73,7 +73,6 @@
   .card-poster-dir{font-size:10px;color:var(--muted);text-align:center}
   .score-badge{position:absolute;top:7px;right:7px;background:rgba(0,0,0,.85);border:1px solid var(--accent);border-radius:3px;padding:2px 6px;font-family:'DM Mono',monospace;font-size:10px;color:var(--accent)}
   .rank-badge{position:absolute;top:7px;right:7px;background:var(--accent);border-radius:3px;padding:2px 6px;font-family:'Bebas Neue',sans-serif;font-size:13px;color:var(--button-text,#000);letter-spacing:1px}
-  .format-badge{position:absolute;bottom:7px;left:7px;background:rgba(0,0,0,.75);border:1px solid var(--border);border-radius:3px;padding:2px 5px;font-size:9px;font-family:'DM Mono',monospace;color:var(--muted);letter-spacing:.5px;text-transform:uppercase}
   .card-body{padding:8px 10px}
   .card-head{display:flex;gap:10px;align-items:flex-start}
   .card-head-copy{min-width:0;flex:1}
@@ -850,9 +849,16 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .card-front-title{font-size:13px;font-weight:700;line-height:1.15}
 .card-front-meta{margin-top:3px;font-family:'DM Mono',monospace;font-size:9px;color:rgba(255,255,255,.82)}
 .card-front-match{position:absolute;z-index:3;left:8px;top:8px;margin:0}
-.format-badge{position:absolute;z-index:3;right:8px;top:8px;font-size:8px;font-weight:700;letter-spacing:.5px;padding:3px 7px;border-radius:999px;text-transform:uppercase;line-height:1.4}
-.movie-card.film-card .format-badge{background:var(--movie-badge-bg,var(--accent));color:var(--movie-badge-text,#000)}
-.movie-card.show-card .format-badge{background:var(--show-badge-bg,var(--green));color:var(--show-badge-text,#000)}
+/* Unique name deliberately: a prior bug here came from reusing an existing
+   class name ("format-badge") that still had CSS elsewhere — CSS cascades
+   per PROPERTY, not per rule, so this element inherited that old rule's
+   bottom/left alongside this rule's top/right, pinning all four edges and
+   stretching an absolutely-positioned box to fill nearly the whole card.
+   bottom/left are set to auto explicitly here so that can't happen again
+   even if this rule is ever edited to only add top/right-style properties. */
+.card-type-badge{position:absolute;z-index:3;top:8px;right:8px;bottom:auto;left:auto;width:auto;height:auto;font-size:8px;font-weight:700;letter-spacing:.5px;padding:3px 7px;border-radius:999px;text-transform:uppercase;line-height:1.4}
+.movie-card.film-card .card-type-badge{background:var(--movie-badge-bg,var(--accent));color:var(--movie-badge-text,#000)}
+.movie-card.show-card .card-type-badge{background:var(--show-badge-bg,var(--green));color:var(--show-badge-text,#000)}
 .rank-badge{z-index:4}
 .card-body{display:none;flex-direction:column;flex:1 1 auto;min-width:0;padding:14px;gap:8px;background:var(--film-card-bg);color:var(--card-text)}
 .show-card .card-body{background:var(--show-card-bg)}
