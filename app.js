@@ -1,48 +1,42 @@
 // ─────────────────────────────────────────────
-// COLOURS — the one place to edit CineLens's theme (v26)
-// Every value below is a literal hex string, typed by hand. Nothing here is
-// computed at runtime — no mixing, no lightening, no derivation function.
-// If you want to change a colour, edit that one line; nothing else moves.
-// Five source colours drive this table (Nitin's palette):
-//   Evergreen #042A2B, Pacific Blue #5EB1BF, Light Cyan #CDEDF6,
-//   Atomic Tangerine #EF7B45, Burnt Tangerine #D84727
-// mapped to Background / Surface / Text / Primary / Secondary. Every entry
-// below is either one of those five exactly, or one of those five with a
-// hand-typed alpha suffix for translucency (still plain hex, just 8-digit
-// #RRGGBBAA instead of 6). Nothing is blended or lightened by code.
-// To explore before committing: dev/theme-lab.html has one colour picker
-// per role plus every other field below, all independently editable, and
-// copies out a ready-to-paste block.
+// COLOURS — the one place to edit CineLens's theme
+// A plain hex value per line. Edit one, save, reload — nothing else changes.
+// Visible borders are switched off globally in styles.css (search "no
+// borders"). filmAccent/showAccent below still exist because CSS also
+// reuses them as a general film/show identity colour for card-hover tint,
+// the format label, and matched-genre-chip highlighting — not just borders.
 // ─────────────────────────────────────────────
 const CINELENS_COLORS = {
-  accent:            '#EF7B45', // MAIN: Primary (Atomic Tangerine) — buttons, match %, links, film brand colour
-  accent2:           '#EF7B45', // MAIN: Accent — hover states, secondary borders (= Primary)
-  text:              '#CDEDF6', // MAIN: Text (Light Cyan) — main page text
-  cardText:          '#CDEDF6', // text on card backs (= Text)
-  surface:           '#5EB1BF', // MAIN: Surface (Pacific Blue) — modals, dropdowns
-  surface2:          '#5EB1BF', // buttons, secondary surfaces (= Surface)
-  muted:             '#CDEDF6B8', // secondary page text
-  muted2:            '#CDEDF68C', // tertiary page text
-  cardMuted:         '#CDEDF6AD', // secondary text on card backs
-  tagText:           '#CDEDF6D9',
-  filmTagText:       '#CDEDF6D9', // tag text on movie cards (= tagText)
-  showTagText:       '#CDEDF6D9', // tag text on show cards (= tagText)
-  buttonText:        '#042A2B',   // text on solid accent buttons (= Background, for contrast on Primary)
-  tagBg:             '#5EB1BF',   // (= Surface)
-  pageBg:            '#042A2B',   // MAIN: Background (Evergreen) — page background
-  headerBg:          '#042A2B',   // (= Background)
-  controlBg:         '#042A2B',   // control deck background (= Background)
-  filmCardBg:        '#042A2B',   // movie card background (= Background)
-  showCardBg:        '#042A2B',   // show card background (= Background)
-  chipBg:            '#5EB1BF',   // generic tag/genre chips (= Surface)
-  filmChipBg:        '#5EB1BF',   // tag chips on movie cards (= Surface)
-  showChipBg:        '#5EB1BF',   // tag chips on show cards (= Surface)
-  sourceBg:          '#5EB1BF',   // Wiki/TMDB/Google link buttons (= Surface)
+  accent:            '#FFCC33', // primary accent (buttons, match %, links)
+  accent2:           '#FF6A3D', // secondary accent (hover states)
+  text:              '#F3F0EC', // main page text
+  cardText:          '#F1EEE9', // text on card backs
+  surface:           '#201B13', // modals, dropdowns
+  surface2:          '#2F281D', // buttons, secondary surfaces
+  muted:             '#D1C9BD', // secondary page text
+  muted2:            '#BDB4A8', // tertiary page text
+  cardMuted:         '#CCC3B8', // secondary text on card backs
+  tagText:           '#EFEBE7',
+  filmTagText:       '#EFEBE7', // tag text on movie cards
+  showTagText:       '#E7EFED', // tag text on show cards
+  buttonText:        '#17130C', // text on solid accent buttons
+  tagBg:             '#463620',
+  pageBg:            '#14100A', // page background
+  headerBg:          '#1B150E',
+  controlBg:         '#241D14', // control deck background
+  filmCardBg:        '#2B2318', // movie card background
+  filmAccent:        '#FFCC33', // movie identity colour (hover tint, format label, matched chips)
+  showCardBg:        '#162724', // show card background
+  showAccent:        '#68DDB8', // show identity colour (hover tint, format label, matched chips)
+  chipBg:            '#4B3B25', // generic tag/genre chips
+  filmChipBg:        '#4C3B24', // tag chips on movie cards
+  showChipBg:        '#234840', // tag chips on show cards
+  sourceBg:          '#4A2D21', // Wiki/TMDB/Google link buttons
   // MOVIE / SHOW poster badge — solid, opaque, legible over any image
-  movieBadgeBg:      '#EF7B45',   // = Primary
-  movieBadgeText:    '#042A2B',   // = Background
-  showBadgeBg:       '#D84727',   // = Secondary
-  showBadgeText:     '#042A2B'    // = Background
+  movieBadgeBg:      '#FFCC33',
+  movieBadgeText:    '#17130C',
+  showBadgeBg:       '#68DDB8',
+  showBadgeText:     '#0C1D19'
 };
 
 function applyPalette() {
@@ -66,9 +60,9 @@ function applyPalette() {
     '--header-bg':CINELENS_COLORS.headerBg,
     '--control-bg':CINELENS_COLORS.controlBg,
     '--film-card-bg':CINELENS_COLORS.filmCardBg,
-    '--film-card-border':CINELENS_COLORS.filmCardBorder,
+    '--film-card-border':CINELENS_COLORS.filmAccent,
     '--show-card-bg':CINELENS_COLORS.showCardBg,
-    '--show-card-border':CINELENS_COLORS.showCardBorder,
+    '--show-card-border':CINELENS_COLORS.showAccent,
     '--palette-chip-bg':CINELENS_COLORS.chipBg,
     '--film-chip-bg':CINELENS_COLORS.filmChipBg,
     '--show-chip-bg':CINELENS_COLORS.showChipBg,
@@ -105,7 +99,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 26;
+const APP_VERSION = 27;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;

@@ -464,12 +464,7 @@
   font-size: 11px !important;
 }
 
-.movie-card.film-card {
-  border-left: 3px solid rgba(255, 204, 51, .72) !important;
-}
-
 .movie-card.show-card {
-  border-left: 3px solid rgba(53, 201, 135, .72) !important;
   background: linear-gradient(180deg, rgba(18, 24, 22, .86), rgba(14, 17, 17, .9)) !important;
 }
 
@@ -766,13 +761,11 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
 .inline-clear-btn:hover{background:rgba(255,204,51,.16)}
 .movie-card.film-card{
   background:var(--film-card-bg, linear-gradient(180deg,rgba(32,25,17,.93),rgba(15,13,10,.96))) !important;
-  border-left:5px solid var(--film-card-border, var(--accent)) !important;
-  box-shadow:0 14px 36px rgba(0,0,0,.22), inset 0 0 0 1px color-mix(in srgb, var(--film-card-border, var(--accent)) 14%, transparent) !important;
+  box-shadow:0 14px 36px rgba(0,0,0,.22) !important;
 }
 .movie-card.show-card{
   background:var(--show-card-bg, linear-gradient(180deg,rgba(12,31,27,.94),rgba(8,17,16,.97))) !important;
-  border-left:5px solid var(--show-card-border, var(--green)) !important;
-  box-shadow:0 14px 36px rgba(0,0,0,.22), inset 0 0 0 1px color-mix(in srgb, var(--show-card-border, var(--green)) 16%, transparent) !important;
+  box-shadow:0 14px 36px rgba(0,0,0,.22) !important;
 }
 .movie-card.film-card .title-format{
   border-color:color-mix(in srgb, var(--film-card-border, var(--accent)) 60%, transparent);
@@ -809,8 +802,8 @@ body{background:var(--page-bg, linear-gradient(180deg,#101010 0%,#080808 48%,#05
 header{background:var(--header-bg, rgba(7,6,5,.9));color:var(--text);border-bottom-color:var(--control-border, rgba(255,204,51,.13))}
 .control-deck{background:var(--control-bg, linear-gradient(180deg,#191919,#111));border-color:var(--control-border, #303030);color:var(--text)}
 .movie-card,.movie-card.rated{color:var(--card-text, var(--text))}
-.movie-card.film-card{background:var(--film-card-bg, linear-gradient(180deg,rgba(32,25,17,.93),rgba(15,13,10,.96))) !important;border-left-color:var(--film-card-border, var(--accent)) !important}
-.movie-card.show-card{background:var(--show-card-bg, linear-gradient(180deg,rgba(12,31,27,.94),rgba(8,17,16,.97))) !important;border-left-color:var(--show-card-border, var(--green)) !important}
+.movie-card.film-card{background:var(--film-card-bg, linear-gradient(180deg,rgba(32,25,17,.93),rgba(15,13,10,.96))) !important}
+.movie-card.show-card{background:var(--show-card-bg, linear-gradient(180deg,rgba(12,31,27,.94),rgba(8,17,16,.97))) !important}
 .card-title,.card-title-button,.movie-card .card-title,.movie-card .card-title-button,.section-title,.empty-state h3,.library-health-label{color:var(--card-text, var(--text))}
 header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .card-meta,.movie-card .card-meta,.match-label,.settings-bar label,.platform-label,.section-count,.stat-label,.tag-line-label,.genre-label,.fetch-sub,.empty-state,.maintenance-health{color:var(--card-muted, var(--muted))}
@@ -882,3 +875,13 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
   .movie-card{aspect-ratio:3/4}
   .movie-card.expanded .card-poster{flex:0 0 130px;max-width:130px}
 }
+
+/* No borders anywhere, per explicit request. This overrides every border
+   colour declared above regardless of source (CINELENS_COLORS-driven CSS
+   variables, the legacy :root fallback palette near the top of this file,
+   or hardcoded rgba()/hex literals scattered through hover/active states) —
+   there were too many scattered declarations to track down individually.
+   Border WIDTHS are left alone (many rules use border-width for spacing/
+   layout, not just colour), so borders still take up space, they're just
+   invisible. */
+*,*::before,*::after{border-color:transparent!important}
