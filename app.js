@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 16;
+const APP_VERSION = 17;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -237,6 +237,15 @@ const RECEPTION_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const ENGLISH_PREFERENCE_STAR_BONUS = 0.3;
 const CROSS_FORMAT_TASTE_WEIGHT = 0.4;
 const SHOW_STORY_MAX_CHARS = 12000;
+const TMDB_API_KEY = 'b807a738c939c5b8ef9d0c3f3b3ad662';
+const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
+const TMDB_REQUEST_DELAY_MS = 300;
+const TMDB_WATCH_REGION = 'IN';
+const TMDB_BACKFILL_BATCH_SIZE = 10;
+const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+let lastTmdbRequestAt = 0;
+let tmdbBackfillTimer = null;
+let tmdbBackfillInProgress = false;
 // The active unseen catalogue is intentionally bounded, but not by one global cap.
 // Ratings, watchlist items, manual additions and hidden records are personal history
 // and are never rotated. Automatic unseen titles compete within their own
@@ -1955,6 +1964,7 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
     runStartupMaintenance();
     scheduleTagCloudNormalization(1800);
     scheduleReceptionBackfill(4500);
+    scheduleTmdbBackfill(4500);
   }
 
   render();
@@ -3817,10 +3827,116 @@ function saveManualTagChoices() {
   showToast(`Saved ${tags.length} tags for "${movie.title}"`, 'success');
 }
 
+// ─────────────────────────────────────────────
+// TMDB — poster art + where-to-watch (v17)
+// Read-only, non-billing v3 key. Attribution and JustWatch back-link are
+// required by TMDB's terms whenever watch-provider data is displayed.
+// ─────────────────────────────────────────────
+async function tmdbApiJson(url) {
+  if (fetchAbortRequested) return null;
+  const wait = Math.max(0, TMDB_REQUEST_DELAY_MS - (Date.now() - lastTmdbRequestAt));
+  if (wait) await abortableSleep(wait);
+  if (fetchAbortRequested) return null;
+  lastTmdbRequestAt = Date.now();
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch(_) {
+    return null;
+  }
+}
+
+function tmdbCandidateYear(result, mediaType) {
+  const raw = mediaType === 'tv' ? result?.first_air_date : result?.release_date;
+  const year = parseInt(String(raw || '').slice(0, 4), 10);
+  return Number.isFinite(year) ? year : null;
+}
+
+async function tmdbSearchCandidate(title, year, mediaType) {
+  const endpoint = mediaType === 'tv' ? 'tv' : 'movie';
+  const yearParam = mediaType === 'tv' ? 'first_air_date_year' : 'year';
+  const params = new URLSearchParams({
+    api_key: TMDB_API_KEY,
+    query: title,
+    include_adult: 'false'
+  });
+  if (year) params.set(yearParam, String(year));
+  if (mediaType === 'movie') params.set('region', TMDB_WATCH_REGION);
+  const data = await tmdbApiJson(`https://api.themoviedb.org/3/search/${endpoint}?${params.toString()}`);
+  const results = Array.isArray(data?.results) ? data.results : [];
+  if (!results.length) return null;
+  const inYearWindow = results.filter(item => {
+    const itemYear = tmdbCandidateYear(item, mediaType);
+    return !year || !itemYear || Math.abs(itemYear - year) <= 1;
+  });
+  const pool = inYearWindow.length ? inYearWindow : (year ? [] : results);
+  if (!pool.length) return null;
+  pool.sort((a, b) => Number(b.popularity || 0) - Number(a.popularity || 0));
+  return pool[0];
+}
+
+function compactProviderNames(list) {
+  return [...new Set((list || []).map(item => String(item?.provider_name || '').trim()).filter(Boolean))];
+}
+
+async function tmdbDetailsWithProviders(id, mediaType) {
+  const endpoint = mediaType === 'tv' ? 'tv' : 'movie';
+  const params = new URLSearchParams({ api_key: TMDB_API_KEY, append_to_response: 'watch/providers' });
+  const data = await tmdbApiJson(`https://api.themoviedb.org/3/${endpoint}/${id}?${params.toString()}`);
+  if (!data) return null;
+  const regionData = data['watch/providers']?.results?.[TMDB_WATCH_REGION];
+  const watchProviders = regionData ? {
+    region: TMDB_WATCH_REGION,
+    flatrate: compactProviderNames(regionData.flatrate),
+    rent: compactProviderNames(regionData.rent),
+    buy: compactProviderNames(regionData.buy),
+    link: regionData.link || ''
+  } : null;
+  const posterPath = data.poster_path || '';
+  return {
+    posterUrl: posterPath ? TMDB_IMAGE_BASE + posterPath : '',
+    watchProviders: (watchProviders && (watchProviders.flatrate.length || watchProviders.rent.length || watchProviders.buy.length)) ? watchProviders : null
+  };
+}
+
+async function fetchTmdbDetails(title, year, format) {
+  if (!TMDB_API_KEY || !title) return null;
+  const mediaType = format ? 'tv' : 'movie';
+  try {
+    const candidate = await tmdbSearchCandidate(title, year, mediaType);
+    if (!candidate?.id) return null;
+    const details = await tmdbDetailsWithProviders(candidate.id, mediaType);
+    const fallbackPoster = candidate.poster_path ? TMDB_IMAGE_BASE + candidate.poster_path : '';
+    return {
+      tmdbId: candidate.id,
+      tmdbMediaType: mediaType,
+      posterUrl: details?.posterUrl || fallbackPoster || '',
+      watchProviders: details?.watchProviders || null
+    };
+  } catch(_) {
+    return null;
+  }
+}
+
+async function attachTmdbDetails(movie) {
+  if (!movie?.title) return movie;
+  const tmdb = await fetchTmdbDetails(movie.title, movie.year, movie.format);
+  if (tmdb) {
+    if (tmdb.posterUrl) movie.posterUrl = tmdb.posterUrl;
+    if (tmdb.tmdbId) { movie.tmdbId = tmdb.tmdbId; movie.tmdbMediaType = tmdb.tmdbMediaType; }
+    movie.watchProviders = tmdb.watchProviders || null;
+  }
+  delete movie.posterBackfillAttemptedAt;
+  if (!movie.posterUrl) movie.posterBackfillAttemptedAt = nowStamp();
+  return movie;
+}
+
 async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) {
   const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages|revisions&piprop=thumbnail|name&explaintext=1&exlimit=1&cllimit=80&pithumbsize=500&rvprop=content&rvslots=main&formatversion=2&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, wikiTitle, mode, diagnostics, opts);
+  if (movie) await attachTmdbDetails(movie);
   if (movie && opts.ai !== false) await applyAiTags(movie);
   return movie;
 }
@@ -3831,6 +3947,7 @@ async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
   const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages|revisions&piprop=thumbnail|name&explaintext=1&exlimit=1&cllimit=80&rvprop=content&rvslots=main&pithumbsize=500&formatversion=2&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, clean, mode, opts.diagnostics || null, opts);
+  if (movie) await attachTmdbDetails(movie);
   if (movie && opts.ai !== false) await applyAiTags(movie);
   return movie;
 }
@@ -3847,11 +3964,7 @@ function receptionBackfillRecentlyAttempted(movie, now=Date.now()) {
   return !!attemptedAt && now - attemptedAt < RECEPTION_BACKFILL_RETRY_COOLDOWN_MS;
 }
 
-function receptionBackfillCandidates() {
-  const now = Date.now();
-  const candidates = Object.values(state.movies || {})
-    .filter(needsReceptionBackfill)
-    .filter(movie => !receptionBackfillRecentlyAttempted(movie, now));
+function sortByBackfillPriority(candidates) {
   const scored = new Map(scoreMovies().map(item => [String(item.movie.id), item]));
   return candidates.sort((a,b) => {
     const aRated = Number(a.rating || 0) > 0;
@@ -3866,6 +3979,14 @@ function receptionBackfillCandidates() {
     if (aRecommended && bRecommended) return bScore - aScore || titleSortKey(a).localeCompare(titleSortKey(b));
     return titleSortKey(a).localeCompare(titleSortKey(b));
   });
+}
+
+function receptionBackfillCandidates() {
+  const now = Date.now();
+  const candidates = Object.values(state.movies || {})
+    .filter(needsReceptionBackfill)
+    .filter(movie => !receptionBackfillRecentlyAttempted(movie, now));
+  return sortByBackfillPriority(candidates);
 }
 
 function scheduleReceptionBackfill(delay=3500) {
@@ -3940,6 +4061,83 @@ async function runReceptionBackfill() {
   } finally {
     receptionBackfillInProgress = false;
     scheduleReceptionBackfill(9000);
+  }
+}
+
+// Dedicated, faster poster/watch-provider backfill for the existing library.
+// Deliberately independent of the reception backfill above: it needs only a
+// lightweight TMDB lookup against already-stored title/year/format, never a
+// Wikipedia article refetch, so it can run a bigger batch, faster, without
+// adding Wikipedia load.
+function needsTmdbBackfill(movie) {
+  if (!movie || movie.source !== 'wikipedia') return false;
+  return !movie.posterUrl && !movie.tmdbId && !movie.posterBackfillAttemptedAt;
+}
+
+function tmdbBackfillRecentlyAttempted(movie, now=Date.now()) {
+  const attemptedAt = Date.parse(movie?.posterBackfillAttemptedAt || '') || 0;
+  return !!attemptedAt && now - attemptedAt < TMDB_BACKFILL_RETRY_COOLDOWN_MS;
+}
+
+function tmdbBackfillCandidates() {
+  const now = Date.now();
+  const candidates = Object.values(state.movies || {})
+    .filter(needsTmdbBackfill)
+    .filter(movie => !tmdbBackfillRecentlyAttempted(movie, now));
+  return sortByBackfillPriority(candidates);
+}
+
+function scheduleTmdbBackfill(delay=4000) {
+  if (!libraryWritesUnlocked || tmdbBackfillInProgress) return;
+  const hasWork = Object.values(state.movies || {}).some(needsTmdbBackfill);
+  if (!hasWork) return;
+  if (tmdbBackfillTimer) {
+    clearTimeout(tmdbBackfillTimer);
+    tmdbBackfillTimer = null;
+  }
+  const run = () => {
+    tmdbBackfillTimer = null;
+    runTmdbBackfill();
+  };
+  if ('requestIdleCallback' in window) {
+    tmdbBackfillTimer = setTimeout(() => requestIdleCallback(run, {timeout: 1500}), delay);
+  } else {
+    tmdbBackfillTimer = setTimeout(run, delay);
+  }
+}
+
+async function runTmdbBackfill() {
+  if (!libraryWritesUnlocked || tmdbBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) {
+    scheduleTmdbBackfill(3000);
+    return;
+  }
+  const candidates = tmdbBackfillCandidates();
+  if (!candidates.length) return;
+  tmdbBackfillInProgress = true;
+  const changedMovieIds = [];
+  try {
+    for (const movie of candidates.slice(0, TMDB_BACKFILL_BATCH_SIZE)) {
+      if (poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) break;
+      try {
+        await attachTmdbDetails(movie);
+        touchRecord(movie);
+        changedMovieIds.push(String(movie.id));
+      } catch(error) {
+        movie.posterBackfillAttemptedAt = nowStamp();
+        touchRecord(movie);
+        changedMovieIds.push(String(movie.id));
+      }
+    }
+    if (changedMovieIds.length) {
+      saveLocalState({preserveUpdatedAt:true, changedMovieIds});
+      queueDriveSync();
+      render();
+    }
+  } catch(error) {
+    console.warn('TMDB backfill paused', error);
+  } finally {
+    tmdbBackfillInProgress = false;
+    scheduleTmdbBackfill(6000);
   }
 }
 
@@ -5654,6 +5852,7 @@ function buildCard(movie, opts={}) {
   const wikiUrl = wikiUrlForMovie(movie);
   const googleUrl = googleSearchUrlForMovie(movie);
   const displayTitle = attrSafe(movie.title);
+  const posterSrc = movie.posterUrl || movie.thumbnailUrl || '';
   const titleHtml = `<button class="card-title-button" onclick="showSimilarTitles('${safeId}',event)" title="Show similar titles">${displayTitle}</button>`;
   const sourceLinksHtml = [
     wikiUrl ? `<a class="source-link-btn" href="${attrSafe(wikiUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Wiki</a>` : '',
@@ -5661,7 +5860,7 @@ function buildCard(movie, opts={}) {
   ].filter(Boolean).join('');
   card.innerHTML = `
     <div class="card-poster">
-      ${movie.thumbnailUrl ? `<img class="card-poster-img" src="${attrSafe(movie.thumbnailUrl)}" alt="" loading="lazy" decoding="async">` : `<div class="card-poster-inner" style="background:${posterGrad(movie.title)}"></div>`}
+      ${posterSrc ? `<img class="card-poster-img" src="${attrSafe(posterSrc)}" alt="" loading="lazy" decoding="async">` : `<div class="card-poster-inner" style="background:${posterGrad(movie.title)}"></div>`}
       <div class="card-front-copy">
         <div class="card-front-title">${displayTitle}</div>
         <div class="card-front-meta">${movie.year||'?'} - ${formatLabel}</div>
@@ -5678,6 +5877,7 @@ function buildCard(movie, opts={}) {
       </div>
       ${renderStars(safeId, movie.rating || 0)}
       ${renderGenres(movie, resolvedMatchedGenres)}
+      ${renderWatchProviders(movie)}
       ${poolView && movie.retagMessage ? `<div class="pool-card-note">${movie.retagMessage}</div>`:''}
       <div class="card-tags" id="tags-${movie.id}">${renderTagInsightChips(movie, safeId, true, resolvedMatchedTags, contextTag)}</div>
       <div class="card-actions">
@@ -5721,6 +5921,19 @@ function renderGenres(movie, matchedGenres=null) {
     const safeGenre = String(genre).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     return `<button type="button" class="genre-chip clickable${matched.has?.(genre) ? ' matched' : ''}" onclick="filterByGenreFromCard('${safeGenre}',event)">${genre}</button>`;
   }).join('')}</div>`;
+}
+
+function renderWatchProviders(movie) {
+  const wp = movie?.watchProviders;
+  if (!wp) return '';
+  const flatrate = wp.flatrate || [];
+  const rentBuy = [...new Set([...(wp.rent || []), ...(wp.buy || [])])];
+  const primary = flatrate.length ? flatrate : rentBuy;
+  if (!primary.length) return '';
+  const label = flatrate.length ? 'Stream' : 'Rent/Buy';
+  const chips = primary.slice(0, 6).map(name => `<span class="watch-chip">${attrSafe(name)}</span>`).join('');
+  const link = wp.link ? `<a class="watch-link" href="${attrSafe(wp.link)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Streaming availability data via JustWatch">via JustWatch</a>` : '';
+  return `<div class="watch-row"><span class="genre-label">${label}</span>${chips}${link}</div>`;
 }
 
 function renderTagChips(tags, matchedTags, expanded) {
@@ -6480,6 +6693,11 @@ async function retagFromStoredData(id, opts={}) {
     updated.needsManualUrl = false;
     updated.retagStatus = 'verified';
     updated.retagMessage = '';
+    // Retag is an explicit, infrequent user action — always refresh TMDB
+    // poster/watch-provider data here, even when the branch above found the
+    // stored Wikipedia record healthy enough to skip a Wikipedia refetch. This
+    // is how a wrong TMDB match gets corrected.
+    await attachTmdbDetails(updated);
     rebuildTagBrain();
     computeTagWeights();
     saveLocalState();
@@ -7263,6 +7481,7 @@ function syncMustWaitForForegroundWork({respectHardCap=false}={}) {
   return !!(
     poolExpansionInProgress ||
     receptionBackfillInProgress ||
+    tmdbBackfillInProgress ||
     backgroundAiTaggingInProgress ||
     tagCloudNormalizationInProgress ||
     tasteStoryInProgress

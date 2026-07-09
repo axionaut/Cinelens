@@ -224,6 +224,10 @@
   .genre-label{font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted2);margin-right:2px}
   .genre-chip{font-size:9px;color:var(--tag-text,var(--muted));border:1px solid var(--tag-border,var(--border));border-radius:10px;padding:2px 7px;text-transform:capitalize;background:var(--palette-chip-bg,transparent);font-family:inherit;line-height:inherit}.genre-chip.clickable{cursor:pointer}.genre-chip.clickable:hover,.genre-chip.clickable:focus-visible{color:var(--accent);border-color:var(--accent2);background:color-mix(in srgb,var(--accent) 12%,transparent);outline:none}
   .genre-chip.matched{color:var(--accent);border-color:var(--accent2);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+  .watch-row{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin:4px 0}
+  .watch-chip{font-size:9px;border:1px solid var(--tag-border,var(--border));border-radius:10px;padding:2px 7px;text-transform:capitalize;font-family:inherit;line-height:inherit}
+  .watch-link{font-size:9px;color:var(--card-muted,var(--muted));text-decoration:underline;margin-left:2px}
+  .watch-link:hover{color:var(--accent)}
   .tag{font-size:9px;border-radius:999px;padding:3px 7px;background:rgba(255,255,255,.045);border-color:rgba(255,255,255,.09);color:#bca895}
   .tag.matched{border-color:rgba(255,208,90,.56);color:#ffd05a;background:rgba(255,208,90,.1)}
   .card-actions{gap:6px;margin-top:10px}
@@ -536,6 +540,7 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
 .maintenance-danger { margin-top:10px; padding-top:10px; border-top:1px solid rgba(239, 83, 80, .22); }
 .maintenance-danger > summary { color:#ff8a86; }
 .maintenance-danger p { margin:7px 0 9px; color:var(--muted); max-width:620px; line-height:1.45; }
+.tmdb-attribution{margin-top:10px;font-size:10px;color:var(--muted2,var(--muted));line-height:1.4;max-width:620px}
 @media (max-width:768px) {
   .library-status { max-width:100%; font-size:10px; }
   .library-health-label { max-width:190px; }
@@ -810,15 +815,15 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .modal,.empty-state,.tag-brain-grid,.manual-tag-grid{background:var(--surface);border-color:var(--border);color:var(--text)}
 .source-link-btn{background:var(--source-link-bg, rgba(255,255,255,.045));border-color:var(--source-link-border, rgba(255,255,255,.16));color:var(--tag-text,var(--text))}
 .source-link-btn:hover,.source-link-btn:focus-visible{border-color:var(--accent);color:var(--accent)}
-.tag,.tag-insight-chip,.tb-tag,.genre-chip{background:var(--palette-chip-bg, rgba(255,255,255,.045));border-color:var(--palette-chip-border, rgba(255,255,255,.1));color:var(--tag-text,var(--card-text, var(--text)))}
+.tag,.tag-insight-chip,.tb-tag,.genre-chip,.watch-chip{background:var(--palette-chip-bg, rgba(255,255,255,.045));border-color:var(--palette-chip-border, rgba(255,255,255,.1));color:var(--tag-text,var(--card-text, var(--text)))}
 .tag.matched,.tag-insight-chip.score-positive,.genre-chip.matched{color:var(--accent);border-color:var(--palette-chip-border)}
 .match-percent,.score-badge{background:var(--source-link-bg, rgba(255,204,51,.13));border-color:var(--source-link-border, rgba(255,204,51,.45))}
 .movie-card.film-card .title-format{color:var(--film-card-border, var(--accent));border-color:var(--film-card-border, var(--accent));background:var(--palette-chip-bg)}
 .movie-card.show-card .title-format{color:var(--show-card-border, var(--green));border-color:var(--show-card-border, var(--green));background:var(--palette-chip-bg)}
 
 /* v16 image-forward cards and palette-aware chrome */
-.movies-grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
-.movie-card{min-height:360px;aspect-ratio:2/3;border-radius:8px;overflow:hidden;perspective:1200px;cursor:pointer;background:var(--film-card-bg)!important}
+.movies-grid{grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
+.movie-card{min-height:495px;aspect-ratio:2/3;border-radius:8px;overflow:hidden;perspective:1200px;cursor:pointer;background:var(--film-card-bg)!important}
 .movie-card.show-card{background:var(--show-card-bg)!important}
 .card-poster,.card-body{position:absolute;inset:0;display:flex;flex-direction:column;backface-visibility:hidden;transition:transform .24s ease,opacity .24s ease}
 .card-poster{display:flex!important;justify-content:flex-end;background:var(--film-card-bg);transform:rotateY(0);opacity:1}
@@ -845,8 +850,8 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .card-actions .source-link-btn{min-height:auto;padding:5px 8px}
 .card-actions .card-act,.card-actions .source-link-btn{background:var(--source-link-bg);border-color:var(--source-link-border);color:var(--tag-text)}
 .card-actions .card-act:hover,.card-actions .source-link-btn:hover{border-color:var(--accent);color:var(--accent)}
-.film-card .tag,.film-card .tag-insight-chip,.film-card .tb-tag,.film-card .genre-chip{background:var(--film-chip-bg,var(--palette-chip-bg));border-color:var(--film-chip-border,var(--palette-chip-border));color:var(--film-tag-text,var(--tag-text))}
-.show-card .tag,.show-card .tag-insight-chip,.show-card .tb-tag,.show-card .genre-chip{background:var(--show-chip-bg,var(--palette-chip-bg));border-color:var(--show-chip-border,var(--palette-chip-border));color:var(--show-tag-text,var(--tag-text))}
+.film-card .tag,.film-card .tag-insight-chip,.film-card .tb-tag,.film-card .genre-chip,.film-card .watch-chip{background:var(--film-chip-bg,var(--palette-chip-bg));border-color:var(--film-chip-border,var(--palette-chip-border));color:var(--film-tag-text,var(--tag-text))}
+.show-card .tag,.show-card .tag-insight-chip,.show-card .tb-tag,.show-card .genre-chip,.show-card .watch-chip{background:var(--show-chip-bg,var(--palette-chip-bg));border-color:var(--show-chip-border,var(--palette-chip-border));color:var(--show-tag-text,var(--tag-text))}
 .film-card .genre-chip.clickable:hover,.film-card .genre-chip.matched{color:var(--film-card-border);border-color:var(--film-card-border);background:color-mix(in srgb,var(--film-card-border) 16%,var(--film-chip-bg))}
 .show-card .genre-chip.clickable:hover,.show-card .genre-chip.matched{color:var(--show-card-border);border-color:var(--show-card-border);background:color-mix(in srgb,var(--show-card-border) 16%,var(--show-chip-bg))}
 @media(max-width:768px){
