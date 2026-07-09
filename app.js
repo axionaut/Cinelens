@@ -5519,7 +5519,6 @@ function buildCard(movie, opts={}) {
         <div class="card-front-meta">${movie.year||'?'} - ${formatLabel}</div>
       </div>
       <div class="card-type-badge">${formatLabel}</div>
-      ${rank?`<div class="rank-badge">#${rank}</div>`:''}
       ${showMatch?`<div class="match-percent card-front-match">${matchPct}% match</div>`:''}
     </div>
     <div class="card-body">
