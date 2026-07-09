@@ -148,11 +148,6 @@
     <input class="title-search-input" id="titleSearch" type="search" placeholder="search local + Wikipedia" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)">
     <button class="tb-filter-btn" id="unifiedSearchBtn" onclick="searchWikipediaFromUnifiedInput()">search wiki</button>
     <button class="tb-filter-btn tag-delete-mode" id="tagDeleteModeBtn" onclick="toggleTagDeleteMode()">Tag clicks: explore</button>
-    <button class="tb-filter-btn" id="randomPaletteBtn" onclick="generateRandomPalette(event)">Random palette</button>
-    <label>Card size</label>
-    <button class="tb-filter-btn card-size-btn" data-size="compact" onclick="updateCardSize('compact',this)">Compact</button>
-    <button class="tb-filter-btn card-size-btn" data-size="comfortable" onclick="updateCardSize('comfortable',this)">Comfortable</button>
-    <button class="tb-filter-btn card-size-btn" data-size="large" onclick="updateCardSize('large',this)">Large</button>
   </div>
   <div class="wiki-search-results" id="wikiSearchResults" hidden></div>
 

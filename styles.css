@@ -224,9 +224,11 @@
   .genre-label{font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted2);margin-right:2px}
   .genre-chip{font-size:9px;color:var(--tag-text,var(--muted));border:1px solid var(--tag-border,var(--border));border-radius:10px;padding:2px 7px;text-transform:capitalize;background:var(--palette-chip-bg,transparent);font-family:inherit;line-height:inherit}.genre-chip.clickable{cursor:pointer}.genre-chip.clickable:hover,.genre-chip.clickable:focus-visible{color:var(--accent);border-color:var(--accent2);background:color-mix(in srgb,var(--accent) 12%,transparent);outline:none}
   .genre-chip.matched{color:var(--accent);border-color:var(--accent2);background:color-mix(in srgb,var(--accent) 12%,transparent)}
-  .watch-row{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin:4px 0}
-  .watch-chip{font-size:9px;border:1px solid var(--tag-border,var(--border));border-radius:10px;padding:2px 7px;text-transform:capitalize;font-family:inherit;line-height:inherit}
-  .watch-link{font-size:9px;color:var(--card-muted,var(--muted));text-decoration:underline;margin-left:2px}
+  .watch-row{display:flex;flex-direction:column;gap:4px;margin:6px 0}
+  .watch-platform-row-item{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
+  .watch-chip{flex:none;font-size:9px;border:1px solid var(--tag-border,var(--border));border-radius:10px;padding:2px 7px;text-transform:capitalize;font-family:inherit;line-height:inherit}
+  .watch-countries{font-size:10px;color:var(--card-muted,var(--muted));line-height:1.4}
+  .watch-link{font-size:9px;color:var(--card-muted,var(--muted));text-decoration:underline;margin-top:2px}
   .watch-link:hover{color:var(--accent)}
   .tag{font-size:9px;border-radius:999px;padding:3px 7px;background:rgba(255,255,255,.045);border-color:rgba(255,255,255,.09);color:#bca895}
   .tag.matched{border-color:rgba(255,208,90,.56);color:#ffd05a;background:rgba(255,208,90,.1)}
@@ -827,37 +829,37 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .movie-card.show-card .title-format{color:var(--show-card-border, var(--green));border-color:var(--show-card-border, var(--green));background:var(--palette-chip-bg)}
 
 /* v16 image-forward cards and palette-aware chrome */
-/* v18: collapsed cards stay poster-shaped (aspect-ratio, absolutely-stacked
-   faces for the crossfade); once revealed, the body leaves absolute
-   positioning and becomes the card's only in-flow box, so the card's height
-   grows to fit its actual content instead of clipping it or scrolling inside
-   a fixed poster-shaped box. */
-/* v19: card width is user-chosen (Compact/Comfortable/Large) via
-   --card-min-width, set by updateCardSize(). 300px default. */
-.movies-grid{grid-template-columns:repeat(auto-fill,minmax(var(--card-min-width,300px),1fr));gap:14px}
-.movie-card{aspect-ratio:2/3;border-radius:8px;overflow:hidden;perspective:1200px;cursor:pointer;background:var(--film-card-bg)!important;position:relative}
+/* v20: replaces the flip/crossfade with expand-in-place. Collapsed cards are
+   plain poster tiles (no absolute-stacked faces, no 3D transform). Clicking
+   a card adds .expanded: it spans the full grid row (grid-column:1/-1) and
+   lays out poster (left, fixed width) + full detail body (right, flexes to
+   fill) side by side. CSS Grid reflows the other cards below it on its own —
+   that reflow itself is a discrete layout change, not a smoothly animated
+   one (no current browser can smoothly tween a grid-column span change);
+   the poster/body crossfade within the expanding card is what's animated.
+   Card width is fixed-compact only (CARD_MIN_WIDTH_PX, no size picker). */
+.movies-grid{grid-template-columns:repeat(auto-fill,minmax(var(--card-min-width,200px),1fr));gap:12px}
+.movie-card{display:flex;align-items:stretch;aspect-ratio:2/3;border-radius:8px;overflow:hidden;cursor:pointer;background:var(--film-card-bg)!important;position:relative;grid-column:span 1;transition:grid-column .01s}
 .movie-card.show-card{background:var(--show-card-bg)!important}
-.card-poster,.card-body{position:absolute;inset:0;display:flex;flex-direction:column;backface-visibility:hidden;transition:transform .24s ease,opacity .24s ease}
-.card-poster{display:flex!important;justify-content:flex-end;background:var(--film-card-bg);transform:rotateY(0);opacity:1}
+.card-poster{position:relative;flex:1 1 auto;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;background:var(--film-card-bg)}
 .show-card .card-poster{background:var(--show-card-bg)}
 .card-poster-img,.card-poster-inner{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .card-poster-inner{display:block;background-size:cover}
 .card-poster::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.08),rgba(0,0,0,.74));pointer-events:none}
-.card-front-copy{position:relative;z-index:2;padding:18px 16px;color:#fff;text-shadow:0 2px 18px rgba(0,0,0,.65)}
-.card-front-title{font-size:20px;font-weight:700;line-height:1.12}
-.card-front-meta{margin-top:5px;font-family:'DM Mono',monospace;font-size:11px;color:rgba(255,255,255,.82)}
-.card-front-match{position:absolute;z-index:3;left:12px;top:12px;margin:0}
+.card-front-copy{position:relative;z-index:2;padding:10px 9px;color:#fff;text-shadow:0 2px 18px rgba(0,0,0,.65)}
+.card-front-title{font-size:13px;font-weight:700;line-height:1.15}
+.card-front-meta{margin-top:3px;font-family:'DM Mono',monospace;font-size:9px;color:rgba(255,255,255,.82)}
+.card-front-match{position:absolute;z-index:3;left:8px;top:8px;margin:0}
+.format-badge{position:absolute;z-index:3;right:8px;top:8px;font-size:8px;font-weight:700;letter-spacing:.5px;padding:3px 7px;border-radius:999px;text-transform:uppercase;line-height:1.4}
+.movie-card.film-card .format-badge{background:var(--movie-badge-bg,var(--accent));color:var(--movie-badge-text,#000)}
+.movie-card.show-card .format-badge{background:var(--show-badge-bg,var(--green));color:var(--show-badge-text,#000)}
 .rank-badge{z-index:4}
-.card-body{padding:14px;gap:8px;background:var(--film-card-bg);color:var(--card-text);transform:rotateY(8deg) translateY(8px);opacity:0;pointer-events:none}
+.card-body{display:none;flex-direction:column;flex:1 1 auto;min-width:0;padding:14px;gap:8px;background:var(--film-card-bg);color:var(--card-text)}
 .show-card .card-body{background:var(--show-card-bg)}
-@media (hover:hover){
-  .movie-card:hover{aspect-ratio:auto;height:auto;overflow:visible}
-  .movie-card:hover .card-poster{transform:rotateY(-8deg);opacity:0;pointer-events:none}
-  .movie-card:hover .card-body{position:static;transform:none;opacity:1;pointer-events:auto}
-}
-.movie-card.revealed{aspect-ratio:auto;height:auto;overflow:visible}
-.movie-card.revealed .card-poster{transform:rotateY(-8deg);opacity:0;pointer-events:none}
-.movie-card.revealed .card-body{position:static;transform:none;opacity:1;pointer-events:auto}
+.movie-card.expanded{grid-column:1 / -1;aspect-ratio:auto;cursor:default}
+.movie-card.expanded .card-poster{flex:0 0 220px;max-width:220px}
+.movie-card.expanded .card-front-copy{display:none} /* full title/meta already shown in the expanded body */
+.movie-card.expanded .card-body{display:flex}
 .card-head{display:block}
 .format-row .match-percent{display:none}
 .source-link-row{display:none}
@@ -870,5 +872,6 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .show-card .genre-chip.clickable:hover,.show-card .genre-chip.matched{color:var(--show-card-border);border-color:var(--show-card-border);background:color-mix(in srgb,var(--show-card-border) 16%,var(--show-chip-bg))}
 @media(max-width:768px){
   .movies-grid{grid-template-columns:1fr}
-  .movie-card{min-height:420px;aspect-ratio:3/4}
+  .movie-card{aspect-ratio:3/4}
+  .movie-card.expanded .card-poster{flex:0 0 130px;max-width:130px}
 }

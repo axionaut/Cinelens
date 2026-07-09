@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 19;
+const APP_VERSION = 20;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -251,20 +251,48 @@ const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // rather than exact string, and the derived per-platform country list is the
 // only thing stored — never the full raw multi-region response.
 const TMDB_DATA_VERSION = 2;
+// JioHotstar's own pattern is checked before Disney+'s: Disney+'s pattern
+// matches "hotstar" generically (regional naming, e.g. "Disney+ Hotstar" in
+// India before the 2025 merger), and "JioHotstar" contains that same
+// substring — listing JioHotstar first means it wins the match instead of
+// being silently absorbed into Disney+. JioCinema merged into JioHotstar in
+// February 2025 (confirmed against TMDB, 2026-07-09); the pattern still
+// matches the retired "JioCinema" name too, in case older stored data or an
+// unmerged TMDB region still uses it.
 const OTT_PLATFORM_PATTERNS = [
   ['Netflix', /netflix/i],
   ['Amazon Prime Video', /prime video|amazon prime/i],
+  ['JioHotstar', /jiohotstar|jio hotstar|jiocinema|jio cinema/i],
   ['Disney+', /disney\+|disney plus|hotstar/i],
   ['Apple TV+', /apple tv/i],
   ['Max', /^max$|hbo max/i],
   ['Hulu', /hulu/i],
   ['Paramount+', /paramount/i],
   ['Peacock', /peacock/i],
-  ['JioCinema', /jiocinema|jio cinema/i],
   ['SonyLIV', /sonyliv|sony liv/i],
   ['ZEE5', /zee5/i]
 ];
 const OTT_PLATFORM_NAMES = OTT_PLATFORM_PATTERNS.map(([name]) => name);
+
+// ISO 3166-1 alpha-2 -> English name, for the countries TMDB/JustWatch
+// realistically return watch-provider data for. Falls back to the raw code
+// if a region isn't in this table (safe — never throws, never blank).
+const COUNTRY_NAMES = {
+  AD:'Andorra', AE:'United Arab Emirates', AR:'Argentina', AT:'Austria', AU:'Australia',
+  BE:'Belgium', BG:'Bulgaria', BR:'Brazil', CA:'Canada', CH:'Switzerland', CL:'Chile',
+  CO:'Colombia', CZ:'Czechia', DE:'Germany', DK:'Denmark', EC:'Ecuador', EE:'Estonia',
+  EG:'Egypt', ES:'Spain', FI:'Finland', FR:'France', GB:'United Kingdom', GR:'Greece',
+  HK:'Hong Kong', HR:'Croatia', HU:'Hungary', ID:'Indonesia', IE:'Ireland', IL:'Israel',
+  IN:'India', IS:'Iceland', IT:'Italy', JP:'Japan', KR:'South Korea', LT:'Lithuania',
+  LU:'Luxembourg', LV:'Latvia', MX:'Mexico', MY:'Malaysia', NL:'Netherlands', NO:'Norway',
+  NZ:'New Zealand', PE:'Peru', PH:'Philippines', PK:'Pakistan', PL:'Poland', PT:'Portugal',
+  RO:'Romania', RU:'Russia', SA:'Saudi Arabia', SE:'Sweden', SG:'Singapore', SK:'Slovakia',
+  TH:'Thailand', TR:'Turkey', TW:'Taiwan', UA:'Ukraine', US:'United States', VE:'Venezuela',
+  VN:'Vietnam', ZA:'South Africa'
+};
+function countryName(code) {
+  return COUNTRY_NAMES[String(code || '').toUpperCase()] || String(code || '');
+}
 let lastTmdbRequestAt = 0;
 let tmdbBackfillTimer = null;
 let tmdbBackfillInProgress = false;
@@ -600,487 +628,104 @@ function tmdbUrlForMovie(movie) {
   return `https://www.themoviedb.org/${endpoint}/${movie.tmdbId}`;
 }
 
-function clampPaletteNumber(value, min, max) {
-  return Math.min(max, Math.max(min, Number(value) || 0));
-}
+// ─────────────────────────────────────────────
+// COLOURS — the one place to edit CineLens's theme (v20)
+// The old random-palette generator (HSL math, contrast solving, per-session
+// randomisation) is removed entirely, per Nitin's request. Every colour in
+// the app now comes from this single hand-edited table. To change the
+// theme: edit a hex/hsl value below, save, reload — no other file or
+// function needs to change.
+//
+// Each entry is a plain CSS colour string (hex, hsl(), rgba(), anything CSS
+// accepts). `movieBadge*`/`showBadge*` are the small solid-background pills
+// on card posters that say MOVIE/SHOW — the movie/show visual distinction
+// used to be a whole-card background tint, which stopped being visible once
+// cards became poster images; a small opaque badge stays legible over any
+// image.
+// ─────────────────────────────────────────────
+const CINELENS_COLORS = {
+  accent:            '#ffcc33', // primary accent (buttons, match %, links)
+  accent2:           '#ff6a3d', // secondary accent (hover states, borders)
+  text:              'hsl(35 22% 94%)',   // main page text
+  cardText:          'hsl(35 22% 93%)',   // text on card backs
+  surface:           'hsl(35 26% 10%)',   // modals, dropdowns
+  surface2:          'hsl(35 24% 15%)',   // buttons, secondary surfaces
+  border:            'hsl(24 76% 38% / 0.72)',
+  muted:             'hsl(35 18% 78%)',   // secondary page text
+  muted2:            'hsl(35 14% 70%)',   // tertiary page text
+  cardMuted:         'hsl(35 16% 76%)',   // secondary text on card backs
+  tagText:           'hsl(35 20% 92%)',
+  filmTagText:       'hsl(35 20% 92%)',   // tag text on movie cards
+  showTagText:       'hsl(168 20% 92%)',  // tag text on show cards
+  buttonText:        'hsl(35 30% 7%)',    // text on solid accent buttons
+  tagBg:             'hsl(35 38% 20%)',
+  tagBorder:         'hsl(35 66% 46% / 0.82)',
+  pageBg:            'hsl(35 32% 6%)',    // page background
+  headerBg:          'hsl(35 30% 8%)',
+  controlBg:         'hsl(35 28% 11%)',   // control deck background
+  controlBorder:     'hsl(18 80% 56% / 0.48)',
+  filmCardBg:        'hsl(35 29% 13%)',   // movie card background
+  filmCardBorder:    '#ffcc33',
+  showCardBg:        'hsl(168 28% 12%)',  // show card background
+  showCardBorder:    '#68ddb8',
+  chipBg:            'hsl(35 34% 22%)',   // generic tag/genre chips
+  chipBorder:        'hsl(35 72% 52% / 0.68)',
+  filmChipBg:        'hsl(35 36% 22%)',   // tag chips on movie cards
+  filmChipBorder:    'hsl(35 72% 52% / 0.68)',
+  showChipBg:        'hsl(168 34% 21%)',  // tag chips on show cards
+  showChipBorder:    'hsl(168 62% 54% / 0.68)',
+  sourceBg:          'hsl(18 38% 21%)',   // Wiki/TMDB/Google link buttons
+  sourceBorder:      'hsl(18 78% 54% / 0.62)',
+  // MOVIE / SHOW poster badge — solid, opaque, legible over any image
+  movieBadgeBg:      '#ffcc33',
+  movieBadgeText:    'hsl(35 30% 7%)',
+  showBadgeBg:       '#68ddb8',
+  showBadgeText:     'hsl(168 40% 8%)'
+};
 
-function wrapHue(hue) {
-  return ((Number(hue) % 360) + 360) % 360;
-}
-
-function cssHsl(h, s, l, alpha=null) {
-  const hue = Math.round(wrapHue(h));
-  const sat = Math.round(clampPaletteNumber(s, 0, 100));
-  const light = Math.round(clampPaletteNumber(l, 0, 100));
-  if (alpha === null || alpha === undefined) return `hsl(${hue} ${sat}% ${light}%)`;
-  return `hsl(${hue} ${sat}% ${light}% / ${clampPaletteNumber(alpha, 0, 1).toFixed(3)})`;
-}
-
-function paletteRandomInt(min, max) {
-  return Math.floor(min + Math.random() * (max - min + 1));
-}
-
-function paletteRandomFloat(min, max) {
-  return min + Math.random() * (max - min);
-}
-
-function randomHexSeed() {
-  return `#${Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')}`;
-}
-
-function hexToRgb(hex) {
-  const clean = String(hex || '').replace(/[^a-f0-9]/gi, '').slice(0, 6).padEnd(6, '0');
-  return {
-    r:parseInt(clean.slice(0, 2), 16),
-    g:parseInt(clean.slice(2, 4), 16),
-    b:parseInt(clean.slice(4, 6), 16)
-  };
-}
-
-function rgbToHsl({ r=0, g=0, b=0 }={}) {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  let h = 0;
-  let s = 0;
-  const l = (max + min) / 2;
-  if (max !== min) {
-    const d = max - min;
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    switch (max) {
-      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-      case g: h = (b - r) / d + 2; break;
-      default: h = (r - g) / d + 4; break;
-    }
-    h *= 60;
-  }
-  return { h:wrapHue(h), s:s * 100, l:l * 100 };
-}
-
-function hslToRgb(h, s, l) {
-  h = wrapHue(h) / 360;
-  s = clampPaletteNumber(s, 0, 100) / 100;
-  l = clampPaletteNumber(l, 0, 100) / 100;
-  if (s === 0) {
-    const grey = Math.round(l * 255);
-    return { r:grey, g:grey, b:grey };
-  }
-  const hue2rgb = (p, q, t) => {
-    if (t < 0) t += 1;
-    if (t > 1) t -= 1;
-    if (t < 1 / 6) return p + (q - p) * 6 * t;
-    if (t < 1 / 2) return q;
-    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-    return p;
-  };
-  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-  const p = 2 * l - q;
-  return {
-    r:Math.round(hue2rgb(p, q, h + 1 / 3) * 255),
-    g:Math.round(hue2rgb(p, q, h) * 255),
-    b:Math.round(hue2rgb(p, q, h - 1 / 3) * 255)
-  };
-}
-
-function rgbToHex({ r=0, g=0, b=0 }={}) {
-  const part = value => clampPaletteNumber(Math.round(value), 0, 255).toString(16).padStart(2, '0');
-  return `#${part(r)}${part(g)}${part(b)}`;
-}
-
-function hslToHex(h, s, l) {
-  return rgbToHex(hslToRgb(h, s, l));
-}
-
-function paletteLuminance({ r=0, g=0, b=0 }={}) {
-  const channel = value => {
-    const scaled = value / 255;
-    return scaled <= 0.03928 ? scaled / 12.92 : Math.pow((scaled + 0.055) / 1.055, 2.4);
-  };
-  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
-}
-
-function paletteContrast(rgbA, rgbB) {
-  const a = paletteLuminance(rgbA);
-  const b = paletteLuminance(rgbB);
-  const lighter = Math.max(a, b);
-  const darker = Math.min(a, b);
-  return (lighter + 0.05) / (darker + 0.05);
-}
-
-function readableTextForHsl(bgH, bgS, bgL) {
-  return snapReadableHsl({
-    h:bgH,
-    s:paletteRandomFloat(10, 28),
-    l:bgL > 50 ? 12 : 94,
-    surfaces:[{ h:bgH, s:bgS, l:bgL }],
-    threshold:4.5
-  });
-}
-
-function mutedTextFor(text, bgH, surfaces=null) {
-  return cssHslObject(snapReadableHsl({
-    h:bgH,
-    s:paletteRandomFloat(10, 24),
-    l:text.l < 50 ? 36 : 72,
-    surfaces:surfaces || [],
-    threshold:4.5
-  }));
-}
-
-function secondaryMutedTextFor(text, bgH, surfaces=null) {
-  return cssHslObject(snapReadableHsl({
-    h:bgH,
-    s:paletteRandomFloat(8, 20),
-    l:text.l < 50 ? 49 : 61,
-    surfaces:surfaces || [],
-    threshold:4.5
-  }));
-}
-
-function normalizeSeedHsl(seedHex) {
-  const seed = rgbToHsl(hexToRgb(seedHex));
-  return {
-    h:seed.h,
-    s:clampPaletteNumber(seed.s, 0, 100),
-    l:clampPaletteNumber(seed.l, 0, 100)
-  };
-}
-
-function paletteHueDistance(a, b) {
-  const delta = Math.abs(wrapHue(a) - wrapHue(b));
-  return Math.min(delta, 360 - delta);
-}
-
-function paletteToneRange(tone, role='page') {
-  const map = {
-    dark:{
-      page:[5, 17], surface:[8, 19], control:[8, 22], card:[9, 24], chip:[13, 27]
-    },
-    light:{
-      page:[78, 96], surface:[82, 98], control:[75, 94], card:[76, 96], chip:[70, 92]
-    }
-  };
-  const range = (map[tone] || map.dark)[role] || (map[tone] || map.dark).page;
-  return paletteRandomFloat(range[0], range[1]);
-}
-
-function paletteSaturationFor(tone, role='page') {
-  const limits = {
-    dark:{ page:[22, 58], surface:[18, 46], control:[26, 66], card:[34, 76], chip:[36, 82] },
-    light:{ page:[18, 60], surface:[16, 52], control:[24, 68], card:[28, 74], chip:[32, 86] }
-  };
-  const range = (limits[tone] || limits.dark)[role] || (limits[tone] || limits.dark).page;
-  return paletteRandomFloat(range[0], range[1]);
-}
-
-function cssHslObject(color, alpha=null) {
-  return cssHsl(color.h, color.s, color.l, alpha);
-}
-
-function paletteContrastForHsl(fg, bg) {
-  return paletteContrast(hslToRgb(fg.h, fg.s, fg.l), hslToRgb(bg.h, bg.s, bg.l));
-}
-
-function minPaletteContrast(fg, surfaces) {
-  return surfaces.reduce((min, bg) => Math.min(min, paletteContrastForHsl(fg, bg)), Infinity);
-}
-
-function snapReadableHsl({ h, s, l, surfaces, threshold=4.5 }={}) {
-  const base = { h:wrapHue(h), s:clampPaletteNumber(s, 0, 100), l:clampPaletteNumber(l, 0, 100) };
-  const targets = (surfaces || []).filter(Boolean);
-  if (!targets.length || minPaletteContrast(base, targets) >= threshold) return base;
-  const directions = base.l >= 50 ? [1, -1] : [-1, 1];
-  for (const direction of directions) {
-    for (let step = 0; step <= 100; step++) {
-      const candidate = { ...base, l:clampPaletteNumber(base.l + direction * step, 0, 100) };
-      if (minPaletteContrast(candidate, targets) >= threshold) return candidate;
-    }
-  }
-  return base;
-}
-
-function randomizedBackground({ h, s, l, h2=h + 120, s2=s, l2=l, role='page' }={}) {
-  const maxSpread = role === 'page' ? 8 : 6;
-  const baseL = clampPaletteNumber(l, 0, 100);
-  const stops = [
-    { h:wrapHue(h), s:clampPaletteNumber(s, 0, 100), l:baseL },
-    { h:wrapHue(h2), s:clampPaletteNumber(s2, 0, 100), l:clampPaletteNumber(l2, baseL - maxSpread, baseL + maxSpread) }
-  ];
-  const style = role === 'page' && Math.random() > 0.28 ? 'linear' : 'solid';
-  if (style === 'solid') return { css:cssHslObject(stops[0]), style, stops:[stops[0]] };
-  return {
-    css:`linear-gradient(${paletteRandomInt(12, 168)}deg, ${cssHslObject(stops[0])} 0%, ${cssHslObject(stops[1])} 100%)`,
-    style,
-    stops
-  };
-}
-
-function paletteStopSpread(stops=[]) {
-  if (!stops.length) return 0;
-  const lights = stops.map(stop => Number(stop.l || 0));
-  return Math.max(...lights) - Math.min(...lights);
-}
-
-function defaultReadablePalette() {
-  return {
-    version:4,
-    seedHex:'#ffcc33',
-    mainHex:'#ffcc33',
-    tone:'dark',
-    cardTone:'dark',
-    fallback:true,
-    backgroundStyles:{ page:'solid', control:'solid', film:'solid', show:'solid' },
-    meta:{
-      surfaces:{
-        pageBg:[{ h:35, s:32, l:6 }],
-        headerBg:[{ h:35, s:30, l:8 }],
-        controlBg:[{ h:35, s:28, l:11 }],
-        filmCardBg:[{ h:35, s:29, l:13 }],
-        showCardBg:[{ h:168, s:28, l:12 }],
-        tagBg:[{ h:35, s:38, l:20 }],
-        chipBg:[{ h:35, s:34, l:22 }],
-        sourceBg:[{ h:18, s:38, l:21 }]
-      }
-    },
-    updatedAt:nowStamp(),
-    colors:{
-      accent:'#ffcc33',
-      accent2:'#ff6a3d',
-      text:'hsl(35 22% 94%)',
-      cardText:'hsl(35 22% 93%)',
-      surface:'hsl(35 26% 10%)',
-      surface2:'hsl(35 24% 15%)',
-      border:'hsl(24 76% 38% / 0.720)',
-      muted:'hsl(35 18% 78%)',
-      muted2:'hsl(35 14% 70%)',
-      cardMuted:'hsl(35 16% 76%)',
-      tagText:'hsl(35 20% 92%)',
-      filmTagText:'hsl(35 20% 92%)',
-      showTagText:'hsl(168 20% 92%)',
-      buttonText:'hsl(35 30% 7%)',
-      tagBg:'hsl(35 38% 20%)',
-      tagBorder:'hsl(35 66% 46% / 0.820)',
-      pageBg:'hsl(35 32% 6%)',
-      headerBg:'hsl(35 30% 8%)',
-      controlBg:'hsl(35 28% 11%)',
-      controlBorder:'hsl(18 80% 56% / 0.480)',
-      filmCardBg:'hsl(35 29% 13%)',
-      filmCardBorder:'#ffcc33',
-      showCardBg:'hsl(168 28% 12%)',
-      showCardBorder:'#68ddb8',
-      chipBg:'hsl(35 34% 22%)',
-      chipBorder:'hsl(35 72% 52% / 0.680)',
-      filmChipBg:'hsl(35 36% 22%)',
-      filmChipBorder:'hsl(35 72% 52% / 0.680)',
-      showChipBg:'hsl(168 34% 21%)',
-      showChipBorder:'hsl(168 62% 54% / 0.680)',
-      sourceBg:'hsl(18 38% 21%)',
-      sourceBorder:'hsl(18 78% 54% / 0.620)'
-    }
-  };
-}
-
-function validateGeneratedPalette(palette) {
-  const c = palette?.colors || {};
-  const s = palette?.meta?.surfaces || {};
-  const color = value => parsePaletteColor(value);
-  const checks = [
-    [c.text, [...s.pageBg, ...s.headerBg, ...s.controlBg], 4.5, 'text'],
-    [c.muted, [...s.pageBg, ...s.headerBg, ...s.controlBg], 4.5, 'muted'],
-    [c.muted2, [...s.pageBg, ...s.headerBg, ...s.controlBg], 4.5, 'muted2'],
-    [c.cardText, [...s.filmCardBg, ...s.showCardBg], 4.5, 'cardText'],
-    [c.cardMuted, [...s.filmCardBg, ...s.showCardBg], 4.5, 'cardMuted'],
-    [c.tagText || c.cardText, [...s.tagBg, ...s.chipBg, ...s.sourceBg], 4.5, 'tagText'],
-    [c.filmTagText || c.tagText || c.cardText, s.filmChipBg || s.chipBg || [], 4.5, 'filmTagText'],
-    [c.showTagText || c.tagText || c.cardText, s.showChipBg || s.chipBg || [], 4.5, 'showTagText'],
-    [c.accent, [...s.pageBg, ...s.headerBg, ...s.controlBg, ...s.sourceBg], 3, 'accent'],
-    [c.accent2, [...s.pageBg, ...s.headerBg, ...s.controlBg, ...s.sourceBg], 3, 'accent2'],
-    [c.buttonText || c.text, [color(c.accent), color(c.accent2)].filter(Boolean), 4.5, 'buttonText']
-  ];
-  const failed = checks.find(([fgCss, backgrounds, threshold]) => {
-    const fg = color(fgCss);
-    return !fg || !backgrounds.length || minPaletteContrast(fg, backgrounds) < threshold;
-  });
-  if (failed) return { ok:false, reason:failed[3] };
-  const allSurfaces = Object.values(s).flat();
-  const polarityOk = palette.tone === 'light'
-    ? allSurfaces.every(surface => surface.l > 50)
-    : allSurfaces.every(surface => surface.l < 50);
-  if (!polarityOk) return { ok:false, reason:'polarity' };
-  if (paletteStopSpread(s.pageBg || []) > 8) return { ok:false, reason:'gradient-spread' };
-  return { ok:true, reason:'' };
-}
-
-function parsePaletteColor(value) {
-  const text = String(value || '').trim();
-  if (!text) return null;
-  if (text.startsWith('#')) return rgbToHsl(hexToRgb(text));
-  const match = text.match(/hsla?\(\s*([\d.]+)(?:deg)?[\s,]+([\d.]+)%[\s,]+([\d.]+)%/i);
-  if (!match) return null;
-  return { h:wrapHue(Number(match[1])), s:clampPaletteNumber(Number(match[2]), 0, 100), l:clampPaletteNumber(Number(match[3]), 0, 100) };
-}
-
-function buildPaletteCandidate(seedHexOverride='') {
-  const seedHex = seedHexOverride || randomHexSeed();
-  const seed = normalizeSeedHsl(seedHex);
-  const hue = seed.h;
-  const scheme = [[180, 30], [150, -36], [118, 238], [210, 44], [92, 196], [72, 228]][paletteRandomInt(0, 5)];
-  const appTone = Math.random() < 0.52 ? 'dark' : 'light';
-  const cardTone = appTone;
-  const accent2Hue = hue + scheme[1] + paletteRandomFloat(-10, 10);
-  const filmHue = hue + paletteRandomFloat(-10, 10);
-  let showHue = hue + scheme[0] + paletteRandomFloat(-10, 10);
-  if (paletteHueDistance(filmHue, showHue) < 70) showHue = filmHue + 150;
-  const ladder = appTone === 'dark'
-    ? { page:paletteRandomFloat(5, 10), header:paletteRandomFloat(8, 13), control:paletteRandomFloat(11, 17), card:paletteRandomFloat(13, 21), chip:paletteRandomFloat(19, 28) }
-    : { page:paletteRandomFloat(92, 97), header:paletteRandomFloat(88, 94), control:paletteRandomFloat(84, 91), card:paletteRandomFloat(78, 87), chip:paletteRandomFloat(70, 81) };
-  const seedSurfaceS = clampPaletteNumber(seed.s * 0.42 + paletteRandomFloat(0, 8), 0, 52);
-  const pageS = clampPaletteNumber(seed.s * 0.34 + paletteRandomFloat(0, 5), 0, 42);
-  const surfaceS = seedSurfaceS;
-  const cardS = clampPaletteNumber(seed.s * 0.48 + paletteRandomFloat(0, 7), 0, 58);
-  const chipS = clampPaletteNumber(seed.s * 0.58 + paletteRandomFloat(0, 8), 0, 68);
-  const pageBg = randomizedBackground({ h:hue, s:pageS, l:ladder.page, h2:accent2Hue, s2:pageS, l2:ladder.page + (appTone === 'dark' ? paletteRandomFloat(2, 7) : -paletteRandomFloat(2, 7)), role:'page' });
-  const headerBg = { h:hue, s:surfaceS, l:ladder.header };
-  const controlBg = { h:hue + 6, s:surfaceS, l:ladder.control };
-  const filmCardBg = { h:filmHue, s:cardS, l:ladder.card };
-  const showCardBg = { h:showHue, s:cardS, l:ladder.card + (appTone === 'dark' ? paletteRandomFloat(0, 2) : -paletteRandomFloat(0, 2)) };
-  const tagBg = { h:hue, s:chipS, l:ladder.chip };
-  const chipBg = { h:hue + 4, s:chipS, l:ladder.chip + (appTone === 'dark' ? paletteRandomFloat(0, 3) : -paletteRandomFloat(0, 3)) };
-  const sourceBg = { h:accent2Hue, s:chipS, l:ladder.chip + (appTone === 'dark' ? paletteRandomFloat(0, 3) : -paletteRandomFloat(0, 3)) };
-  const filmChipBg = { h:filmHue, s:chipS, l:ladder.chip + (appTone === 'dark' ? paletteRandomFloat(0, 2) : -paletteRandomFloat(0, 2)) };
-  const showChipBg = { h:showHue, s:chipS, l:ladder.chip + (appTone === 'dark' ? paletteRandomFloat(0, 2) : -paletteRandomFloat(0, 2)) };
-  const pageSurfaces = [...pageBg.stops, headerBg, controlBg];
-  const cardSurfaces = [filmCardBg, showCardBg];
-  const chipSurfaces = [tagBg, chipBg, sourceBg, filmChipBg, showChipBg];
-  const text = snapReadableHsl({ h:hue, s:paletteRandomFloat(10, 22), l:appTone === 'dark' ? 92 : 10, surfaces:pageSurfaces, threshold:4.5 });
-  const muted = snapReadableHsl({ h:hue, s:paletteRandomFloat(8, 18), l:appTone === 'dark' ? 76 : 27, surfaces:pageSurfaces, threshold:4.5 });
-  const muted2 = snapReadableHsl({ h:hue, s:paletteRandomFloat(6, 16), l:appTone === 'dark' ? 68 : 34, surfaces:pageSurfaces, threshold:4.5 });
-  const cardText = snapReadableHsl({ h:filmHue, s:paletteRandomFloat(10, 22), l:appTone === 'dark' ? 92 : 10, surfaces:cardSurfaces, threshold:4.5 });
-  const cardMuted = snapReadableHsl({ h:filmHue, s:paletteRandomFloat(8, 18), l:appTone === 'dark' ? 74 : 28, surfaces:cardSurfaces, threshold:4.5 });
-  const tagText = snapReadableHsl({ h:hue, s:paletteRandomFloat(10, 20), l:appTone === 'dark' ? 92 : 10, surfaces:chipSurfaces, threshold:4.5 });
-  const filmTagText = snapReadableHsl({ h:filmHue, s:paletteRandomFloat(8, 18), l:appTone === 'dark' ? 92 : 10, surfaces:[filmChipBg], threshold:4.5 });
-  const showTagText = snapReadableHsl({ h:showHue, s:paletteRandomFloat(8, 18), l:appTone === 'dark' ? 92 : 10, surfaces:[showChipBg], threshold:4.5 });
-  const accentL = appTone === 'dark' ? paletteRandomFloat(58, 70) : paletteRandomFloat(30, 43);
-  const accent = snapReadableHsl({ h:hue, s:seed.s, l:accentL, surfaces:[...pageSurfaces, sourceBg], threshold:3 });
-  const accent2 = snapReadableHsl({ h:accent2Hue, s:paletteRandomFloat(74, 92), l:accentL + (appTone === 'dark' ? -4 : 4), surfaces:[...pageSurfaces, sourceBg], threshold:3 });
-  const buttonText = snapReadableHsl({ h:hue, s:12, l:appTone === 'dark' ? 8 : 96, surfaces:[accent, accent2], threshold:4.5 });
-  const palette = {
-    version:4,
-    seedHex,
-    mainHex:hslToHex(accent.h, accent.s, accent.l),
-    tone:appTone,
-    cardTone,
-    backgroundStyles:{ page:pageBg.style, control:'solid', film:'solid', show:'solid' },
-    meta:{
-      surfaces:{
-        pageBg:pageBg.stops,
-        headerBg:[headerBg],
-        controlBg:[controlBg],
-        filmCardBg:[filmCardBg],
-        showCardBg:[showCardBg],
-        tagBg:[tagBg],
-        chipBg:[chipBg],
-        filmChipBg:[filmChipBg],
-        showChipBg:[showChipBg],
-        sourceBg:[sourceBg]
-      }
-    },
-    updatedAt:nowStamp(),
-    colors:{
-      accent:cssHslObject(accent),
-      accent2:cssHslObject(accent2),
-      text:cssHslObject(text),
-      cardText:cssHslObject(cardText),
-      surface:cssHsl(hue, surfaceS, appTone === 'dark' ? ladder.header : ladder.header),
-      surface2:cssHsl(hue + 8, surfaceS, appTone === 'dark' ? ladder.control : ladder.control),
-      border:cssHsl(accent2Hue, 52, appTone === 'dark' ? 42 : 52, 0.72),
-      muted:cssHslObject(muted),
-      muted2:cssHslObject(muted2),
-      cardMuted:cssHslObject(cardMuted),
-      tagText:cssHslObject(tagText),
-      filmTagText:cssHslObject(filmTagText),
-      showTagText:cssHslObject(showTagText),
-      buttonText:cssHslObject(buttonText),
-      tagBg:cssHslObject(tagBg),
-      tagBorder:cssHsl(hue, 58, appTone === 'dark' ? 48 : 44, 0.82),
-      pageBg:pageBg.css,
-      headerBg:cssHslObject(headerBg),
-      controlBg:cssHslObject(controlBg),
-      controlBorder:cssHsl(accent2Hue, 62, appTone === 'dark' ? 50 : 42, 0.48),
-      filmCardBg:cssHslObject(filmCardBg),
-      filmCardBorder:cssHslObject(accent),
-      showCardBg:cssHslObject(showCardBg),
-      showCardBorder:cssHslObject(accent2),
-      chipBg:cssHslObject(chipBg),
-      chipBorder:cssHsl(hue, 62, appTone === 'dark' ? 54 : 40, 0.68),
-      filmChipBg:cssHslObject(filmChipBg),
-      filmChipBorder:cssHsl(filmHue, 62, appTone === 'dark' ? 54 : 40, 0.68),
-      showChipBg:cssHslObject(showChipBg),
-      showChipBorder:cssHsl(showHue, 62, appTone === 'dark' ? 54 : 40, 0.68),
-      sourceBg:cssHslObject(sourceBg),
-      sourceBorder:cssHsl(accent2Hue, 66, appTone === 'dark' ? 56 : 38, 0.62)
-    }
-  };
-  return validateGeneratedPalette(palette).ok ? palette : null;
-}
-
-function buildRandomPalette(options={}) {
-  if (options.forceFallback) return defaultReadablePalette();
-  for (let attempt = 0; attempt < 12; attempt++) {
-    const palette = buildPaletteCandidate(attempt === 0 ? options.seedHex : '');
-    if (palette) return palette;
-  }
-  return defaultReadablePalette();
-}
-
-function applyPalette(palette=state.settings?.palette) {
-  const colors = palette?.colors || {};
+function applyPalette() {
   const root = document.documentElement;
   const pairs = {
-    '--accent':colors.accent,
-    '--accent2':colors.accent2,
-    '--text':colors.text,
-    '--card-text':colors.cardText,
-    '--surface':colors.surface,
-    '--surface2':colors.surface2,
-    '--border':colors.border,
-    '--muted':colors.muted,
-    '--muted2':colors.muted2,
-    '--card-muted':colors.cardMuted,
-    '--tag-text':colors.tagText,
-    '--film-tag-text':colors.filmTagText,
-    '--show-tag-text':colors.showTagText,
-    '--button-text':colors.buttonText,
-    '--tag-bg':colors.tagBg,
-    '--tag-border':colors.tagBorder,
-    '--page-bg':colors.pageBg,
-    '--header-bg':colors.headerBg,
-    '--control-bg':colors.controlBg,
-    '--control-border':colors.controlBorder,
-    '--film-card-bg':colors.filmCardBg,
-    '--film-card-border':colors.filmCardBorder,
-    '--show-card-bg':colors.showCardBg,
-    '--show-card-border':colors.showCardBorder,
-    '--palette-chip-bg':colors.chipBg,
-    '--palette-chip-border':colors.chipBorder,
-    '--film-chip-bg':colors.filmChipBg,
-    '--film-chip-border':colors.filmChipBorder,
-    '--show-chip-bg':colors.showChipBg,
-    '--show-chip-border':colors.showChipBorder,
-    '--source-link-bg':colors.sourceBg,
-    '--source-link-border':colors.sourceBorder
+    '--accent':CINELENS_COLORS.accent,
+    '--accent2':CINELENS_COLORS.accent2,
+    '--text':CINELENS_COLORS.text,
+    '--card-text':CINELENS_COLORS.cardText,
+    '--surface':CINELENS_COLORS.surface,
+    '--surface2':CINELENS_COLORS.surface2,
+    '--border':CINELENS_COLORS.border,
+    '--muted':CINELENS_COLORS.muted,
+    '--muted2':CINELENS_COLORS.muted2,
+    '--card-muted':CINELENS_COLORS.cardMuted,
+    '--tag-text':CINELENS_COLORS.tagText,
+    '--film-tag-text':CINELENS_COLORS.filmTagText,
+    '--show-tag-text':CINELENS_COLORS.showTagText,
+    '--button-text':CINELENS_COLORS.buttonText,
+    '--tag-bg':CINELENS_COLORS.tagBg,
+    '--tag-border':CINELENS_COLORS.tagBorder,
+    '--page-bg':CINELENS_COLORS.pageBg,
+    '--header-bg':CINELENS_COLORS.headerBg,
+    '--control-bg':CINELENS_COLORS.controlBg,
+    '--control-border':CINELENS_COLORS.controlBorder,
+    '--film-card-bg':CINELENS_COLORS.filmCardBg,
+    '--film-card-border':CINELENS_COLORS.filmCardBorder,
+    '--show-card-bg':CINELENS_COLORS.showCardBg,
+    '--show-card-border':CINELENS_COLORS.showCardBorder,
+    '--palette-chip-bg':CINELENS_COLORS.chipBg,
+    '--palette-chip-border':CINELENS_COLORS.chipBorder,
+    '--film-chip-bg':CINELENS_COLORS.filmChipBg,
+    '--film-chip-border':CINELENS_COLORS.filmChipBorder,
+    '--show-chip-bg':CINELENS_COLORS.showChipBg,
+    '--show-chip-border':CINELENS_COLORS.showChipBorder,
+    '--source-link-bg':CINELENS_COLORS.sourceBg,
+    '--source-link-border':CINELENS_COLORS.sourceBorder,
+    '--movie-badge-bg':CINELENS_COLORS.movieBadgeBg,
+    '--movie-badge-text':CINELENS_COLORS.movieBadgeText,
+    '--show-badge-bg':CINELENS_COLORS.showBadgeBg,
+    '--show-badge-text':CINELENS_COLORS.showBadgeText
   };
   Object.entries(pairs).forEach(([name, value]) => {
     if (value) root.style.setProperty(name, value);
   });
-}
-
-function generateRandomPalette(event) {
-  if (event) event.stopPropagation();
-  state.settings.palette = buildRandomPalette();
-  applyPalette(state.settings.palette);
-  saveSettingsState();
-  showToast('Random palette applied', 'success');
 }
 
 function canonicalTitle(s) {
@@ -2015,7 +1660,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   renderWatchPlatformPicker();
   loadLocalState();
   applyPalette();
-  applyCardSize(state.settings.cardSize || 'comfortable');
+  applyCardSize();
   await loadIndexedDbState();
   // Import a legacy localStorage library once, then remove its large payload only
   // after the IndexedDB write has been queued.
@@ -5086,7 +4731,7 @@ function renderAppVersion() {
 
 function updateControlDeck() {
   applyPalette();
-  applyCardSize(state.settings.cardSize || 'comfortable');
+  applyCardSize();
   const modeBtn=document.getElementById('tagDeleteModeBtn');
   if (modeBtn) {
     modeBtn.classList.toggle('active', !!state.settings.tagDeleteMode);
@@ -5128,26 +4773,13 @@ function updateGenreFilter(genre) {
   renderActiveCards();
 }
 
-// Card width is a display preference, not a recommendation signal — purely
-// how many pixels a grid column gets. Persisted like any other view setting
-// (v9 sync discipline): local-only, rides along passively with the next real
-// sync. Applied via one CSS variable so the existing grid/card rules don't
-// need duplicating per size.
-const CARD_SIZE_PRESETS = {compact:220, comfortable:300, large:400};
+// Card width is fixed (compact only, per Nitin's request — no size picker).
+// One constant, applied via a CSS variable so the grid rule doesn't need a
+// hardcoded number.
+const CARD_MIN_WIDTH_PX = 200;
 
-function applyCardSize(size) {
-  const px = CARD_SIZE_PRESETS[size] || CARD_SIZE_PRESETS.comfortable;
-  document.documentElement.style.setProperty('--card-min-width', px + 'px');
-  document.querySelectorAll('.card-size-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.size === (CARD_SIZE_PRESETS[size] ? size : 'comfortable'));
-  });
-}
-
-function updateCardSize(size) {
-  if (!CARD_SIZE_PRESETS[size]) return;
-  state.settings.cardSize = size;
-  applyCardSize(size);
-  saveViewState();
+function applyCardSize() {
+  document.documentElement.style.setProperty('--card-min-width', CARD_MIN_WIDTH_PX + 'px');
 }
 
 // Which platforms to check availability for is a personal viewing-service
@@ -5976,6 +5608,7 @@ function buildCard(movie, opts={}) {
         <div class="card-front-title">${displayTitle}</div>
         <div class="card-front-meta">${movie.year||'?'} - ${formatLabel}</div>
       </div>
+      <div class="format-badge">${formatLabel}</div>
       ${rank?`<div class="rank-badge">#${rank}</div>`:''}
       ${showMatch?`<div class="match-percent card-front-match">${matchPct}% match</div>`:''}
     </div>
@@ -6018,10 +5651,14 @@ function buildCard(movie, opts={}) {
   return card;
 }
 
+// v20: expand-in-place replaces the hover flip. A layout-shifting expand
+// (the card spans the full grid row, pushing siblings down) can't safely be
+// hover-triggered — the pointer would end up over whatever card the reflow
+// left underneath it. Click/tap toggles on every device instead.
 function toggleCardReveal(event, card) {
   const interactive = event?.target?.closest?.('button,a,input,select,textarea,.star,.card-act,.source-link-btn,.genre-chip,.tag-insight-chip');
   if (interactive) return;
-  if (!matchMedia('(hover: hover)').matches) card?.classList.toggle('revealed');
+  card?.classList.toggle('expanded');
 }
 
 function renderGenres(movie, matchedGenres=null) {
@@ -6048,14 +5685,15 @@ function renderWatchProviders(movie) {
     .map(platform => ({platform, countries: availability[platform] || []}))
     .filter(item => item.countries.length);
   if (!matches.length) return '';
-  const chips = matches.map(({platform, countries}) => {
-    const shown = countries.slice(0, 6).join(', ');
-    const extra = countries.length > 6 ? ` +${countries.length - 6}` : '';
-    return `<span class="watch-chip">${attrSafe(platform)}: ${attrSafe(shown + extra)}</span>`;
+  // Full country names, uncapped — the expanded card layout has the width
+  // for it now, unlike the old flip card's fixed poster-shaped box.
+  const rows = matches.map(({platform, countries}) => {
+    const names = countries.map(countryName).sort().join(', ');
+    return `<div class="watch-platform-row-item"><span class="watch-chip">${attrSafe(platform)}</span><span class="watch-countries">${attrSafe(names)}</span></div>`;
   }).join('');
   const watchUrl = movie.tmdbId ? `https://www.themoviedb.org/${movie.tmdbMediaType === 'tv' ? 'tv' : 'movie'}/${movie.tmdbId}/watch` : '';
   const link = watchUrl ? `<a class="watch-link" href="${attrSafe(watchUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Streaming availability data via JustWatch">via JustWatch</a>` : '';
-  return `<div class="watch-row"><span class="genre-label">Available on</span>${chips}${link}</div>`;
+  return `<div class="watch-row"><span class="genre-label">Available on</span>${rows}${link}</div>`;
 }
 
 function renderTagChips(tags, matchedTags, expanded) {
