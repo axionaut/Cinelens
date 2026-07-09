@@ -1,4 +1,104 @@
 // ─────────────────────────────────────────────
+// COLOURS — the one place to edit CineLens's theme (v20)
+// The old random-palette generator (HSL math, contrast solving, per-session
+// randomisation) is removed entirely, per Nitin's request. Every colour in
+// the app now comes from this single hand-edited table. To change the
+// theme: edit a hex/hsl value below, save, reload — no other file or
+// function needs to change.
+//
+// Each entry is a plain CSS colour string (hex, hsl(), rgba(), anything CSS
+// accepts). `movieBadge*`/`showBadge*` are the small solid-background pills
+// on card posters that say MOVIE/SHOW — the movie/show visual distinction
+// used to be a whole-card background tint, which stopped being visible once
+// cards became poster images; a small opaque badge stays legible over any
+// image.
+// ─────────────────────────────────────────────
+const CINELENS_COLORS = {
+  accent:            '#ffcc33', // primary accent (buttons, match %, links)
+  accent2:           '#ff6a3d', // secondary accent (hover states, borders)
+  text:              'hsl(35 22% 94%)',   // main page text
+  cardText:          'hsl(35 22% 93%)',   // text on card backs
+  surface:           'hsl(35 26% 10%)',   // modals, dropdowns
+  surface2:          'hsl(35 24% 15%)',   // buttons, secondary surfaces
+  border:            'hsl(24 76% 38% / 0.72)',
+  muted:             'hsl(35 18% 78%)',   // secondary page text
+  muted2:            'hsl(35 14% 70%)',   // tertiary page text
+  cardMuted:         'hsl(35 16% 76%)',   // secondary text on card backs
+  tagText:           'hsl(35 20% 92%)',
+  filmTagText:       'hsl(35 20% 92%)',   // tag text on movie cards
+  showTagText:       'hsl(168 20% 92%)',  // tag text on show cards
+  buttonText:        'hsl(35 30% 7%)',    // text on solid accent buttons
+  tagBg:             'hsl(35 38% 20%)',
+  tagBorder:         'hsl(35 66% 46% / 0.82)',
+  pageBg:            'hsl(35 32% 6%)',    // page background
+  headerBg:          'hsl(35 30% 8%)',
+  controlBg:         'hsl(35 28% 11%)',   // control deck background
+  controlBorder:     'hsl(18 80% 56% / 0.48)',
+  filmCardBg:        'hsl(35 29% 13%)',   // movie card background
+  filmCardBorder:    '#ffcc33',
+  showCardBg:        'hsl(168 28% 12%)',  // show card background
+  showCardBorder:    '#68ddb8',
+  chipBg:            'hsl(35 34% 22%)',   // generic tag/genre chips
+  chipBorder:        'hsl(35 72% 52% / 0.68)',
+  filmChipBg:        'hsl(35 36% 22%)',   // tag chips on movie cards
+  filmChipBorder:    'hsl(35 72% 52% / 0.68)',
+  showChipBg:        'hsl(168 34% 21%)',  // tag chips on show cards
+  showChipBorder:    'hsl(168 62% 54% / 0.68)',
+  sourceBg:          'hsl(18 38% 21%)',   // Wiki/TMDB/Google link buttons
+  sourceBorder:      'hsl(18 78% 54% / 0.62)',
+  // MOVIE / SHOW poster badge — solid, opaque, legible over any image
+  movieBadgeBg:      '#ffcc33',
+  movieBadgeText:    'hsl(35 30% 7%)',
+  showBadgeBg:       '#68ddb8',
+  showBadgeText:     'hsl(168 40% 8%)'
+};
+
+function applyPalette() {
+  const root = document.documentElement;
+  const pairs = {
+    '--accent':CINELENS_COLORS.accent,
+    '--accent2':CINELENS_COLORS.accent2,
+    '--text':CINELENS_COLORS.text,
+    '--card-text':CINELENS_COLORS.cardText,
+    '--surface':CINELENS_COLORS.surface,
+    '--surface2':CINELENS_COLORS.surface2,
+    '--border':CINELENS_COLORS.border,
+    '--muted':CINELENS_COLORS.muted,
+    '--muted2':CINELENS_COLORS.muted2,
+    '--card-muted':CINELENS_COLORS.cardMuted,
+    '--tag-text':CINELENS_COLORS.tagText,
+    '--film-tag-text':CINELENS_COLORS.filmTagText,
+    '--show-tag-text':CINELENS_COLORS.showTagText,
+    '--button-text':CINELENS_COLORS.buttonText,
+    '--tag-bg':CINELENS_COLORS.tagBg,
+    '--tag-border':CINELENS_COLORS.tagBorder,
+    '--page-bg':CINELENS_COLORS.pageBg,
+    '--header-bg':CINELENS_COLORS.headerBg,
+    '--control-bg':CINELENS_COLORS.controlBg,
+    '--control-border':CINELENS_COLORS.controlBorder,
+    '--film-card-bg':CINELENS_COLORS.filmCardBg,
+    '--film-card-border':CINELENS_COLORS.filmCardBorder,
+    '--show-card-bg':CINELENS_COLORS.showCardBg,
+    '--show-card-border':CINELENS_COLORS.showCardBorder,
+    '--palette-chip-bg':CINELENS_COLORS.chipBg,
+    '--palette-chip-border':CINELENS_COLORS.chipBorder,
+    '--film-chip-bg':CINELENS_COLORS.filmChipBg,
+    '--film-chip-border':CINELENS_COLORS.filmChipBorder,
+    '--show-chip-bg':CINELENS_COLORS.showChipBg,
+    '--show-chip-border':CINELENS_COLORS.showChipBorder,
+    '--source-link-bg':CINELENS_COLORS.sourceBg,
+    '--source-link-border':CINELENS_COLORS.sourceBorder,
+    '--movie-badge-bg':CINELENS_COLORS.movieBadgeBg,
+    '--movie-badge-text':CINELENS_COLORS.movieBadgeText,
+    '--show-badge-bg':CINELENS_COLORS.showBadgeBg,
+    '--show-badge-text':CINELENS_COLORS.showBadgeText
+  };
+  Object.entries(pairs).forEach(([name, value]) => {
+    if (value) root.style.setProperty(name, value);
+  });
+}
+
+// ─────────────────────────────────────────────
 // WIKIPEDIA FILM SOURCES
 // These are the Wikipedia list pages we pull from.
 // The API returns page titles which we then individually fetch.
@@ -20,7 +120,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 21;
+const APP_VERSION = 22;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -626,106 +726,6 @@ function tmdbUrlForMovie(movie) {
   if (!movie?.tmdbId) return '';
   const endpoint = movie.tmdbMediaType === 'tv' ? 'tv' : 'movie';
   return `https://www.themoviedb.org/${endpoint}/${movie.tmdbId}`;
-}
-
-// ─────────────────────────────────────────────
-// COLOURS — the one place to edit CineLens's theme (v20)
-// The old random-palette generator (HSL math, contrast solving, per-session
-// randomisation) is removed entirely, per Nitin's request. Every colour in
-// the app now comes from this single hand-edited table. To change the
-// theme: edit a hex/hsl value below, save, reload — no other file or
-// function needs to change.
-//
-// Each entry is a plain CSS colour string (hex, hsl(), rgba(), anything CSS
-// accepts). `movieBadge*`/`showBadge*` are the small solid-background pills
-// on card posters that say MOVIE/SHOW — the movie/show visual distinction
-// used to be a whole-card background tint, which stopped being visible once
-// cards became poster images; a small opaque badge stays legible over any
-// image.
-// ─────────────────────────────────────────────
-const CINELENS_COLORS = {
-  accent:            '#ffcc33', // primary accent (buttons, match %, links)
-  accent2:           '#ff6a3d', // secondary accent (hover states, borders)
-  text:              'hsl(35 22% 94%)',   // main page text
-  cardText:          'hsl(35 22% 93%)',   // text on card backs
-  surface:           'hsl(35 26% 10%)',   // modals, dropdowns
-  surface2:          'hsl(35 24% 15%)',   // buttons, secondary surfaces
-  border:            'hsl(24 76% 38% / 0.72)',
-  muted:             'hsl(35 18% 78%)',   // secondary page text
-  muted2:            'hsl(35 14% 70%)',   // tertiary page text
-  cardMuted:         'hsl(35 16% 76%)',   // secondary text on card backs
-  tagText:           'hsl(35 20% 92%)',
-  filmTagText:       'hsl(35 20% 92%)',   // tag text on movie cards
-  showTagText:       'hsl(168 20% 92%)',  // tag text on show cards
-  buttonText:        'hsl(35 30% 7%)',    // text on solid accent buttons
-  tagBg:             'hsl(35 38% 20%)',
-  tagBorder:         'hsl(35 66% 46% / 0.82)',
-  pageBg:            'hsl(35 32% 6%)',    // page background
-  headerBg:          'hsl(35 30% 8%)',
-  controlBg:         'hsl(35 28% 11%)',   // control deck background
-  controlBorder:     'hsl(18 80% 56% / 0.48)',
-  filmCardBg:        'hsl(35 29% 13%)',   // movie card background
-  filmCardBorder:    '#ffcc33',
-  showCardBg:        'hsl(168 28% 12%)',  // show card background
-  showCardBorder:    '#68ddb8',
-  chipBg:            'hsl(35 34% 22%)',   // generic tag/genre chips
-  chipBorder:        'hsl(35 72% 52% / 0.68)',
-  filmChipBg:        'hsl(35 36% 22%)',   // tag chips on movie cards
-  filmChipBorder:    'hsl(35 72% 52% / 0.68)',
-  showChipBg:        'hsl(168 34% 21%)',  // tag chips on show cards
-  showChipBorder:    'hsl(168 62% 54% / 0.68)',
-  sourceBg:          'hsl(18 38% 21%)',   // Wiki/TMDB/Google link buttons
-  sourceBorder:      'hsl(18 78% 54% / 0.62)',
-  // MOVIE / SHOW poster badge — solid, opaque, legible over any image
-  movieBadgeBg:      '#ffcc33',
-  movieBadgeText:    'hsl(35 30% 7%)',
-  showBadgeBg:       '#68ddb8',
-  showBadgeText:     'hsl(168 40% 8%)'
-};
-
-function applyPalette() {
-  const root = document.documentElement;
-  const pairs = {
-    '--accent':CINELENS_COLORS.accent,
-    '--accent2':CINELENS_COLORS.accent2,
-    '--text':CINELENS_COLORS.text,
-    '--card-text':CINELENS_COLORS.cardText,
-    '--surface':CINELENS_COLORS.surface,
-    '--surface2':CINELENS_COLORS.surface2,
-    '--border':CINELENS_COLORS.border,
-    '--muted':CINELENS_COLORS.muted,
-    '--muted2':CINELENS_COLORS.muted2,
-    '--card-muted':CINELENS_COLORS.cardMuted,
-    '--tag-text':CINELENS_COLORS.tagText,
-    '--film-tag-text':CINELENS_COLORS.filmTagText,
-    '--show-tag-text':CINELENS_COLORS.showTagText,
-    '--button-text':CINELENS_COLORS.buttonText,
-    '--tag-bg':CINELENS_COLORS.tagBg,
-    '--tag-border':CINELENS_COLORS.tagBorder,
-    '--page-bg':CINELENS_COLORS.pageBg,
-    '--header-bg':CINELENS_COLORS.headerBg,
-    '--control-bg':CINELENS_COLORS.controlBg,
-    '--control-border':CINELENS_COLORS.controlBorder,
-    '--film-card-bg':CINELENS_COLORS.filmCardBg,
-    '--film-card-border':CINELENS_COLORS.filmCardBorder,
-    '--show-card-bg':CINELENS_COLORS.showCardBg,
-    '--show-card-border':CINELENS_COLORS.showCardBorder,
-    '--palette-chip-bg':CINELENS_COLORS.chipBg,
-    '--palette-chip-border':CINELENS_COLORS.chipBorder,
-    '--film-chip-bg':CINELENS_COLORS.filmChipBg,
-    '--film-chip-border':CINELENS_COLORS.filmChipBorder,
-    '--show-chip-bg':CINELENS_COLORS.showChipBg,
-    '--show-chip-border':CINELENS_COLORS.showChipBorder,
-    '--source-link-bg':CINELENS_COLORS.sourceBg,
-    '--source-link-border':CINELENS_COLORS.sourceBorder,
-    '--movie-badge-bg':CINELENS_COLORS.movieBadgeBg,
-    '--movie-badge-text':CINELENS_COLORS.movieBadgeText,
-    '--show-badge-bg':CINELENS_COLORS.showBadgeBg,
-    '--show-badge-text':CINELENS_COLORS.showBadgeText
-  };
-  Object.entries(pairs).forEach(([name, value]) => {
-    if (value) root.style.setProperty(name, value);
-  });
 }
 
 function canonicalTitle(s) {
