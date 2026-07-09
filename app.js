@@ -5161,7 +5161,7 @@ function renderRecs() {
         ? `improving recommendations · ${fetchStatus.strongCount}/${STRONG_REC_TARGET} strong · showing ${top.length} of ${scored.length}`
         : `showing ${top.length} of ${scored.length} matches`;
       const fragment = document.createDocumentFragment();
-      top.forEach((item, i) => fragment.appendChild(buildCard(item.movie, { rank:i+1, score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating, receptionEffect:item.receptionEffect })));
+      top.forEach(item => fragment.appendChild(buildCard(item.movie, { score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating, receptionEffect:item.receptionEffect })));
       grid.appendChild(fragment);
       return;
     }
@@ -5297,8 +5297,7 @@ function renderSimilarTitles(grid) {
     return true;
   }
   const fragment = document.createDocumentFragment();
-  top.forEach((item, index) => fragment.appendChild(buildCard(item.movie, {
-    rank:index + 1,
+  top.forEach(item => fragment.appendChild(buildCard(item.movie, {
     matchedTags:item.matchedTags,
     matchedGenres:item.matchedGenres,
     posOverlap:item.matchedTags.size,
@@ -5474,7 +5473,7 @@ function formatReceptionEffect(effect) {
 }
 
 function buildCard(movie, opts={}) {
-  const { rank, score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, predictedRating, receptionEffect, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag } = opts;
+  const { score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, predictedRating, receptionEffect, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag } = opts;
   const hasSuppliedMatch = Number.isFinite(Number(matchScore)) || Number.isFinite(Number(tasteFit));
   const automaticMatch = hasSuppliedMatch ? null : cardMatchData(movie);
   const resolvedMatch = hasSuppliedMatch
