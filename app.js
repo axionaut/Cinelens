@@ -20,7 +20,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 17;
+const APP_VERSION = 18;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -240,9 +240,31 @@ const SHOW_STORY_MAX_CHARS = 12000;
 const TMDB_API_KEY = 'b807a738c939c5b8ef9d0c3f3b3ad662';
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
 const TMDB_REQUEST_DELAY_MS = 300;
-const TMDB_WATCH_REGION = 'IN';
+const TMDB_SEARCH_REGION = 'IN';
 const TMDB_BACKFILL_BATCH_SIZE = 10;
 const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+// v18: replaces the fixed-India where-to-watch display. Instead of one
+// hardcoded region, CineLens shows which countries carry the title on
+// whichever platforms the user selects. TMDB's own provider_name spelling
+// varies slightly by region (e.g. "Disney Plus" in the US vs "Disney+
+// Hotstar" in India), so each canonical platform is matched by pattern
+// rather than exact string, and the derived per-platform country list is the
+// only thing stored — never the full raw multi-region response.
+const TMDB_DATA_VERSION = 2;
+const OTT_PLATFORM_PATTERNS = [
+  ['Netflix', /netflix/i],
+  ['Amazon Prime Video', /prime video|amazon prime/i],
+  ['Disney+', /disney\+|disney plus|hotstar/i],
+  ['Apple TV+', /apple tv/i],
+  ['Max', /^max$|hbo max/i],
+  ['Hulu', /hulu/i],
+  ['Paramount+', /paramount/i],
+  ['Peacock', /peacock/i],
+  ['JioCinema', /jiocinema|jio cinema/i],
+  ['SonyLIV', /sonyliv|sony liv/i],
+  ['ZEE5', /zee5/i]
+];
+const OTT_PLATFORM_NAMES = OTT_PLATFORM_PATTERNS.map(([name]) => name);
 let lastTmdbRequestAt = 0;
 let tmdbBackfillTimer = null;
 let tmdbBackfillInProgress = false;
@@ -570,6 +592,12 @@ function googleSearchUrlForMovie(movie) {
   if (movie.year) parts.push(String(movie.year));
   parts.push(isShow(movie) ? 'tv series' : 'movie');
   return `https://www.google.com/search?q=${encodeURIComponent(parts.join(' '))}`;
+}
+
+function tmdbUrlForMovie(movie) {
+  if (!movie?.tmdbId) return '';
+  const endpoint = movie.tmdbMediaType === 'tv' ? 'tv' : 'movie';
+  return `https://www.themoviedb.org/${endpoint}/${movie.tmdbId}`;
 }
 
 function clampPaletteNumber(value, min, max) {
@@ -1973,8 +2001,18 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
   }
 }
 
+function renderWatchPlatformPicker() {
+  const row = document.getElementById('watchPlatformRow');
+  if (!row) return;
+  row.innerHTML = OTT_PLATFORM_NAMES.map(name => {
+    const safe = attrSafe(name);
+    return `<button type="button" class="watch-platform-chip" data-platform="${safe}" onclick="toggleWatchPlatform('${safe}',event)">${safe}</button>`;
+  }).join('');
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
   renderAppVersion();
+  renderWatchPlatformPicker();
   loadLocalState();
   applyPalette();
   await loadIndexedDbState();
@@ -3862,7 +3900,7 @@ async function tmdbSearchCandidate(title, year, mediaType) {
     include_adult: 'false'
   });
   if (year) params.set(yearParam, String(year));
-  if (mediaType === 'movie') params.set('region', TMDB_WATCH_REGION);
+  if (mediaType === 'movie') params.set('region', TMDB_SEARCH_REGION);
   const data = await tmdbApiJson(`https://api.themoviedb.org/3/search/${endpoint}?${params.toString()}`);
   const results = Array.isArray(data?.results) ? data.results : [];
   if (!results.length) return null;
@@ -3876,27 +3914,46 @@ async function tmdbSearchCandidate(title, year, mediaType) {
   return pool[0];
 }
 
-function compactProviderNames(list) {
-  return [...new Set((list || []).map(item => String(item?.provider_name || '').trim()).filter(Boolean))];
+function matchOttPlatform(providerName) {
+  const name = String(providerName || '');
+  for (const [canonical, pattern] of OTT_PLATFORM_PATTERNS) {
+    if (pattern.test(name)) return canonical;
+  }
+  return null;
 }
 
-async function tmdbDetailsWithProviders(id, mediaType) {
+// Scans every region TMDB returns (not just one fixed country) and keeps
+// only a compact platform-name -> sorted country-code list, restricted to
+// the curated OTT_PLATFORM_PATTERNS set. This is the whole raw multi-region
+// response reduced to the minimum needed to answer "which countries carry
+// this on the platforms I picked" without storing per-country provider
+// objects, logos or links.
+function buildWatchAvailability(regionsResult) {
+  const availability = {};
+  Object.entries(regionsResult || {}).forEach(([countryCode, regionData]) => {
+    (regionData?.flatrate || []).forEach(provider => {
+      const canonical = matchOttPlatform(provider?.provider_name);
+      if (!canonical) return;
+      if (!availability[canonical]) availability[canonical] = new Set();
+      availability[canonical].add(countryCode);
+    });
+  });
+  const compact = {};
+  Object.entries(availability).forEach(([platform, countries]) => {
+    compact[platform] = [...countries].sort();
+  });
+  return Object.keys(compact).length ? compact : null;
+}
+
+async function tmdbDetailsWithAvailability(id, mediaType) {
   const endpoint = mediaType === 'tv' ? 'tv' : 'movie';
   const params = new URLSearchParams({ api_key: TMDB_API_KEY, append_to_response: 'watch/providers' });
   const data = await tmdbApiJson(`https://api.themoviedb.org/3/${endpoint}/${id}?${params.toString()}`);
   if (!data) return null;
-  const regionData = data['watch/providers']?.results?.[TMDB_WATCH_REGION];
-  const watchProviders = regionData ? {
-    region: TMDB_WATCH_REGION,
-    flatrate: compactProviderNames(regionData.flatrate),
-    rent: compactProviderNames(regionData.rent),
-    buy: compactProviderNames(regionData.buy),
-    link: regionData.link || ''
-  } : null;
   const posterPath = data.poster_path || '';
   return {
     posterUrl: posterPath ? TMDB_IMAGE_BASE + posterPath : '',
-    watchProviders: (watchProviders && (watchProviders.flatrate.length || watchProviders.rent.length || watchProviders.buy.length)) ? watchProviders : null
+    watchAvailability: buildWatchAvailability(data['watch/providers']?.results)
   };
 }
 
@@ -3906,13 +3963,13 @@ async function fetchTmdbDetails(title, year, format) {
   try {
     const candidate = await tmdbSearchCandidate(title, year, mediaType);
     if (!candidate?.id) return null;
-    const details = await tmdbDetailsWithProviders(candidate.id, mediaType);
+    const details = await tmdbDetailsWithAvailability(candidate.id, mediaType);
     const fallbackPoster = candidate.poster_path ? TMDB_IMAGE_BASE + candidate.poster_path : '';
     return {
       tmdbId: candidate.id,
       tmdbMediaType: mediaType,
       posterUrl: details?.posterUrl || fallbackPoster || '',
-      watchProviders: details?.watchProviders || null
+      watchAvailability: details?.watchAvailability || null
     };
   } catch(_) {
     return null;
@@ -3925,8 +3982,10 @@ async function attachTmdbDetails(movie) {
   if (tmdb) {
     if (tmdb.posterUrl) movie.posterUrl = tmdb.posterUrl;
     if (tmdb.tmdbId) { movie.tmdbId = tmdb.tmdbId; movie.tmdbMediaType = tmdb.tmdbMediaType; }
-    movie.watchProviders = tmdb.watchProviders || null;
+    movie.watchAvailability = tmdb.watchAvailability || null;
+    movie.tmdbDataVersion = TMDB_DATA_VERSION;
   }
+  delete movie.watchProviders;
   delete movie.posterBackfillAttemptedAt;
   if (!movie.posterUrl) movie.posterBackfillAttemptedAt = nowStamp();
   return movie;
@@ -4071,7 +4130,13 @@ async function runReceptionBackfill() {
 // adding Wikipedia load.
 function needsTmdbBackfill(movie) {
   if (!movie || movie.source !== 'wikipedia') return false;
-  return !movie.posterUrl && !movie.tmdbId && !movie.posterBackfillAttemptedAt;
+  if (movie.posterBackfillAttemptedAt) return false;
+  const missingPoster = !movie.posterUrl && !movie.tmdbId;
+  // A v17 record already has a poster but was built from the fixed-India
+  // response shape (or predates the version marker entirely) — it needs one
+  // refresh to pick up the multi-region watchAvailability map.
+  const staleTmdbVersion = (movie.posterUrl || movie.tmdbId) && Number(movie.tmdbDataVersion || 0) < TMDB_DATA_VERSION;
+  return missingPoster || staleTmdbVersion;
 }
 
 function tmdbBackfillRecentlyAttempted(movie, now=Date.now()) {
@@ -5042,6 +5107,10 @@ function updateControlDeck() {
   if (deck) deck.classList.toggle('collapsed', !!state.settings.controlDeckCollapsed);
   const toggle=document.getElementById('controlToggle');
   if (toggle) toggle.textContent = state.settings.controlDeckCollapsed ? 'Show filters & tools' : 'Hide filters & tools';
+  const selectedPlatforms = new Set(state.settings.watchPlatforms || []);
+  document.querySelectorAll('.watch-platform-chip').forEach(chip => {
+    chip.classList.toggle('active', selectedPlatforms.has(chip.dataset.platform));
+  });
   updateLibraryHealth();
 }
 
@@ -5054,6 +5123,22 @@ function updateLanguageFilter(language) {
 function updateGenreFilter(genre) {
   state.settings.genreFilter = genre || 'all';
   saveViewState();
+  renderActiveCards();
+}
+
+// Which platforms to check availability for is a personal viewing-service
+// preference, not a recommendation filter — it only changes what the
+// watch-availability row on a card shows, never which titles are recommended
+// or how they are scored. Persisted like any other view setting (v9 sync
+// discipline): local-only, rides along passively with the next real sync.
+function toggleWatchPlatform(platform, event) {
+  if (event) event.stopPropagation();
+  if (!OTT_PLATFORM_NAMES.includes(platform)) return;
+  const selected = new Set(state.settings.watchPlatforms || []);
+  if (selected.has(platform)) selected.delete(platform); else selected.add(platform);
+  state.settings.watchPlatforms = [...selected];
+  saveViewState();
+  updateControlDeck();
   renderActiveCards();
 }
 
@@ -5851,11 +5936,13 @@ function buildCard(movie, opts={}) {
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';
   const wikiUrl = wikiUrlForMovie(movie);
   const googleUrl = googleSearchUrlForMovie(movie);
+  const tmdbUrl = tmdbUrlForMovie(movie);
   const displayTitle = attrSafe(movie.title);
   const posterSrc = movie.posterUrl || movie.thumbnailUrl || '';
   const titleHtml = `<button class="card-title-button" onclick="showSimilarTitles('${safeId}',event)" title="Show similar titles">${displayTitle}</button>`;
   const sourceLinksHtml = [
     wikiUrl ? `<a class="source-link-btn" href="${attrSafe(wikiUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">Wiki</a>` : '',
+    tmdbUrl ? `<a class="source-link-btn" href="${attrSafe(tmdbUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Open ${displayTitle} on TMDB">TMDB</a>` : '',
     googleUrl ? `<a class="source-link-btn" href="${attrSafe(googleUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Search Google for ${displayTitle}">Google</a>` : ''
   ].filter(Boolean).join('');
   card.innerHTML = `
@@ -5923,17 +6010,28 @@ function renderGenres(movie, matchedGenres=null) {
   }).join('')}</div>`;
 }
 
+// Availability is informational only — it is never a recommendation filter.
+// Nothing renders until the user picks at least one platform in Library
+// maintenance; then, for each selected platform the title is actually on,
+// show which countries carry it (derived once at fetch/backfill/retag time
+// from TMDB's own multi-region response, not queried live per card).
 function renderWatchProviders(movie) {
-  const wp = movie?.watchProviders;
-  if (!wp) return '';
-  const flatrate = wp.flatrate || [];
-  const rentBuy = [...new Set([...(wp.rent || []), ...(wp.buy || [])])];
-  const primary = flatrate.length ? flatrate : rentBuy;
-  if (!primary.length) return '';
-  const label = flatrate.length ? 'Stream' : 'Rent/Buy';
-  const chips = primary.slice(0, 6).map(name => `<span class="watch-chip">${attrSafe(name)}</span>`).join('');
-  const link = wp.link ? `<a class="watch-link" href="${attrSafe(wp.link)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Streaming availability data via JustWatch">via JustWatch</a>` : '';
-  return `<div class="watch-row"><span class="genre-label">${label}</span>${chips}${link}</div>`;
+  const selected = state.settings?.watchPlatforms || [];
+  if (!selected.length) return '';
+  const availability = movie?.watchAvailability;
+  if (!availability) return '';
+  const matches = selected
+    .map(platform => ({platform, countries: availability[platform] || []}))
+    .filter(item => item.countries.length);
+  if (!matches.length) return '';
+  const chips = matches.map(({platform, countries}) => {
+    const shown = countries.slice(0, 6).join(', ');
+    const extra = countries.length > 6 ? ` +${countries.length - 6}` : '';
+    return `<span class="watch-chip">${attrSafe(platform)}: ${attrSafe(shown + extra)}</span>`;
+  }).join('');
+  const watchUrl = movie.tmdbId ? `https://www.themoviedb.org/${movie.tmdbMediaType === 'tv' ? 'tv' : 'movie'}/${movie.tmdbId}/watch` : '';
+  const link = watchUrl ? `<a class="watch-link" href="${attrSafe(watchUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Streaming availability data via JustWatch">via JustWatch</a>` : '';
+  return `<div class="watch-row"><span class="genre-label">Available on</span>${chips}${link}</div>`;
 }
 
 function renderTagChips(tags, matchedTags, expanded) {

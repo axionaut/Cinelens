@@ -541,6 +541,11 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
 .maintenance-danger > summary { color:#ff8a86; }
 .maintenance-danger p { margin:7px 0 9px; color:var(--muted); max-width:620px; line-height:1.45; }
 .tmdb-attribution{margin-top:10px;font-size:10px;color:var(--muted2,var(--muted));line-height:1.4;max-width:620px}
+.watch-platform-picker{margin-top:12px}
+.watch-platform-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.watch-platform-chip{font-size:11px;padding:5px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);cursor:pointer;font-family:inherit;transition:all .15s}
+.watch-platform-chip:hover{border-color:var(--accent);color:var(--text)}
+.watch-platform-chip.active{border-color:var(--accent);color:var(--button-text,#000);background:var(--accent)}
 @media (max-width:768px) {
   .library-status { max-width:100%; font-size:10px; }
   .library-health-label { max-width:190px; }
@@ -822,8 +827,13 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .movie-card.show-card .title-format{color:var(--show-card-border, var(--green));border-color:var(--show-card-border, var(--green));background:var(--palette-chip-bg)}
 
 /* v16 image-forward cards and palette-aware chrome */
+/* v18: collapsed cards stay poster-shaped (aspect-ratio, absolutely-stacked
+   faces for the crossfade); once revealed, the body leaves absolute
+   positioning and becomes the card's only in-flow box, so the card's height
+   grows to fit its actual content instead of clipping it or scrolling inside
+   a fixed poster-shaped box. */
 .movies-grid{grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px}
-.movie-card{min-height:495px;aspect-ratio:2/3;border-radius:8px;overflow:hidden;perspective:1200px;cursor:pointer;background:var(--film-card-bg)!important}
+.movie-card{aspect-ratio:2/3;border-radius:8px;overflow:hidden;perspective:1200px;cursor:pointer;background:var(--film-card-bg)!important;position:relative}
 .movie-card.show-card{background:var(--show-card-bg)!important}
 .card-poster,.card-body{position:absolute;inset:0;display:flex;flex-direction:column;backface-visibility:hidden;transition:transform .24s ease,opacity .24s ease}
 .card-poster{display:flex!important;justify-content:flex-end;background:var(--film-card-bg);transform:rotateY(0);opacity:1}
@@ -836,14 +846,16 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .card-front-meta{margin-top:5px;font-family:'DM Mono',monospace;font-size:11px;color:rgba(255,255,255,.82)}
 .card-front-match{position:absolute;z-index:3;left:12px;top:12px;margin:0}
 .rank-badge{z-index:4}
-.card-body{padding:14px;gap:8px;overflow:auto;background:var(--film-card-bg);color:var(--card-text);transform:rotateY(8deg) translateY(8px);opacity:0;pointer-events:none}
+.card-body{padding:14px;gap:8px;background:var(--film-card-bg);color:var(--card-text);transform:rotateY(8deg) translateY(8px);opacity:0;pointer-events:none}
 .show-card .card-body{background:var(--show-card-bg)}
 @media (hover:hover){
+  .movie-card:hover{aspect-ratio:auto;height:auto;overflow:visible}
   .movie-card:hover .card-poster{transform:rotateY(-8deg);opacity:0;pointer-events:none}
-  .movie-card:hover .card-body{transform:rotateY(0);opacity:1;pointer-events:auto}
+  .movie-card:hover .card-body{position:static;transform:none;opacity:1;pointer-events:auto}
 }
+.movie-card.revealed{aspect-ratio:auto;height:auto;overflow:visible}
 .movie-card.revealed .card-poster{transform:rotateY(-8deg);opacity:0;pointer-events:none}
-.movie-card.revealed .card-body{transform:rotateY(0);opacity:1;pointer-events:auto}
+.movie-card.revealed .card-body{position:static;transform:none;opacity:1;pointer-events:auto}
 .card-head{display:block}
 .format-row .match-percent{display:none}
 .source-link-row{display:none}
