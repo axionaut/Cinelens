@@ -223,7 +223,8 @@
   .genre-chip.matched{color:var(--accent);border-color:var(--accent2);background:color-mix(in srgb,var(--accent) 12%,transparent)}
   .watch-row{display:flex;flex-direction:column;gap:4px;margin:6px 0}
   .watch-platform-row-item{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
-  .watch-chip{flex:none;font-size:9px;border:1px solid var(--tag-border,var(--border));border-radius:10px;padding:2px 7px;text-transform:capitalize;font-family:inherit;line-height:inherit}
+  .watch-chip{flex:none;font-size:9px;border:1px solid var(--tag-border,var(--border));border-radius:10px;padding:2px 7px;text-transform:capitalize;font-family:inherit;line-height:inherit;text-decoration:none;cursor:pointer}
+  a.watch-chip:hover{color:var(--accent);text-decoration:underline}
   .watch-countries{font-size:10px;color:var(--card-muted,var(--muted));line-height:1.4}
   .watch-link{font-size:9px;color:var(--card-muted,var(--muted));text-decoration:underline;margin-top:2px}
   .watch-link:hover{color:var(--accent)}
@@ -839,12 +840,13 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
    grid-column span change); the poster/body crossfade within the expanding
    card is what's animated. Card width is fixed-compact only
    (CARD_MIN_WIDTH_PX, no size picker).
-   v24: getting the *other* cards in the clicked card's row to compact with
-   no gap, and the expanded row to land directly below them, is handled in
-   JS (toggleCardReveal in app.js) by moving the card's DOM node before
-   adding this class — see the comment there. This class only owns the
-   visual styling of the expanded state, not its position in the grid. */
-.movies-grid{grid-template-columns:repeat(auto-fit,minmax(var(--card-min-width,200px),1fr));gap:12px}
+   v31 (replaces the v24 DOM-node-moving approach): row dense — an
+   .expanded card spans the full width at its own row, which punches a
+   hole in the row it left; dense packing pulls the following cards up
+   into that hole so the grid never shows a mid-grid gap and the expanded
+   card opens right where it was clicked (see toggleCardReveal). The card
+   never moves in the DOM. */
+.movies-grid{grid-template-columns:repeat(auto-fit,minmax(var(--card-min-width,200px),1fr));gap:12px;grid-auto-flow:row dense}
 .movie-card{display:flex;align-items:stretch;aspect-ratio:2/3;border-radius:8px;overflow:hidden;cursor:pointer;background:var(--film-card-bg)!important;position:relative;grid-column:span 1;transition:grid-column .01s}
 .movie-card.show-card{background:var(--show-card-bg)!important}
 .card-poster{position:relative;flex:1 1 auto;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;background:var(--film-card-bg)}

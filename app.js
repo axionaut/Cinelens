@@ -99,7 +99,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 30;
+const APP_VERSION = 31;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -311,6 +311,10 @@ const AI_BACKGROUND_RETRY_MS = 2 * 60 * 1000;
 const FETCH_AUTO_ATTEMPT_BUDGET = 55;
 const FETCH_MANUAL_ATTEMPT_BUDGET = 100;
 const FETCH_MAX_ADDED_PER_RUN = 35;
+// Wikipedia candidate fetches during collection run this many at a time
+// (network only — state updates stay serial). 3 keeps the load on
+// Wikipedia's API polite while roughly tripling collection throughput.
+const COLLECTION_FETCH_CONCURRENCY = 3;
 const RECEPTION_VERSION = 1;
 const RECEPTION_MAX_DOWN = 1.25;
 const RECEPTION_MAX_UP = 0.5;
@@ -338,7 +342,7 @@ const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // Hotstar" in India), so each canonical platform is matched by pattern
 // rather than exact string, and the derived per-platform country list is the
 // only thing stored — never the full raw multi-region response.
-const TMDB_DATA_VERSION = 3;
+const TMDB_DATA_VERSION = 4;
 // JioHotstar's own pattern is checked before Disney+'s: Disney+'s pattern
 // matches "hotstar" generically (regional naming, e.g. "Disney+ Hotstar" in
 // India before the 2025 merger), and "JioHotstar" contains that same
@@ -361,6 +365,28 @@ const OTT_PLATFORM_PATTERNS = [
   ['ZEE5', /zee5/i]
 ];
 const OTT_PLATFORM_NAMES = OTT_PLATFORM_PATTERNS.map(([name]) => name);
+// Best-effort title-search deep links per platform (none of these services
+// offer stable public per-title URLs without their own internal IDs, so a
+// pre-filled search on the platform is the reliable version of "open the
+// OTT with the title"). %s is replaced with the encoded title.
+const OTT_PLATFORM_SEARCH_URLS = {
+  'Netflix': 'https://www.netflix.com/search?q=%s',
+  'Amazon Prime Video': 'https://www.primevideo.com/search?phrase=%s',
+  'JioHotstar': 'https://www.hotstar.com/in/explore?search_query=%s',
+  'Disney+': 'https://www.disneyplus.com/search?q=%s',
+  'Apple TV+': 'https://tv.apple.com/search?term=%s',
+  'Max': 'https://play.max.com/search?q=%s',
+  'Hulu': 'https://www.hulu.com/search?q=%s',
+  'Paramount+': 'https://www.paramountplus.com/search/?query=%s',
+  'Peacock': 'https://www.peacocktv.com/watch/search?q=%s',
+  'SonyLIV': 'https://www.sonyliv.com/search?q=%s',
+  'ZEE5': 'https://www.zee5.com/search?q=%s'
+};
+function ottSearchUrl(platform, title) {
+  const template = OTT_PLATFORM_SEARCH_URLS[platform];
+  if (!template || !title) return '';
+  return template.replace('%s', encodeURIComponent(title));
+}
 
 // ISO 3166-1 alpha-2 -> English name, for the countries TMDB/JustWatch
 // realistically return watch-provider data for. Falls back to the raw code
@@ -3113,25 +3139,46 @@ async function expandPool(manual=true) {
 
       let processedCandidates = 0;
 
-      for (const candidate of toFetch) {
+      // Candidates fetch COLLECTION_FETCH_CONCURRENCY at a time: the network
+      // round-trips (Wikipedia article + TMDB lookups) overlap, while all
+      // state mutation stays strictly serial in the results loop below, so
+      // there is no concurrent-write risk against state.movies.
+      for (let chunkStart = 0; chunkStart < toFetch.length; chunkStart += COLLECTION_FETCH_CONCURRENCY) {
         if (fetchAbortRequested || collectionSatisfied || attempts >= attemptBudget || added >= FETCH_MAX_ADDED_PER_RUN) break;
 
-        const title = typeof candidate === 'string' ? candidate : candidate.title;
-        const lane = typeof candidate === 'string' ? null : candidate.lane;
-        const pageId = typeof candidate === 'string' ? '' : candidate.pageid;
-        const fetchMode = lane?.mode || mode;
-
-        seenThisRun.add(normaliseTitleKey(title));
-        attempts++;
-        progress(`Checking ${fetchMode === 'shows' ? 'show' : fetchMode === 'movies' ? 'movie' : 'title'}…`, title);
-        await nextPaint();
-
-        try {
+        const attemptsBeforeChunk = attempts;
+        const chunk = toFetch.slice(chunkStart, chunkStart + Math.min(COLLECTION_FETCH_CONCURRENCY, attemptBudget - attempts));
+        const jobs = chunk.map(candidate => {
+          const title = typeof candidate === 'string' ? candidate : candidate.title;
+          const lane = typeof candidate === 'string' ? null : candidate.lane;
+          const pageId = typeof candidate === 'string' ? '' : candidate.pageid;
+          const fetchMode = lane?.mode || mode;
+          seenThisRun.add(normaliseTitleKey(title));
+          attempts++;
           const diagnostics = {};
-          const movie = pageId
-            ? await fetchWikiMovieByPageId(pageId, fetchMode, {ai:false, diagnostics, trustedLane:lane})
-            : await fetchWikiMovie(title, fetchMode, diagnostics, {ai:false, trustedLane:lane});
+          const work = pageId
+            ? fetchWikiMovieByPageId(pageId, fetchMode, {ai:false, diagnostics, trustedLane:lane})
+            : fetchWikiMovie(title, fetchMode, diagnostics, {ai:false, trustedLane:lane});
+          return {title, lane, fetchMode, diagnostics, work};
+        });
 
+        progress(`Checking ${jobs.length > 1 ? jobs.length + ' titles' : jobs[0]?.fetchMode === 'shows' ? 'show' : jobs[0]?.fetchMode === 'movies' ? 'movie' : 'title'}…`, jobs.map(job => job.title).join(' · '));
+        await nextPaint();
+        const settled = await Promise.allSettled(jobs.map(job => job.work));
+
+        let aborted = false;
+        for (let i = 0; i < jobs.length; i++) {
+          const {lane, fetchMode, diagnostics} = jobs[i];
+          const outcome = settled[i];
+          if (outcome.status === 'rejected') {
+            if (fetchAbortRequested || outcome.reason?.name === 'AbortError') { aborted = true; break; }
+            outcomes.parser++;
+            const reason = String(outcome.reason?.message || 'Wikipedia request failed');
+            parserReasons[reason] = (parserReasons[reason] || 0) + 1;
+            processedCandidates++;
+            continue;
+          }
+          const movie = outcome.value;
           if (movie && (isMovieHidden(movie) || isRollingPoolExcluded(movie))) {
             outcomes.hidden++;
           } else if (movie && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
@@ -3153,17 +3200,14 @@ async function expandPool(manual=true) {
             const reason = diagnostics.reason || 'Wikipedia parser rejected page';
             parserReasons[reason] = (parserReasons[reason] || 0) + 1;
           }
-        } catch (error) {
-          if (fetchAbortRequested || error?.name === 'AbortError') break;
-          outcomes.parser++;
-          const reason = String(error?.message || 'Wikipedia request failed');
-          parserReasons[reason] = (parserReasons[reason] || 0) + 1;
+          processedCandidates++;
         }
+        if (aborted) break;
 
-        processedCandidates++;
-        progress('Evaluating collection health…', title);
-
-        if (attempts % 20 === 0 && !fetchAbortRequested) await abortableSleep(WIKI_BATCH_PAUSE_MS);
+        progress('Evaluating collection health…');
+        // Same politeness pause as the old per-title loop (every ~20 attempts),
+        // detected by crossing a multiple-of-20 boundary within this chunk.
+        if (Math.floor(attempts / 20) > Math.floor(attemptsBeforeChunk / 20) && !fetchAbortRequested) await abortableSleep(WIKI_BATCH_PAUSE_MS);
       }
 
       if (fetchAbortRequested && processedCandidates < toFetch.length) {
@@ -3332,6 +3376,22 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
     pendingSearchResetAfterRatingId = String(hiddenRecord.id || '');
     render();
     showToast(`Restored "${hiddenRecord.title}" from Hidden`, 'success');
+    return true;
+  }
+  if (existing && isMovieHidden(existing)) {
+    // The record is physically in the library but a removal blocklist entry
+    // hides it from every view — "already in your library" would be a dead
+    // end (invisible title, nothing to click, no way back). Deliberately
+    // searching for a removed title IS the re-add gesture: lift the block
+    // and surface the existing record.
+    unblockTitleForManualSearch(existing.wikiTitle || existing.pageTitle || existing.title);
+    releaseRollingPoolExclusion(existing.title);
+    touchRecord(existing);
+    pendingSearchResetAfterRatingId = String(existing.id || '');
+    saveLocalState();
+    queueDriveSync();
+    render();
+    showToast(`Restored "${existing.title}" to your library`, 'success');
     return true;
   }
   if (existing) {
@@ -3530,6 +3590,14 @@ function tmdbCandidateYear(result, mediaType) {
   return Number.isFinite(year) ? year : null;
 }
 
+function tmdbComparableTitle(value) {
+  return String(value || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
 async function tmdbSearchCandidate(title, year, mediaType) {
   const endpoint = mediaType === 'tv' ? 'tv' : 'movie';
   const yearParam = mediaType === 'tv' ? 'first_air_date_year' : 'year';
@@ -3549,7 +3617,20 @@ async function tmdbSearchCandidate(title, year, mediaType) {
   });
   const pool = inYearWindow.length ? inYearWindow : (year ? [] : results);
   if (!pool.length) return null;
-  pool.sort((a, b) => Number(b.popularity || 0) - Number(a.popularity || 0));
+  // Popularity alone routinely picked a more famous but WRONG title over the
+  // exact-named one the library actually holds (wrong posters/genres on
+  // cards). An exact title match — against the localized or original name —
+  // now always outranks popularity; popularity only breaks ties between
+  // exact matches, and only decides outright when nothing matches exactly.
+  const wanted = tmdbComparableTitle(title);
+  const exactMatch = item => wanted && (
+    tmdbComparableTitle(item.title || item.name) === wanted ||
+    tmdbComparableTitle(item.original_title || item.original_name) === wanted
+  );
+  pool.sort((a, b) =>
+    (exactMatch(b) - exactMatch(a)) ||
+    Number(b.popularity || 0) - Number(a.popularity || 0)
+  );
   return pool[0];
 }
 
@@ -3635,13 +3716,25 @@ async function attachTmdbDetails(movie) {
   return movie;
 }
 
+// Wikipedia must complete first (it establishes the title's identity —
+// title/year/format — that both other services key off), but TMDB and
+// Gemini are independent of EACH OTHER, so they run concurrently instead
+// of TMDB (two sequential HTTP calls) blocking the AI request and vice
+// versa. attachTmdbDetails never rejects (it swallows its own errors), so
+// Promise.all's failure semantics here are exactly applyAiTags' own.
+async function attachTmdbAndAiConcurrently(movie, opts={}) {
+  if (!movie) return movie;
+  const tmdbWork = attachTmdbDetails(movie);
+  if (opts.ai !== false) await Promise.all([tmdbWork, applyAiTags(movie)]);
+  else await tmdbWork;
+  return movie;
+}
+
 async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) {
   const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages|revisions&piprop=thumbnail|name&explaintext=1&exlimit=1&cllimit=80&pithumbsize=500&rvprop=content&rvslots=main&formatversion=2&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, wikiTitle, mode, diagnostics, opts);
-  if (movie) await attachTmdbDetails(movie);
-  if (movie && opts.ai !== false) await applyAiTags(movie);
-  return movie;
+  return movie ? attachTmdbAndAiConcurrently(movie, opts) : movie;
 }
 
 async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
@@ -3650,9 +3743,7 @@ async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
   const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages|revisions&piprop=thumbnail|name&explaintext=1&exlimit=1&cllimit=80&rvprop=content&rvslots=main&pithumbsize=500&formatversion=2&format=json&origin=*`;
   const data = await wikiApiJson(url);
   const movie = parseWikiMovieResponse(data, clean, mode, opts.diagnostics || null, opts);
-  if (movie) await attachTmdbDetails(movie);
-  if (movie && opts.ai !== false) await applyAiTags(movie);
-  return movie;
+  return movie ? attachTmdbAndAiConcurrently(movie, opts) : movie;
 }
 
 function needsReceptionBackfill(movie) {
@@ -3723,8 +3814,10 @@ async function runReceptionBackfill() {
   // Pool expansion and AI tagging outrank this; TMDB backfill is lower
   // priority than this (see runTmdbBackfill's own guard) so the two never
   // run at the same time either — exactly one background fetch loop owns
-  // the shared progress bar at any moment.
-  if (!libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || tmdbBackfillInProgress) {
+  // the shared progress bar at any moment. autoFetchPaused ("Pause
+  // collection") halts this loop too but keeps polling so it resumes
+  // automatically once collection resumes.
+  if (autoFetchPaused || !libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || tmdbBackfillInProgress) {
     scheduleReceptionBackfill(3000);
     return;
   }
@@ -3736,7 +3829,9 @@ async function runReceptionBackfill() {
   try {
     let index = 0;
     for (const movie of batch) {
-      if (poolExpansionInProgress || backgroundAiTaggingInProgress) break;
+      // Per-title pause check so "Pause collection" stops this within one
+      // title instead of finishing the whole batch first.
+      if (autoFetchPaused || poolExpansionInProgress || backgroundAiTaggingInProgress) break;
       index++;
       showFetchProgress(
         `Reception data refresh · ${index}/${batch.length}`,
@@ -3862,7 +3957,11 @@ function scheduleTmdbBackfill(delay=4000) {
 // toggleTmdbBackfillPaused().
 async function runTmdbBackfill() {
   if (state.settings.tmdbBackfillPaused) return;
-  if (!libraryWritesUnlocked || tmdbBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) {
+  // autoFetchPaused ("Pause collection") halts this loop too, but keeps
+  // polling so it resumes by itself the moment collection is resumed —
+  // pausing collection should quiet ALL background fetching, not leave the
+  // progress bar reappearing seconds later for a different loop.
+  if (autoFetchPaused || !libraryWritesUnlocked || tmdbBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) {
     scheduleTmdbBackfill(3000);
     return;
   }
@@ -3874,6 +3973,9 @@ async function runTmdbBackfill() {
   try {
     let index = 0;
     for (const movie of batch) {
+      // Checked per title, not just at batch start — clicking Pause takes
+      // effect within the current title instead of after the whole batch.
+      if (state.settings.tmdbBackfillPaused || autoFetchPaused) break;
       if (poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) break;
       index++;
       showFetchProgress(
@@ -5087,7 +5189,15 @@ function updateLibraryHealth() {
   const tmdbBtn = document.getElementById('tmdbBackfillToggleBtn');
   if (tmdbBtn) {
     const paused = !!state.settings.tmdbBackfillPaused;
-    tmdbBtn.textContent = paused ? 'Resume TMDB refresh' : 'Pause TMDB refresh';
+    const remaining = tmdbBackfillCandidates().length;
+    // "Pause TMDB refresh" with no qualifier reads as "something is running
+    // right now" — but the button previously showed that label purely from
+    // the paused flag, even with zero pending titles and nothing running.
+    // The label now always says what state it's actually in.
+    if (paused) tmdbBtn.textContent = remaining ? `Resume TMDB refresh (${remaining} pending)` : 'Resume TMDB refresh';
+    else if (!remaining) tmdbBtn.textContent = 'Pause TMDB refresh (caught up)';
+    else if (tmdbBackfillInProgress) tmdbBtn.textContent = `Pause TMDB refresh (running · ${remaining})`;
+    else tmdbBtn.textContent = `Pause TMDB refresh (${remaining} queued)`;
     tmdbBtn.classList.toggle('active', paused);
   }
 }
@@ -5659,17 +5769,6 @@ function buildCard(movie, opts={}) {
 // hover-triggered — the pointer would end up over whatever card the reflow
 // left underneath it. Click/tap toggles on every device instead.
 //
-// v24: only one card expands at a time, and expanding physically moves the
-// card's DOM node to right after the last card in its own row (restored to
-// its original spot on collapse) instead of toggling grid-column in place.
-// Toggling in place left the card in the middle of its row in the DOM, and
-// CSS Grid's auto-placement can't back-fill a gap earlier in the flow once
-// a later item has already claimed a full-width row of its own — the rest
-// of that row got pushed into a completely different row, leaving a gap
-// where they used to sit. Moving the node to the end of its row first means
-// the row's other cards compact together with no gap ("fill the vacuum"),
-// then the expanded card opens as a clean new row directly beneath them.
-//
 // v28: background work (backfills, tag normalisation, pool expansion) calls
 // render(), which rebuilds the active grid from scratch — a fresh DOM node
 // with no .expanded class, collapsing whatever the user had open mid-read.
@@ -5677,39 +5776,20 @@ function buildCard(movie, opts={}) {
 // unlike a DOM reference); reapplyExpandedCardAfterRender() re-expands that
 // movie's freshly-built card after every render() call, so the only way to
 // actually collapse a card is to click it again.
+//
+// v31: the v24 approach of physically moving the card's DOM node to the end
+// of its row is gone. It pushed the expanded card a full row DOWN from where
+// the user clicked (forcing a scroll to find it) and still left a mid-grid
+// hole whenever the moved card had been the row's last item. The grid now
+// uses grid-auto-flow: row dense (styles.css): the card keeps its DOM
+// position, .expanded makes it span the full width at its own row, and
+// dense packing pulls the row's remaining cards up into the hole
+// automatically — the card opens right where it was clicked and the only
+// possible gap is the normal partial last row of the whole grid.
 let expandedMovieId = '';
-let expandedCardState = null; // {card, parent, nextSibling} — restore point for collapse
-
-function gridColumnCount(grid) {
-  const tracks = (getComputedStyle(grid).gridTemplateColumns || '').trim().split(/\s+/).filter(Boolean);
-  return Math.max(1, tracks.length);
-}
 
 function collapseExpandedCard() {
-  if (!expandedCardState) return;
-  const { card, parent, nextSibling } = expandedCardState;
-  expandedCardState = null;
-  card.classList.remove('expanded');
-  if (!card.isConnected || !parent?.isConnected) return;
-  if (nextSibling?.isConnected && nextSibling.parentNode === parent) parent.insertBefore(card, nextSibling);
-  else parent.appendChild(card);
-}
-
-function expandCardElement(card) {
-  const parent = card.parentElement;
-  const cards = parent ? Array.from(parent.children).filter(el => el.classList.contains('movie-card')) : [];
-  const index = cards.indexOf(card);
-  if (!parent || index === -1) { card.classList.add('expanded'); return; }
-
-  const columns = gridColumnCount(parent);
-  const rowEndIndex = Math.min(cards.length - 1, Math.floor(index / columns) * columns + columns - 1);
-  const rowLastCard = cards[rowEndIndex];
-  const anchor = rowLastCard === card ? card.nextElementSibling : rowLastCard.nextElementSibling;
-
-  expandedCardState = { card, parent, nextSibling: card.nextElementSibling };
-  if (anchor) parent.insertBefore(card, anchor);
-  else parent.appendChild(card);
-  card.classList.add('expanded');
+  document.querySelectorAll('.movie-card.expanded').forEach(card => card.classList.remove('expanded'));
 }
 
 function toggleCardReveal(event, card) {
@@ -5719,7 +5799,7 @@ function toggleCardReveal(event, card) {
   const collapsingSelf = card.classList.contains('expanded');
   collapseExpandedCard();
   if (collapsingSelf) { expandedMovieId = ''; return; }
-  expandCardElement(card);
+  card.classList.add('expanded');
   expandedMovieId = card.id.replace(/^card-/, '');
 }
 
@@ -5745,10 +5825,7 @@ function reapplyExpandedCardAfterRender() {
   const targetId = 'card-' + expandedMovieId;
   const card = grid ? Array.from(grid.children).find(el => el.id === targetId) : null;
   if (!card || card.classList.contains('expanded')) return;
-  // The old expandedCardState (if any) points at a node a full render just
-  // discarded; expandCardElement below captures a fresh restore point.
-  expandedCardState = null;
-  expandCardElement(card);
+  card.classList.add('expanded');
 }
 
 // v29: render() isn't the only place a grid gets rebuilt from scratch —
@@ -5797,7 +5874,11 @@ function renderWatchProviders(movie) {
   // for it now, unlike the old flip card's fixed poster-shaped box.
   const rows = matches.map(({platform, countries}) => {
     const names = countries.map(countryName).sort().join(', ');
-    return `<div class="watch-platform-row-item"><span class="watch-chip">${attrSafe(platform)}</span><span class="watch-countries">${attrSafe(names)}</span></div>`;
+    const url = ottSearchUrl(platform, movie.title);
+    const chip = url
+      ? `<a class="watch-chip" href="${attrSafe(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Open ${attrSafe(movie.title)} on ${attrSafe(platform)}">${attrSafe(platform)}</a>`
+      : `<span class="watch-chip">${attrSafe(platform)}</span>`;
+    return `<div class="watch-platform-row-item">${chip}<span class="watch-countries">${attrSafe(names)}</span></div>`;
   }).join('');
   const watchUrl = movie.tmdbId ? `https://www.themoviedb.org/${movie.tmdbMediaType === 'tv' ? 'tv' : 'movie'}/${movie.tmdbId}/watch` : '';
   const link = watchUrl ? `<a class="watch-link" href="${attrSafe(watchUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Streaming availability data via JustWatch">via JustWatch</a>` : '';
@@ -6352,6 +6433,19 @@ function removeTitlePermanently(id, e) {
   state.deletedMovieRecords[id] = { id, titleKey:key, reason:'removed', at:stamp, updatedAt:stamp };
   delete state.movies[id];
   delete state.hiddenTitles[id];
+  // The wrongPick blocks by TITLE, but the deletes above were by the one
+  // clicked ID — a duplicate record of the same title under another id
+  // (wiki fetch vs manual add) would survive in state.movies, invisible in
+  // every view (title-blocked) yet still matching "already in your library"
+  // on search. Remove every record carrying this title, not just one copy.
+  [state.movies, state.hiddenTitles].forEach(collection => {
+    Object.entries(collection || {}).forEach(([dupId, record]) => {
+      const dupKey = normaliseTitleKey(record?.wikiTitle || record?.pageTitle || record?.title);
+      if (dupKey !== key) return;
+      state.deletedMovieRecords[dupId] = { id:dupId, titleKey:key, reason:'removed', at:stamp, updatedAt:stamp };
+      delete collection[dupId];
+    });
+  });
   invalidateTagCaches();
   rebuildTagBrain();
   computeTagWeights();
@@ -7767,7 +7861,10 @@ let driveSyncTimer=null;
 let driveSyncDeferred=false;
 let driveSyncDeferredSince=0;
 const DRIVE_SYNC_DEBOUNCE_MS=1200;
-const DRIVE_SYNC_MAX_DEFER_MS=10000;
+// let, not const: production code never reassigns this, but the test
+// harness temporarily shrinks it to avoid a real 10s+ wall-clock wait when
+// verifying the hard-cap-overrides-deferral behavior (see assert-current.mjs).
+let DRIVE_SYNC_MAX_DEFER_MS=10000;
 const DRIVE_TOKEN_KEY='cinelens_drive_token_v1';
 const DRIVE_TOKEN_EXPIRY_KEY='cinelens_drive_token_expiry_v1';
 const DRIVE_SILENT_TOKEN_TIMEOUT_MS=8000;
