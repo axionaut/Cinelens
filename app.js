@@ -99,7 +99,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 31;
+const APP_VERSION = 32;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -730,6 +730,28 @@ function cleanTagArray(tags, movie=null, keepLowConfidence=false) {
   )];
 }
 
+function normalizeEvidenceText(value='') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function evidenceSupportedByStory(evidenceText, storyText) {
+  const evidence = normalizeEvidenceText(evidenceText);
+  const story = normalizeEvidenceText(storyText);
+  if (!evidence || !story) return false;
+  if (story.includes(evidence)) return true;
+  if (evidence.split(/\s+/).filter(Boolean).length <= 8) return false;
+  const evidenceTokens = [...new Set(evidence.split(/\s+/).filter(token => token.length >= 4))];
+  if (!evidenceTokens.length) return false;
+  const storyTokens = new Set(story.split(/\s+/).filter(token => token.length >= 4));
+  const supported = evidenceTokens.filter(token => storyTokens.has(token)).length;
+  return supported / evidenceTokens.length >= 0.8;
+}
+
 
 function wikiPageIdFromMovie(movie) {
   if (!movie) return '';
@@ -965,7 +987,7 @@ function cleanAiTagResults(result, movie) {
     const tag = rawTag;
     const confidence = Number(item?.confidence);
     const support = String(item?.evidence || '').trim().slice(0, 240);
-    if (!tag || confidence < AI_TAG_MIN_CONFIDENCE || !support || genres.has(tag) || isMetaTag(tag) || suppressedTags.has(tag) || !tagAllowed(movie, tag) || !rawTagAllowed(movie, tag)) return;
+    if (!tag || confidence < AI_TAG_MIN_CONFIDENCE || !support || !evidenceSupportedByStory(support, movie?.storyText || '') || genres.has(tag) || isMetaTag(tag) || suppressedTags.has(tag) || !tagAllowed(movie, tag) || !rawTagAllowed(movie, tag)) return;
     const cleaned = cleanTagArray([tag], movie, false)[0];
     if (!cleaned || tags.includes(cleaned)) return;
     tags.push(cleaned);
@@ -1312,22 +1334,48 @@ async function consolidateTagCloud() {
   }
 }
 
+function reconcileAiTagSet(movie, cleaned) {
+  const incomingTags = cleanTagArray(cleaned?.tags || [], movie, false).slice(0, AI_TAG_MAX_COUNT);
+  const incomingEvidence = cleaned?.evidence || {};
+  const sameStory = movie?.aiTagging?.storyHash === aiStoryHash(movie?.storyText || '');
+  const existingEvidence = movie?.aiTagEvidence || {};
+  if (!sameStory || !Object.keys(existingEvidence).length) {
+    return {tags:incomingTags, evidence:Object.fromEntries(incomingTags.map(tag => [tag, incomingEvidence[tag]]).filter(([, evidence]) => evidence))};
+  }
+  const suppressedTags = suppressedTagSet(movie);
+  const suppressedRawTags = suppressedRawTagSet(movie);
+  const keepers = cleanTagArray(movie.tags || [], movie, false).filter(tag => {
+    const normalised = normaliseTagName(tag);
+    const stored = existingEvidence[normalised] || existingEvidence[tag];
+    return normalised && !suppressedTags.has(normalised) && !suppressedRawTags.has(normalised) && evidenceSupportedByStory(stored?.evidence || '', movie.storyText || '');
+  });
+  const mergedTags = [...new Set([...keepers, ...incomingTags])].slice(0, AI_TAG_MAX_COUNT);
+  const mergedEvidence = {};
+  mergedTags.forEach(tag => {
+    const existing = existingEvidence[tag];
+    if (existing) mergedEvidence[tag] = existing;
+    if (incomingEvidence[tag]) mergedEvidence[tag] = incomingEvidence[tag];
+  });
+  return {tags:mergedTags, evidence:mergedEvidence};
+}
+
 function commitAiTagSet(movie, cleaned, model='') {
-  if (cleaned.tags.length < AI_TAG_MIN_COUNT) throw new Error(`AI returned too few usable tags for ${movie.title}`);
-  movie.tags = cleaned.tags;
-  movie.coreTags = [...cleaned.tags];
-  movie.plotTags = [...cleaned.tags];
-  movie.descriptorTags = [...cleaned.tags];
+  const reconciled = reconcileAiTagSet(movie, cleaned);
+  if (reconciled.tags.length < AI_TAG_MIN_COUNT) throw new Error(`AI returned too few usable tags for ${movie.title}`);
+  movie.tags = reconciled.tags;
+  movie.coreTags = [...reconciled.tags];
+  movie.plotTags = [...reconciled.tags];
+  movie.descriptorTags = [...reconciled.tags];
   movie.rawDescriptors = [];
   movie.tagged = true;
-  movie.aiTagEvidence = cleaned.evidence;
+  movie.aiTagEvidence = reconciled.evidence;
   delete movie.aiTagPartial;
   movie.aiTagging = {
     status:'verified',
     model:String(model || ''),
     promptVersion:AI_TAG_PROMPT_VERSION,
     storyHash:aiStoryHash(movie.storyText),
-    completedTagCount:cleaned.tags.length,
+    completedTagCount:reconciled.tags.length,
     taggedAt:new Date().toISOString()
   };
   movie.retagStatus = 'verified';
@@ -6667,8 +6715,11 @@ async function retagFromStoredData(id, opts={}) {
     scheduleTagCloudNormalization(1200);
     render();
     if (opts.successToast !== false) {
-      const addedTags = scoringTags(updated).filter(tag => !beforeTags.has(tag));
-      showToast(addedTags.length ? `Re-tagged "${updated.title}" · +${addedTags.length} tags` : `Re-tagged "${updated.title}" · tags refreshed`, 'success');
+      const afterTags = new Set(scoringTags(updated));
+      const kept = [...beforeTags].filter(tag => afterTags.has(tag)).length;
+      const added = [...afterTags].filter(tag => !beforeTags.has(tag)).length;
+      const dropped = [...beforeTags].filter(tag => !afterTags.has(tag)).length;
+      showToast(`Re-tagged "${updated.title}" · ${kept} kept · +${added} new · ${dropped} dropped`, 'success');
     }
     return updated;
   } catch(err) {
