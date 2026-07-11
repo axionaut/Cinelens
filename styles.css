@@ -893,6 +893,9 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .show-card .tag,.show-card .tag-insight-chip,.show-card .tb-tag,.show-card .genre-chip,.show-card .watch-chip{background:var(--show-chip-bg,var(--palette-chip-bg));border-color:var(--show-chip-border,var(--palette-chip-border));color:var(--show-tag-text,var(--tag-text))}
 .film-card .genre-chip.clickable:hover,.film-card .genre-chip.matched{color:var(--film-card-border);border-color:var(--film-card-border);background:color-mix(in srgb,var(--film-card-border) 16%,var(--film-chip-bg))}
 .show-card .genre-chip.clickable:hover,.show-card .genre-chip.matched{color:var(--show-card-border);border-color:var(--show-card-border);background:color-mix(in srgb,var(--show-card-border) 16%,var(--show-chip-bg))}
+@media(min-width:769px){
+  .movie-card:not(.expanded){max-width:300px}
+}
 @media(max-width:768px){
   .movies-grid{grid-template-columns:1fr}
   .movie-card{aspect-ratio:3/4}
