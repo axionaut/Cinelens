@@ -99,7 +99,7 @@ const WIKI_YEAR_INDEX_SOURCES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 32;
+const APP_VERSION = 33;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -7940,6 +7940,13 @@ async function silentlyRenewDriveToken() {
     await requestDriveTokenSilent({allowPromptlessRequest:true});
     state.drive.connected = true;
     setDriveStatus('connected');
+    if (!libraryWritesUnlocked) {
+      const restored = await restoreDriveSession(false, {preferDrive:true});
+      if (restored && !libraryWritesUnlocked) {
+        startupFinalized = false;
+        finalizeStartupAfterDrive({allowCollection:true});
+      }
+    }
   } catch(e) {
     state.drive.connected = false;
     setDriveStatus('');
@@ -7964,7 +7971,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   if (!state.drive.enabled) return;
   const expiry = Number(localStorage.getItem(DRIVE_TOKEN_EXPIRY_KEY) || 0);
-  if (!expiry || expiry - Date.now() < DRIVE_TOKEN_REFRESH_LEEWAY_MS) silentlyRenewDriveToken();
+  if (!libraryWritesUnlocked || !expiry || expiry - Date.now() < DRIVE_TOKEN_REFRESH_LEEWAY_MS) silentlyRenewDriveToken();
 });
 
 function getStoredDriveToken() {
