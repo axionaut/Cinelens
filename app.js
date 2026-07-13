@@ -86,20 +86,28 @@ const WIKI_SOURCES = {
   englishMovies: ['Category:English-language_films'],
   hindiMovies: ['Category:Hindi-language_films']
 };
-const WIKI_YEAR_INDEX_SOURCES = {
-  englishMovies: 'Category:English-language_films_by_year',
-  hindiMovies: 'Category:Hindi-language_films_by_year',
+const DISCOVERY_SOURCE_VERSION = 2;
+const DISCOVERY_SOURCE_TEMPLATES = {
+  englishMovies: [
+    {label:'English-language films', title:year => `Category:${year} English-language films`},
+    {label:'American films', title:year => `Category:${year} American films`},
+    {label:'British films', title:year => `Category:${year} British films`}
+  ],
+  hindiMovies: [
+    {label:'Hindi-language films', title:year => `Category:${year} Hindi-language films`},
+    {label:'Indian films', title:year => `Category:${year} Indian films`}
+  ],
   englishShows: [
-    'Category:American_television_series_debuts_by_year',
-    'Category:British_television_series_debuts_by_year',
-    'Category:Canadian_television_series_debuts_by_year',
-    'Category:Australian_television_series_debuts_by_year',
-    'Category:New_Zealand_television_series_debuts_by_year',
-    'Category:Irish_television_series_debuts_by_year'
+    {label:'American TV debuts', title:year => `Category:${year} American television series debuts`},
+    {label:'British TV debuts', title:year => `Category:${year} British television series debuts`},
+    {label:'Canadian TV debuts', title:year => `Category:${year} Canadian television series debuts`},
+    {label:'Australian TV debuts', title:year => `Category:${year} Australian television series debuts`},
+    {label:'New Zealand TV debuts', title:year => `Category:${year} New Zealand television series debuts`},
+    {label:'Irish TV debuts', title:year => `Category:${year} Irish television series debuts`}
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 34;
+const APP_VERSION = 35;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -419,6 +427,7 @@ const ROLLING_POOL_MAX_PER_SEGMENT = 90;
 const ROLLING_POOL_PENDING_MIN_PER_SEGMENT = 2;
 const ROLLING_POOL_PENDING_MAX_PER_SEGMENT = 8;
 const ROLLING_POOL_EXCLUSION_CAP = 5000;
+const DISCOVERY_LEDGER_CAP = 2000;
 const DRIVE_TOKEN_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
 const TASTE_STORY_VERSION = 'cinelens-taste-story-v1';
 const TASTE_STORY_MIN_RATINGS = 3;
@@ -456,7 +465,6 @@ let similarTitleSourceId = '';
 // A searched title remains visible after adding. Its search is cleared only when
 // that same title is subsequently rated.
 let pendingSearchResetAfterRatingId = '';
-const yearCategoryIndexCache = {};
 const yearCategoryMembersCache = {};
 let state = {
   movies: {},
@@ -477,6 +485,7 @@ let state = {
   tagNormalization: { version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:'' },
   tasteStory: { version:TASTE_STORY_VERSION, profileHash:'', title:'', story:'', generatedAt:'', status:'idle', error:'' },
   discoveryCursor: {},
+  discoveryLedger: {},
   meta: { updatedAt:'' },
   poolFetched: false
 };
@@ -1857,6 +1866,20 @@ function movieIdentityKeys(movie) {
   return [...keys];
 }
 
+function candidatePageId(value) {
+  return String(value?.pageid || value?.pageId || value?.wikiPageId || wikiPageIdFromMovie(value) || '').replace(/^wiki_/, '');
+}
+
+function recordMatchesDiscoveryCandidate(record, candidate) {
+  if (!record || !candidate) return false;
+  const candidateId = candidatePageId(candidate);
+  const recordId = candidatePageId(record);
+  if (candidateId && recordId) return candidateId === recordId;
+  const key = normaliseTitleKey(typeof candidate === 'string' ? candidate : candidate.title);
+  return !!key && [record.title, record.wikiTitle, record.pageTitle]
+    .some(title => normaliseTitleKey(title) === key);
+}
+
 function sameMovieIdentity(a, b) {
   const bKeys = new Set(movieIdentityKeys(b));
   return movieIdentityKeys(a).some(key => bKeys.has(key));
@@ -2075,11 +2098,9 @@ function collapseDuplicateMovies(collection=state.movies) {
 
 function obviousNonMovieTitle(title) {
   const value = String(title || '').trim();
-  // Treat only actual Wikipedia list/namespace pages as non-title pages.
-  // A normal title may legitimately contain words such as “List”, “Timeline”
-  // or “Universe” (for example, The Bucket List) and must not be rejected.
-  return /^(?:list of|category:|template:|wikipedia:|portal:)/i.test(value)
-    || /^(?:filmography|discography|soundtrack)\s*(?:of|:)\b/i.test(value);
+  // Only impossible article namespaces are rejected before page evidence.
+  // Namespace-0 titles go through infobox, lead and pageprops validation.
+  return /^(?:category|template|file|wikipedia|portal|help|user|talk):/i.test(value);
 }
 
 function isFranchiseOverviewPage(pageTitle, extract, cats=[], opts={}) {
@@ -2340,17 +2361,11 @@ async function wikiApiJson(url) {
 }
 
 function hiddenTitleMatches(value) {
-  const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
-  if (!key) return false;
-  return Object.values(state.hiddenTitles || {}).some(movie => [movie.title, movie.wikiTitle, movie.pageTitle]
-    .some(title => normaliseTitleKey(title) === key));
+  return Object.values(state.hiddenTitles || {}).some(movie => recordMatchesDiscoveryCandidate(movie, value));
 }
 
 function wrongPickMatches(value) {
-  const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
-  if (!key) return false;
-  return Object.values(state.wrongPicks || {}).some(item => [item.title, item.wikiTitle, item.pageTitle]
-    .some(title => normaliseTitleKey(title) === key));
+  return Object.values(state.wrongPicks || {}).some(item => recordMatchesDiscoveryCandidate(item, value));
 }
 
 function isHindiShowRecord(movie) {
@@ -2467,12 +2482,7 @@ function isMovieHidden(movie) {
 }
 
 function rollingPoolExclusionMatches(value) {
-  const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
-  if (!key) return false;
-  return Object.values(state.rollingPoolExclusions || {}).some(record =>
-    [record?.title, record?.wikiTitle, record?.pageTitle]
-      .some(title => normaliseTitleKey(title) === key)
-  );
+  return Object.values(state.rollingPoolExclusions || {}).some(record => recordMatchesDiscoveryCandidate(record, value));
 }
 
 function isRollingPoolExcluded(movie) {
@@ -2483,11 +2493,11 @@ function isRollingPoolExcluded(movie) {
 
 function releaseRollingPoolExclusion(value) {
   const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
-  if (!key || !state.rollingPoolExclusions) return false;
+  const pageId = candidatePageId(typeof value === 'string' ? null : value);
+  if ((!key && !pageId) || !state.rollingPoolExclusions) return false;
   let changed = false;
   Object.entries(state.rollingPoolExclusions).forEach(([recordKey, record]) => {
-    const matches = [record?.title, record?.wikiTitle, record?.pageTitle]
-      .some(title => normaliseTitleKey(title) === key);
+    const matches = recordMatchesDiscoveryCandidate(record, value);
     if (!matches) return;
     delete state.rollingPoolExclusions[recordKey];
     changed = true;
@@ -2690,6 +2700,9 @@ function pruneRollingCandidatePool({reason='rotation'}={}) {
       wikiTitle:movie.wikiTitle || '',
       pageTitle:movie.pageTitle || '',
       wikiPageId:movie.wikiPageId || wikiPageIdFromMovie(movie),
+      discoveryLane:movie.discoveryLane || '',
+      discoveryCycle:Number(movie.discoveryCycle || 0),
+      discoverySource:movie.discoverySource || '',
       reason:'rolling-pool',
       at:stamp,
       updatedAt:stamp
@@ -2869,60 +2882,55 @@ function collectionMinYear() {
   return Math.max(1900, Math.min(new Date().getFullYear(), Number(state.settings?.minYear) || 1970));
 }
 
+function collectionMaxYear() {
+  return new Date().getFullYear();
+}
+
+function discoverySourcesForYear(laneKey, year) {
+  return (DISCOVERY_SOURCE_TEMPLATES[laneKey] || []).map((source, sourceIndex) => ({
+    key:`${laneKey}:${sourceIndex}:${year}`,
+    label:source.label,
+    title:source.title(year),
+    type:'category'
+  }));
+}
+
+function freshDiscoveryCursor() {
+  return {
+    version:DISCOVERY_SOURCE_VERSION,
+    year:collectionMaxYear(),
+    sourceIndex:0,
+    sourceTitle:'',
+    offset:0,
+    cycles:0
+  };
+}
+
 function resetYearBoundedDiscovery() {
-  Object.keys(yearCategoryIndexCache).forEach(key => delete yearCategoryIndexCache[key]);
   Object.keys(yearCategoryMembersCache).forEach(key => delete yearCategoryMembersCache[key]);
   if (!state.discoveryCursor || typeof state.discoveryCursor !== 'object') state.discoveryCursor = {};
   COLLECTION_LANES.forEach(lane => {
-    state.discoveryCursor[lane.key] = {categoryIndex:0, categoryTitle:'', offset:0, cycles:0};
+    state.discoveryCursor[lane.key] = freshDiscoveryCursor();
   });
-}
-
-async function fetchYearCategoryIndex(laneKey) {
-  const source = WIKI_YEAR_INDEX_SOURCES[laneKey];
-  if (!source) return [];
-  const minYear = collectionMinYear();
-  const cacheKey = `${laneKey}:${minYear}`;
-  if (yearCategoryIndexCache[cacheKey]) return yearCategoryIndexCache[cacheKey];
-  const roots = Array.isArray(source) ? source : [source];
-  const categories = [];
-  for (const [rootIndex, root] of roots.entries()) {
-    let cmcontinue = '';
-    try {
-      do {
-        const cont = cmcontinue ? `&cmcontinue=${encodeURIComponent(cmcontinue)}` : '';
-        const url = `https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=${encodeURIComponent(root)}&cmlimit=500&cmnamespace=14&format=json&origin=*${cont}`;
-        const data = await wikiApiJson(url);
-        (data.query?.categorymembers || []).forEach(item => {
-          const title = item.title || '';
-          const year = Number((title.match(/\b(19\d{2}|20\d{2})\b/) || [])[1] || 0);
-          if (year >= minYear) categories.push({title, year, rootIndex});
-        });
-        cmcontinue = data.continue?.cmcontinue || '';
-      } while (cmcontinue && !fetchAbortRequested);
-    } catch(e) {}
-  }
-  yearCategoryIndexCache[cacheKey] = categories
-    .sort((a,b)=>b.year-a.year||a.rootIndex-b.rootIndex||a.title.localeCompare(b.title))
-    .map(item=>item.title);
-  return yearCategoryIndexCache[cacheKey];
 }
 
 function ensureDiscoveryCursor() {
   if (!state.discoveryCursor || typeof state.discoveryCursor !== 'object') state.discoveryCursor = {};
   COLLECTION_LANES.forEach(lane => {
     const current = state.discoveryCursor[lane.key] || {};
+    if (Number(current.version || 0) !== DISCOVERY_SOURCE_VERSION) {
+      state.discoveryCursor[lane.key] = freshDiscoveryCursor();
+      return;
+    }
     state.discoveryCursor[lane.key] = {
-      categoryIndex: Math.max(0, Number(current.categoryIndex) || 0),
-      categoryTitle: String(current.categoryTitle || ''),
+      version:DISCOVERY_SOURCE_VERSION,
+      year:Math.max(collectionMinYear(), Math.min(collectionMaxYear(), Number(current.year) || collectionMaxYear())),
+      sourceIndex:Math.max(0, Number(current.sourceIndex) || 0),
+      sourceTitle:String(current.sourceTitle || ''),
       offset: Math.max(0, Number(current.offset) || 0),
       cycles: Math.max(0, Number(current.cycles) || 0)
     };
   });
-}
-
-function clearYearMemberCacheForCategories(categories=[]) {
-  categories.forEach(category => { delete yearCategoryMembersCache[category]; });
 }
 
 async function fetchYearCategoryMembers(category) {
@@ -2930,69 +2938,152 @@ async function fetchYearCategoryMembers(category) {
   if (yearCategoryMembersCache[category]) return yearCategoryMembersCache[category];
   const titles = [];
   let cmcontinue = '';
-  try {
-    do {
-      const cont = cmcontinue ? `&cmcontinue=${encodeURIComponent(cmcontinue)}` : '';
-      const url = `https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=${encodeURIComponent(category)}&cmlimit=500&cmnamespace=0&cmsort=sortkey&format=json&origin=*${cont}`;
-      const data = await wikiApiJson(url);
-      (data.query?.categorymembers || []).forEach(item => {
-        if (!obviousNonMovieTitle(item.title)) titles.push({title:item.title, pageid:String(item.pageid || '')});
-      });
-      cmcontinue = data.continue?.cmcontinue || '';
-    } while (cmcontinue && !fetchAbortRequested);
-  } catch(e) {}
+  do {
+    const cont = cmcontinue ? `&cmcontinue=${encodeURIComponent(cmcontinue)}` : '';
+    const url = `https://en.wikipedia.org/w/api.php?action=query&list=categorymembers&cmtitle=${encodeURIComponent(category)}&cmlimit=500&cmnamespace=0&cmsort=sortkey&format=json&origin=*${cont}`;
+    const data = await wikiApiJson(url);
+    (data.query?.categorymembers || []).forEach(item => {
+      titles.push({title:item.title, pageid:String(item.pageid || '')});
+    });
+    cmcontinue = data.continue?.cmcontinue || '';
+  } while (cmcontinue);
+  if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
   yearCategoryMembersCache[category] = [...new Map(titles.map(item => [item.pageid || normaliseTitleKey(item.title), item])).values()];
   return yearCategoryMembersCache[category];
 }
 
-function discoveryCandidateAllowed(title, lane, existing, seenThisRun) {
+function discoveryCandidateIdentity(candidate) {
+  const pageId = candidatePageId(candidate);
+  return pageId ? `page:${pageId}` : `title:${normaliseTitleKey(candidate?.title || candidate)}`;
+}
+
+function trimDiscoveryLedger() {
+  const entries = Object.entries(state.discoveryLedger || {});
+  if (entries.length <= DISCOVERY_LEDGER_CAP) return;
+  entries.sort(([,a],[,b]) => Date.parse(a?.lastSeenAt || '') - Date.parse(b?.lastSeenAt || ''))
+    .slice(0, entries.length - DISCOVERY_LEDGER_CAP)
+    .forEach(([key]) => delete state.discoveryLedger[key]);
+}
+
+function noteDiscoveryEncounter(candidate, status, reason='') {
+  if (!candidate) return;
+  state.discoveryLedger = state.discoveryLedger || {};
+  const key = discoveryCandidateIdentity(candidate);
+  if (!key || key.endsWith(':')) return;
+  const previous = state.discoveryLedger[key] || {};
+  const stamp = nowStamp();
+  state.discoveryLedger[key] = {
+    pageId:candidatePageId(candidate),
+    title:String(candidate.title || candidate || ''),
+    laneKey:candidate.lane?.key || candidate.laneKey || previous.laneKey || '',
+    year:Number(candidate.discoveryYear || previous.year || 0),
+    sourceTitle:String(candidate.sourceCategory || previous.sourceTitle || ''),
+    status,
+    reason,
+    parserVersion:WIKI_PARSER_VERSION,
+    firstSeenAt:previous.firstSeenAt || stamp,
+    lastSeenAt:stamp
+  };
+  trimDiscoveryLedger();
+}
+
+function rollingPoolRecordForCandidate(candidate) {
+  return Object.values(state.rollingPoolExclusions || {}).find(record => recordMatchesDiscoveryCandidate(record, candidate));
+}
+
+function discoveryCandidateDecision(title, lane, existing, seenThisRun, opts={}) {
   const candidateTitle = typeof title === 'string' ? title : title?.title;
-  const pageId = String(typeof title === 'string' ? '' : title?.pageid || '');
+  const pageId = candidatePageId(typeof title === 'string' ? null : title);
   const clean = normaliseTitleKey(candidateTitle);
-  if (!clean || TITLE_BLOCKLIST.has(clean) || obviousNonMovieTitle(candidateTitle)) return false;
-  if (existing.titles.has(clean) || (pageId && existing.pageIds.has(pageId)) || hiddenTitleMatches(candidateTitle) || wrongPickMatches(candidateTitle) || seenThisRun.has(clean)) return false;
-  return true;
+  if (!clean) return {allowed:false, reason:'empty title'};
+  if (TITLE_BLOCKLIST.has(clean)) return {allowed:false, reason:'title blocklist'};
+  if (obviousNonMovieTitle(candidateTitle)) return {allowed:false, reason:'non-article namespace'};
+  if (pageId && existing.pageIds.has(pageId)) return {allowed:false, reason:'active page ID'};
+  if (!pageId && existing.titles.has(clean)) return {allowed:false, reason:'active fallback title'};
+  if (hiddenTitleMatches(title)) return {allowed:false, reason:'hidden identity'};
+  if (wrongPickMatches(title)) return {allowed:false, reason:'manual removal identity'};
+  const seenKey = discoveryCandidateIdentity(title);
+  if (seenThisRun.has(seenKey)) return {allowed:false, reason:'already seen this run'};
+  const ledgerRecord = state.discoveryLedger?.[seenKey];
+  if (Number(ledgerRecord?.parserVersion || 0) === WIKI_PARSER_VERSION
+      && ledgerRecord.status === 'rejected-after-fetch') {
+    return {allowed:false, reason:`already validated: ${ledgerRecord.reason || ledgerRecord.status}`};
+  }
+  const rollingRecord = rollingPoolRecordForCandidate(title);
+  if (rollingRecord) {
+    const cycle = Number(title?.discoveryCycle || 0);
+    const blockedCycle = Number(rollingRecord.discoveryCycle || 0);
+    if (cycle <= blockedCycle) return {allowed:false, reason:'rolling exclusion for this traversal'};
+    if (opts.mutate !== false) releaseRollingPoolExclusion(title);
+  }
+  return {allowed:true, reason:''};
+}
+
+function discoveryCandidateAllowed(title, lane, existing, seenThisRun) {
+  return discoveryCandidateDecision(title, lane, existing, seenThisRun).allowed;
 }
 
 async function nextLaneDiscoveryCandidates(lane, limit, existing, seenThisRun) {
   ensureDiscoveryCursor();
-  const categories = await fetchYearCategoryIndex(lane.key);
-  if (!categories.length) return [];
   const cursor = state.discoveryCursor[lane.key];
-  if (cursor.categoryTitle) {
-    const savedIndex = categories.indexOf(cursor.categoryTitle);
-    if (savedIndex >= 0) cursor.categoryIndex = savedIndex;
-  }
   const out = [];
-  let scannedCategories = 0;
+  let scannedSources = 0;
   let scannedTitles = 0;
-  while (out.length < limit && !fetchAbortRequested && scannedCategories < 24 && scannedTitles < 900) {
-    if (cursor.categoryIndex >= categories.length) {
-      cursor.categoryIndex = 0;
-      cursor.categoryTitle = '';
-      cursor.offset = 0;
-      cursor.cycles += 1;
-      Object.keys(yearCategoryIndexCache).filter(key => key.startsWith(`${lane.key}:`)).forEach(key => delete yearCategoryIndexCache[key]);
-      clearYearMemberCacheForCategories(categories);
-      break;
+  while (out.length < limit && !fetchAbortRequested && scannedSources < 24 && scannedTitles < 900) {
+    const sources = discoverySourcesForYear(lane.key, cursor.year);
+    if (!sources.length) break;
+    if (cursor.sourceTitle) {
+      const savedIndex = sources.findIndex(source => source.title === cursor.sourceTitle);
+      if (savedIndex >= 0) cursor.sourceIndex = savedIndex;
+      cursor.sourceTitle = '';
     }
-    const category = categories[cursor.categoryIndex];
-    cursor.categoryTitle = category;
-    const members = await fetchYearCategoryMembers(category);
-    if (!members.length || cursor.offset >= members.length) {
-      cursor.categoryIndex += 1;
-      cursor.categoryTitle = categories[cursor.categoryIndex] || '';
+    if (cursor.sourceIndex >= sources.length) {
+      cursor.year -= 1;
+      cursor.sourceIndex = 0;
+      cursor.sourceTitle = '';
       cursor.offset = 0;
-      scannedCategories += 1;
+      if (cursor.year < collectionMinYear()) {
+        cursor.year = collectionMaxYear();
+        cursor.cycles += 1;
+        Object.keys(yearCategoryMembersCache).forEach(key => delete yearCategoryMembersCache[key]);
+        break;
+      }
+      continue;
+    }
+    const source = sources[cursor.sourceIndex];
+    cursor.sourceTitle = source.title;
+    const members = await fetchYearCategoryMembers(source.title);
+    if (!members.length || cursor.offset >= members.length) {
+      cursor.sourceIndex += 1;
+      cursor.sourceTitle = '';
+      cursor.offset = 0;
+      scannedSources += 1;
       continue;
     }
     const member = members[cursor.offset];
     const title = typeof member === 'string' ? member : member.title;
     cursor.offset += 1;
     scannedTitles += 1;
-    if (discoveryCandidateAllowed(member, lane, existing, seenThisRun)) {
-      seenThisRun.add(normaliseTitleKey(title));
-      out.push({title, pageid:String(member?.pageid || ''), lane, tier:0, sourceCategory:category});
+    const candidate = {
+      title,
+      pageid:String(member?.pageid || ''),
+      lane,
+      laneKey:lane.key,
+      tier:0,
+      sourceCategory:source.title,
+      sourceLabel:source.label,
+      discoveryYear:cursor.year,
+      discoveryCycle:cursor.cycles,
+      discoveryProgress:`${lane.label} · ${cursor.year} · source ${cursor.sourceIndex + 1}/${sources.length} · member ${cursor.offset}/${members.length}`,
+      cursorAfter:{...cursor}
+    };
+    const decision = discoveryCandidateDecision(candidate, lane, existing, seenThisRun);
+    if (decision.allowed) {
+      seenThisRun.add(discoveryCandidateIdentity(candidate));
+      noteDiscoveryEncounter(candidate, 'queued');
+      out.push(candidate);
+    } else {
+      noteDiscoveryEncounter(candidate, 'skipped-before-fetch', decision.reason);
     }
   }
   return out;
@@ -3014,6 +3105,106 @@ async function nextDiscoveryCandidates(mode, limit, seenThisRun=new Set()) {
   }
   return out;
 }
+
+function discoveryLaneForMovie(movie) {
+  if (!movie) return null;
+  if (movie.format) return movie.language === 'English' ? COLLECTION_LANES.find(lane => lane.key === 'englishShows') : null;
+  if (movie.language === 'Hindi') return COLLECTION_LANES.find(lane => lane.key === 'hindiMovies');
+  if (movie.language === 'English') return COLLECTION_LANES.find(lane => lane.key === 'englishMovies');
+  return null;
+}
+
+function discoveryStateMatches(candidate) {
+  const matches = map => Object.values(map || {}).filter(record => recordMatchesDiscoveryCandidate(record, candidate));
+  const titleKey = normaliseTitleKey(candidate.title);
+  return {
+    active:matches(state.movies),
+    hidden:matches(state.hiddenTitles),
+    wrongPicks:matches(state.wrongPicks),
+    deleted:Object.values(state.deletedMovieRecords || {}).filter(record =>
+      recordMatchesDiscoveryCandidate(record, candidate) || record?.titleKey === titleKey
+    ),
+    rolling:matches(state.rollingPoolExclusions)
+  };
+}
+
+async function auditTitleDiscovery(value) {
+  const requestedTitle = wikipediaTitleFromUrl(value) || String(value || '').trim();
+  if (!requestedTitle) throw new Error('Provide a Wikipedia title or page URL');
+  const diagnostics = {};
+  const data = await fetchWikipediaArticleData({title:requestedTitle});
+  const page = Object.values(data.query?.pages || {})[0] || {};
+  const parsed = parseWikiMovieResponse(data, requestedTitle, 'all', diagnostics, {tmdb:false, ai:false});
+  const candidate = {
+    title:page.title || requestedTitle,
+    pageid:String(page.pageid || ''),
+    discoveryYear:Number(parsed?.year || deriveReleaseYear(page.extract || '', page.extract || '', (page.categories || []).map(item => String(item.title || '').toLowerCase()), null) || 0)
+  };
+  const lane = discoveryLaneForMovie(parsed);
+  candidate.lane = lane;
+  candidate.laneKey = lane?.key || '';
+  const sources = lane && candidate.discoveryYear ? discoverySourcesForYear(lane.key, candidate.discoveryYear) : [];
+  const sourceResults = [];
+  for (const [sourceIndex, source] of sources.entries()) {
+    const members = await fetchYearCategoryMembers(source.title);
+    const memberIndex = members.findIndex(member => recordMatchesDiscoveryCandidate(member, candidate));
+    sourceResults.push({
+      sourceIndex,
+      source:source.title,
+      label:source.label,
+      present:memberIndex >= 0,
+      member:memberIndex >= 0 ? memberIndex + 1 : 0,
+      total:members.length
+    });
+  }
+  ensureDiscoveryCursor();
+  const cursor = lane ? {...state.discoveryCursor[lane.key]} : null;
+  const stateMatches = discoveryStateMatches(candidate);
+  const existing = {
+    titles:new Set(Object.values(state.movies || {}).map(movie => normaliseTitleKey(movie.title)).filter(Boolean)),
+    pageIds:new Set(Object.values(state.movies || {}).map(wikiPageIdFromMovie).filter(Boolean))
+  };
+  const decision = lane
+    ? discoveryCandidateDecision({...candidate, discoveryCycle:cursor?.cycles || 0}, lane, existing, new Set(), {mutate:false})
+    : {allowed:false, reason:'no eligible English movie, Hindi movie or English show lane'};
+  const ledger = state.discoveryLedger?.[`page:${candidate.pageid}`]
+    || state.discoveryLedger?.[`title:${normaliseTitleKey(candidate.title)}`]
+    || null;
+  const report = {
+    requested:requestedTitle,
+    resolvedTitle:candidate.title,
+    pageId:candidate.pageid,
+    expectedLane:lane?.label || '',
+    releaseYear:candidate.discoveryYear,
+    sources:sourceResults,
+    everEncountered:!!ledger,
+    lastEncounter:ledger,
+    preFetch:{allowed:decision.allowed, reason:decision.reason},
+    state:{
+      active:stateMatches.active.map(item => item.id || item.title),
+      hidden:stateMatches.hidden.map(item => item.id || item.title),
+      deleted:stateMatches.deleted.map(item => item.id || item.titleKey),
+      wrongPick:stateMatches.wrongPicks.map(item => item.id || item.title),
+      rolling:stateMatches.rolling.map(item => item.id || item.title)
+    },
+    cursor,
+    cursorRelativeToSources:sourceResults.map(source => ({
+      source:source.source,
+      relation:!cursor ? 'no lane cursor'
+        : cursor.year > candidate.discoveryYear ? 'cursor is in a newer year'
+        : cursor.year < candidate.discoveryYear ? 'cursor has passed this year'
+        : cursor.sourceIndex < source.sourceIndex ? 'source not reached'
+        : cursor.sourceIndex > source.sourceIndex ? 'source passed'
+        : source.member && cursor.offset >= source.member ? 'member passed'
+        : source.member ? 'member ahead' : 'title absent from source'
+    })),
+    validation:{accepted:!!parsed, reason:parsed ? '' : diagnostics.reason || 'rejected', format:parsed?.format || 'movie', language:parsed?.language || ''}
+  };
+  console.info('CineLens title discovery audit', report);
+  return report;
+}
+
+window.auditTitleDiscovery = auditTitleDiscovery;
 
 
 async function fetchWikiSourceTitles(mode, pagesPerCategory=4) {
@@ -3186,6 +3377,7 @@ async function expandPool(manual=true) {
       if (!toFetch.length) break;
 
       let processedCandidates = 0;
+      const processedCursorByLane = {};
 
       // Candidates fetch COLLECTION_FETCH_CONCURRENCY at a time: the network
       // round-trips (Wikipedia article + TMDB lookups) overlap, while all
@@ -3201,34 +3393,46 @@ async function expandPool(manual=true) {
           const lane = typeof candidate === 'string' ? null : candidate.lane;
           const pageId = typeof candidate === 'string' ? '' : candidate.pageid;
           const fetchMode = lane?.mode || mode;
-          seenThisRun.add(normaliseTitleKey(title));
+          seenThisRun.add(typeof candidate === 'string' ? `title:${normaliseTitleKey(title)}` : discoveryCandidateIdentity(candidate));
           attempts++;
           const diagnostics = {};
           const work = pageId
             ? fetchWikiMovieByPageId(pageId, fetchMode, {ai:false, diagnostics, trustedLane:lane})
             : fetchWikiMovie(title, fetchMode, diagnostics, {ai:false, trustedLane:lane});
-          return {title, lane, fetchMode, diagnostics, work};
+          return {title, lane, fetchMode, diagnostics, candidate, work};
         });
 
-        progress(`Checking ${jobs.length > 1 ? jobs.length + ' titles' : jobs[0]?.fetchMode === 'shows' ? 'show' : jobs[0]?.fetchMode === 'movies' ? 'movie' : 'title'}…`, jobs.map(job => job.title).join(' · '));
+        const discoveryProgress = jobs.find(job => job.candidate?.discoveryProgress)?.candidate.discoveryProgress || '';
+        progress(
+          `Checking ${jobs.length > 1 ? jobs.length + ' titles' : jobs[0]?.fetchMode === 'shows' ? 'show' : jobs[0]?.fetchMode === 'movies' ? 'movie' : 'title'}…`,
+          [discoveryProgress, jobs.map(job => job.title).join(' · ')].filter(Boolean).join(' · ')
+        );
         await nextPaint();
         const settled = await Promise.allSettled(jobs.map(job => job.work));
 
         let aborted = false;
         for (let i = 0; i < jobs.length; i++) {
-          const {lane, fetchMode, diagnostics} = jobs[i];
+          const {lane, fetchMode, diagnostics, candidate} = jobs[i];
           const outcome = settled[i];
           if (outcome.status === 'rejected') {
             if (fetchAbortRequested || outcome.reason?.name === 'AbortError') { aborted = true; break; }
             outcomes.parser++;
             const reason = String(outcome.reason?.message || 'Wikipedia request failed');
             parserReasons[reason] = (parserReasons[reason] || 0) + 1;
+            noteDiscoveryEncounter(candidate, 'fetch-failed', reason);
             processedCandidates++;
+            if (lane?.key && candidate?.cursorAfter) processedCursorByLane[lane.key] = candidate.cursorAfter;
             continue;
           }
           const movie = outcome.value;
+          if (movie && lane) {
+            movie.discoveryLane = lane.key;
+            movie.discoveryCycle = Number(candidate?.discoveryCycle || 0);
+            movie.discoverySource = String(candidate?.sourceCategory || '');
+          }
           if (movie && (isMovieHidden(movie) || isRollingPoolExcluded(movie))) {
             outcomes.hidden++;
+            noteDiscoveryEncounter(candidate, 'excluded-after-fetch', isMovieHidden(movie) ? 'manual removal identity' : 'rolling exclusion');
           } else if (movie && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
             const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
             const stored = upsertMoviePreservingUserState(movie, existingMovie);
@@ -3241,14 +3445,18 @@ async function expandPool(manual=true) {
 
             if (!hasCurrentAiTags(stored)) pendingAiMovies.push({movie:stored, lane});
             if (pendingAiMovies.length >= AI_TAG_BATCH_SIZE) await flushPendingAiMovies();
+            noteDiscoveryEncounter(candidate, existingMovie ? 'duplicate' : 'added');
           } else if (movie) {
             outcomes.filtered++;
+            noteDiscoveryEncounter(candidate, 'filtered-after-fetch', 'year, lane, language or format mismatch');
           } else {
             outcomes.parser++;
             const reason = diagnostics.reason || 'Wikipedia parser rejected page';
             parserReasons[reason] = (parserReasons[reason] || 0) + 1;
+            noteDiscoveryEncounter(candidate, 'rejected-after-fetch', reason);
           }
           processedCandidates++;
+          if (lane?.key && candidate?.cursorAfter) processedCursorByLane[lane.key] = candidate.cursorAfter;
         }
         if (aborted) break;
 
@@ -3258,11 +3466,14 @@ async function expandPool(manual=true) {
         if (Math.floor(attempts / 20) > Math.floor(attemptsBeforeChunk / 20) && !fetchAbortRequested) await abortableSleep(WIKI_BATCH_PAUSE_MS);
       }
 
-      if (fetchAbortRequested && processedCandidates < toFetch.length) {
+      if (processedCandidates < toFetch.length) {
         state.discoveryCursor = cursorBeforeBatch;
+        Object.entries(processedCursorByLane).forEach(([laneKey, checkpoint]) => {
+          state.discoveryCursor[laneKey] = checkpoint;
+        });
         ensureDiscoveryCursor();
         saveLocalState({preserveUpdatedAt:true});
-      }
+      } else saveLocalState({preserveUpdatedAt:true});
 
       if (!fetchAbortRequested) await flushPendingAiMovies();
     }
@@ -3772,15 +3983,25 @@ async function attachTmdbDetails(movie) {
 // Promise.all's failure semantics here are exactly applyAiTags' own.
 async function attachTmdbAndAiConcurrently(movie, opts={}) {
   if (!movie) return movie;
-  const tmdbWork = attachTmdbDetails(movie);
+  const tmdbWork = opts.tmdb === false ? Promise.resolve(movie) : attachTmdbDetails(movie);
   if (opts.ai !== false) await Promise.all([tmdbWork, applyAiTags(movie)]);
   else await tmdbWork;
   return movie;
 }
 
+function wikipediaArticleApiUrl({title='', pageId=''}) {
+  const identity = pageId
+    ? `pageids=${encodeURIComponent(String(pageId).replace(/^wiki_/, ''))}`
+    : `redirects=1&titles=${encodeURIComponent(title)}`;
+  return `https://en.wikipedia.org/w/api.php?action=query&${identity}&prop=extracts|categories|pageimages|revisions|pageprops&piprop=thumbnail|name&ppprop=disambiguation&explaintext=1&exlimit=1&cllimit=max&pithumbsize=500&rvprop=content&rvslots=main&formatversion=2&format=json&origin=*`;
+}
+
+async function fetchWikipediaArticleData(identity) {
+  return wikiApiJson(wikipediaArticleApiUrl(identity));
+}
+
 async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) {
-  const url = `https://en.wikipedia.org/w/api.php?action=query&redirects=1&titles=${encodeURIComponent(wikiTitle)}&prop=extracts|categories|pageimages|revisions&piprop=thumbnail|name&explaintext=1&exlimit=1&cllimit=80&pithumbsize=500&rvprop=content&rvslots=main&formatversion=2&format=json&origin=*`;
-  const data = await wikiApiJson(url);
+  const data = await fetchWikipediaArticleData({title:wikiTitle});
   const movie = parseWikiMovieResponse(data, wikiTitle, mode, diagnostics, opts);
   return movie ? attachTmdbAndAiConcurrently(movie, opts) : movie;
 }
@@ -3788,8 +4009,7 @@ async function fetchWikiMovie(wikiTitle, mode='all', diagnostics=null, opts={}) 
 async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
   const clean = String(pageId || '').replace(/^wiki_/, '');
   if (!clean) return null;
-  const url = `https://en.wikipedia.org/w/api.php?action=query&pageids=${encodeURIComponent(clean)}&prop=extracts|categories|pageimages|revisions&piprop=thumbnail|name&explaintext=1&exlimit=1&cllimit=80&rvprop=content&rvslots=main&pithumbsize=500&formatversion=2&format=json&origin=*`;
-  const data = await wikiApiJson(url);
+  const data = await fetchWikipediaArticleData({pageId:clean});
   const movie = parseWikiMovieResponse(data, clean, mode, opts.diagnostics || null, opts);
   return movie ? attachTmdbAndAiConcurrently(movie, opts) : movie;
 }
@@ -3889,8 +4109,8 @@ async function runReceptionBackfill() {
       try {
         const mode = movie.format ? 'shows' : 'movies';
         const fresh = movie.wikiPageId
-          ? await fetchWikiMovieByPageId(movie.wikiPageId, mode, {ai:false, directLink:!!movie.manualAdded})
-          : await fetchWikiMovie(movie.wikiTitle || movie.pageTitle || movie.title, mode, null, {ai:false, directLink:!!movie.manualAdded});
+          ? await fetchWikiMovieByPageId(movie.wikiPageId, mode, {ai:false, tmdb:false, directLink:!!movie.manualAdded})
+          : await fetchWikiMovie(movie.wikiTitle || movie.pageTitle || movie.title, mode, null, {ai:false, tmdb:false, directLink:!!movie.manualAdded});
         let changed = false;
         if (fresh?.thumbnailUrl && fresh.thumbnailUrl !== movie.thumbnailUrl) {
           movie.thumbnailUrl = fresh.thumbnailUrl;
@@ -4065,6 +4285,7 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   if (!pages) return rejectWikiParse(diagnostics, 'Wikipedia returned no page data');
   const page = Object.values(pages)[0];
   if (!page || page.missing !== undefined) return rejectWikiParse(diagnostics, 'Wikipedia page not found');
+  if (page.pageprops?.disambiguation !== undefined) return rejectWikiParse(diagnostics, 'Wikipedia disambiguation page, not one title');
 
   const extract = page.extract || '';
   const pageTitle = page.title || requestedTitle;
@@ -7222,6 +7443,7 @@ async function resetAllData() {
   state.settings.titleSearch = '';
   delete state.canonicalTagStats;
   state.discoveryCursor = {};
+  state.discoveryLedger = {};
   ensureDiscoveryCursor();
   state.poolFetched = false;
   state.meta = {...(state.meta || {}), resetAt, updatedAt:resetAt, collectionActive:false};
@@ -7310,6 +7532,7 @@ function localProfilePayload() {
     tagNormalization:state.tagNormalization,
     tasteStory:state.tasteStory,
     discoveryCursor:state.discoveryCursor,
+    discoveryLedger:state.discoveryLedger,
     poolFetched:state.poolFetched,
     drive:{
       enabled:state.drive.enabled,
@@ -7457,7 +7680,7 @@ function touchRecord(record, stamp=nowStamp()) {
 
 function recordTimestamp(record) {
   if (!record || typeof record !== 'object') return 0;
-  return Date.parse(record._updatedAt || record.updatedAt || record.hiddenAt || record.at || '') || 0;
+  return Date.parse(record._updatedAt || record.updatedAt || record.lastSeenAt || record.hiddenAt || record.at || '') || 0;
 }
 
 function dataTimestamp(data) {
@@ -7576,18 +7799,22 @@ function exportCinelensData() {
     tagStats: state.tagStats,
     tagNormalization: state.tagNormalization,
     tasteStory: state.tasteStory,
-    discoveryCursor: state.discoveryCursor
+    discoveryCursor: state.discoveryCursor,
+    discoveryLedger: state.discoveryLedger
   };
 }
 
 function normaliseDiscoveryCursor(cursor={}) {
   const clean = {};
   Object.entries(cursor || {}).forEach(([key, value]) => {
+    if (Number(value?.version || 0) !== DISCOVERY_SOURCE_VERSION) return;
     clean[key] = {
-      categoryIndex: Math.max(0, Number(value?.categoryIndex) || 0),
-      categoryTitle: String(value?.categoryTitle || ''),
-      offset: Math.max(0, Number(value?.offset) || 0),
-      cycles: Math.max(0, Number(value?.cycles) || 0)
+      version:DISCOVERY_SOURCE_VERSION,
+      year:Math.max(collectionMinYear(), Math.min(collectionMaxYear(), Number(value?.year) || collectionMaxYear())),
+      sourceIndex:Math.max(0, Number(value?.sourceIndex) || 0),
+      sourceTitle:String(value?.sourceTitle || ''),
+      offset:Math.max(0, Number(value?.offset) || 0),
+      cycles:Math.max(0, Number(value?.cycles) || 0)
     };
   });
   return clean;
@@ -7597,8 +7824,11 @@ function compareDiscoveryCursor(a={}, b={}) {
   const ac = Number(a.cycles) || 0;
   const bc = Number(b.cycles) || 0;
   if (ac !== bc) return ac - bc;
-  const ai = Number(a.categoryIndex) || 0;
-  const bi = Number(b.categoryIndex) || 0;
+  const ay = Number(a.year) || collectionMaxYear();
+  const by = Number(b.year) || collectionMaxYear();
+  if (ay !== by) return by - ay;
+  const ai = Number(a.sourceIndex) || 0;
+  const bi = Number(b.sourceIndex) || 0;
   if (ai !== bi) return ai - bi;
   return (Number(a.offset) || 0) - (Number(b.offset) || 0);
 }
@@ -7639,7 +7869,8 @@ function normaliseIncomingData(d={}) {
     tagStats,
     tagNormalization: d.tagNormalization || {version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:''},
     tasteStory: normaliseTasteStory(d.tasteStory || {}),
-    discoveryCursor: normaliseDiscoveryCursor(d.discoveryCursor || {})
+    discoveryCursor: normaliseDiscoveryCursor(d.discoveryCursor || {}),
+    discoveryLedger: d.discoveryLedger || {}
   };
 }
 
@@ -7670,6 +7901,7 @@ function replaceStateFromDataset(dataset) {
   state.tagNormalization = incoming.tagNormalization;
   state.tasteStory = incoming.tasteStory;
   state.discoveryCursor = incoming.discoveryCursor;
+  state.discoveryLedger = incoming.discoveryLedger || {};
   state.meta = incoming.meta;
   Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
   Object.values(state.hiddenTitles || {}).forEach(normaliseStoredTitleRecord);
@@ -7726,6 +7958,7 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
   const wrongPicks=mergeRecordMap(local.wrongPicks, remote.wrongPicks);
   const deletedMovieRecords=mergeRecordMap(local.deletedMovieRecords, remote.deletedMovieRecords);
   const rollingPoolExclusions=mergeRecordMap(local.rollingPoolExclusions, remote.rollingPoolExclusions);
+  const discoveryLedger=mergeRecordMap(local.discoveryLedger, remote.discoveryLedger);
 
   // A deliberate manual re-add is also synchronized. It clears an older wrong-pick
   // block across devices instead of letting an old Drive tombstone undo the re-add.
@@ -7742,9 +7975,7 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
     const titleKey=normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title);
     const release=unblockedTitleRecords[titleKey];
     const idRecord=deletedMovieRecords[movie.id];
-    const titleRecord=Object.values(wrongPicks).find(record =>
-      [record?.title, record?.wikiTitle, record?.pageTitle].some(title => normaliseTitleKey(title) === titleKey)
-    );
+    const titleRecord=Object.values(wrongPicks).find(record => recordMatchesDiscoveryCandidate(record, movie));
     const tombstone=[idRecord,titleRecord].filter(Boolean).sort((a,b)=>recordTimestamp(b)-recordTimestamp(a))[0];
     if (!tombstone) return false;
     if (release && recordTimestamp(release) > recordTimestamp(tombstone)) return false;
@@ -7758,10 +7989,7 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
   // manual titles always survive.
   const rollingBlocksMovie = movie => {
     if (!isReplaceableRollingCandidate(movie)) return false;
-    const titleKey=normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title);
-    const record=rollingPoolExclusions[movie.id] || Object.values(rollingPoolExclusions).find(item =>
-      [item?.title, item?.wikiTitle, item?.pageTitle].some(title => normaliseTitleKey(title) === titleKey)
-    );
+    const record=rollingPoolExclusions[movie.id] || Object.values(rollingPoolExclusions).find(item => recordMatchesDiscoveryCandidate(item, movie));
     return !!record && recordTimestamp(record) >= recordTimestamp(movie);
   };
   Object.keys(movies).forEach(id => { if (rollingBlocksMovie(movies[id])) delete movies[id]; });
@@ -7801,7 +8029,8 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
     tagStats:{candidates:0, tags:0, rebuiltAt:''},
     tagNormalization:dataTimestamp(remote) > dataTimestamp(local) ? remote.tagNormalization : local.tagNormalization,
     tasteStory:newestTasteStory(local.tasteStory, remote.tasteStory),
-    discoveryCursor:cursor
+    discoveryCursor:cursor,
+    discoveryLedger
   };
   return {dataset, source:'record-merge'};
 }
@@ -7865,6 +8094,7 @@ function loadLocalState() {
       delete state.canonicalTagStats;
       if (s.meta) state.meta={...state.meta,...s.meta};
       if (s.discoveryCursor) state.discoveryCursor=normaliseDiscoveryCursor(s.discoveryCursor);
+      if (s.discoveryLedger) state.discoveryLedger=s.discoveryLedger;
       ensureDiscoveryCursor();
       if (s.drive) {
         state.drive.connected=false;
@@ -8305,7 +8535,8 @@ function exportDriveProfile() {
     tagStats:state.tagStats,
     tagNormalization:state.tagNormalization,
     tasteStory:state.tasteStory,
-    discoveryCursor:state.discoveryCursor
+    discoveryCursor:state.discoveryCursor,
+    discoveryLedger:state.discoveryLedger
   };
 }
 
@@ -8325,6 +8556,7 @@ function applyDriveProfile(profile,{merge=true,preferDrive=false}={}) {
   state.tagNormalization=profile.tagNormalization || state.tagNormalization;
   state.tasteStory=newestTasteStory(state.tasteStory,profile.tasteStory || {});
   state.discoveryCursor=mergeDiscoveryCursor(state.discoveryCursor,profile.discoveryCursor || {}).merged;
+  state.discoveryLedger=mergeRecordMap(state.discoveryLedger,profile.discoveryLedger || {});
   Object.entries(profile.personalTitles || {}).forEach(([id,remotePersonal]) => {
     const movie=state.movies?.[id];
     if (!movie) return;
