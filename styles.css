@@ -537,6 +537,8 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
 .maintenance-danger > summary { color:#ff8a86; }
 .maintenance-danger p { margin:7px 0 9px; color:var(--muted); max-width:620px; line-height:1.45; }
 .tmdb-attribution{margin-top:10px;font-size:10px;color:var(--muted2,var(--muted));line-height:1.4;max-width:620px}
+.page-footer{padding:0 16px 24px}
+.page-footer .tmdb-attribution{margin:0 auto}
 /* Collapsed by default — ten platform chips is a lot of visual weight to
    dump on every open of an already-busy panel, especially on a phone
    screen, when most visits don't need to touch platform selection at all. */
@@ -635,27 +637,15 @@ body.fetching .control-deck { top:calc(72px + var(--fetch-progress-height, 94px)
   header.nav-open .header-right { grid-column:1 / -1; }
   header.nav-open + main .control-deck { position:static; top:auto; }
 
-  /* Keep Library maintenance reachable even when filters & tools are collapsed. */
-  .control-content > .maintenance-panel { order:-1; }
-  .control-deck.collapsed .control-content {
-    display:flex;
-    flex-direction:column;
-    gap:0;
-  }
-  .control-deck.collapsed .control-content > :not(.maintenance-panel) { display:none; }
-  .control-deck.collapsed .maintenance-panel {
-    display:block;
-    margin:8px 0 0;
+  .tab-bar .maintenance-panel {
+    grid-column:1 / -1;
+    margin:2px 0 0;
     padding:8px 0 0;
+    border-top:1px solid rgba(255,255,255,.09);
   }
-  .control-deck:not(.collapsed) {
-    position:static;
-    top:auto;
-  }
-  .control-deck:not(.collapsed) .maintenance-panel { margin:0 0 8px; }
-  .maintenance-panel > summary { min-height:30px; align-items:center; }
-  .maintenance-health { margin:6px 0; }
-  .maintenance-actions { gap:6px; }
+  .tab-bar .maintenance-panel > summary { min-height:30px; align-items:center; }
+  .tab-bar .maintenance-health { margin:6px 0; }
+  .tab-bar .maintenance-actions { gap:6px; }
 }
 
 

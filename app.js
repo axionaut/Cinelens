@@ -107,7 +107,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 35;
+const APP_VERSION = 36;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -119,6 +119,7 @@ const AI_VOCABULARY_SAMPLE_SIZE = 240;
 const AI_TAG_CLOUD_NORMALIZE_EVERY = 100;
 const AI_TAG_CLOUD_NORMALIZE_VERSION = 'cinelens-tag-cloud-v2';
 const AI_REQUEST_DELAY_MS = 12000;
+const AI_TAGGER_TIMEOUT_MS = 45 * 1000;
 const WIKI_LIST_SOURCES = {
   showsIndex: 'Lists of television programs',
   englishShows: ['List of television programs: A','List of television programs: B','List of television programs: C','List of British television programmes','List of Netflix original programming','List of Amazon Prime Video original programming']
@@ -434,6 +435,7 @@ const TASTE_STORY_MIN_RATINGS = 3;
 const TASTE_STORY_DEBOUNCE_MS = 1200;
 let recVisibleLimit = 10;
 let currentWikiAbortController = null;
+let currentAiTagAbortController = null;
 let currentSleepCancel = null;
 let lastAiRequestAt = 0;
 let autoFetchPaused = false;
@@ -1480,40 +1482,57 @@ async function requestAiTags(movies, opts={}) {
   if (wait) await abortableSleep(wait);
   if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
   lastAiRequestAt = Date.now();
-  const response = await fetch(AI_TAGGER_URL, {
-    method:'POST',
-    headers:{'Content-Type':'text/plain;charset=utf-8'},
-    body:JSON.stringify({
-      items:items.map((movie, index) => {
-        const partial = partials[String(movie.id)] || {tags:[]};
-        const existingTags = partial.tags || [];
-        const missingTags = Math.max(0, AI_TAG_MIN_COUNT - existingTags.length);
-        const continuationInstruction = existingTags.length
-          ? `\n\nCINELENS TAG CONTINUATION: ${existingTags.length} grounded tags are already accepted: ${existingTags.join(', ')}. Generate at least ${missingTags} additional distinct story tags. Do not repeat, rename, or paraphrase the accepted tags.`
-          : '';
-        const coverageInstruction = `\n\nCINELENS COVERAGE: Return ${AI_TAG_MIN_COUNT}-${AI_TAG_MAX_COUNT} distinct, reusable recommendation tags when the narrative supports them. For a long-running series, cover the central premise, relationships, social dynamics, work or academic setting, recurring interests, character development, romance, friendship and major long-term arcs across the full supplied narrative. Evidence must come from the supplied narrative; do not return fewer tags merely because the page describes several seasons.`;
-        return {
-          id:movie.id,
-          title:movie.title,
-          year:movie.year,
-          format:movie.format ? 'show' : 'movie',
-          language:movie.language,
-          genres:movieGenres(movie),
-          storyText:`${movie.storyText}${coverageInstruction}${continuationInstruction}`,
-          existingTags,
-          minimumAdditionalTags:missingTags,
-          excludedTags:[...new Set([...(movie.suppressedTags || []), ...(movie.suppressedRawTags || []), ...existingTags])],
-          preferredTagVocabulary:index === 0 ? aiTagVocabulary().map(item => item.tag) : undefined
-        };
-      }),
-      optimizeVocabulary:false,
-      continueTagging:Object.keys(partials).length > 0,
-      tagVocabulary:aiTagVocabulary(),
-      minimumTags:AI_TAG_MIN_COUNT,
-      maximumTags:AI_TAG_MAX_COUNT,
-      retryReason:opts.retryReason || ''
-    })
-  });
+  const controller = new AbortController();
+  currentAiTagAbortController = controller;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, AI_TAGGER_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(AI_TAGGER_URL, {
+      method:'POST',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      signal:controller.signal,
+      body:JSON.stringify({
+        items:items.map((movie, index) => {
+          const partial = partials[String(movie.id)] || {tags:[]};
+          const existingTags = partial.tags || [];
+          const missingTags = Math.max(0, AI_TAG_MIN_COUNT - existingTags.length);
+          const continuationInstruction = existingTags.length
+            ? `\n\nCINELENS TAG CONTINUATION: ${existingTags.length} grounded tags are already accepted: ${existingTags.join(', ')}. Generate at least ${missingTags} additional distinct story tags. Do not repeat, rename, or paraphrase the accepted tags.`
+            : '';
+          const coverageInstruction = `\n\nCINELENS COVERAGE: Return ${AI_TAG_MIN_COUNT}-${AI_TAG_MAX_COUNT} distinct, reusable recommendation tags when the narrative supports them. For a long-running series, cover the central premise, relationships, social dynamics, work or academic setting, recurring interests, character development, romance, friendship and major long-term arcs across the full supplied narrative. Evidence must come from the supplied narrative; do not return fewer tags merely because the page describes several seasons.`;
+          return {
+            id:movie.id,
+            title:movie.title,
+            year:movie.year,
+            format:movie.format ? 'show' : 'movie',
+            language:movie.language,
+            genres:movieGenres(movie),
+            storyText:`${movie.storyText}${coverageInstruction}${continuationInstruction}`,
+            existingTags,
+            minimumAdditionalTags:missingTags,
+            excludedTags:[...new Set([...(movie.suppressedTags || []), ...(movie.suppressedRawTags || []), ...existingTags])],
+            preferredTagVocabulary:index === 0 ? aiTagVocabulary().map(item => item.tag) : undefined
+          };
+        }),
+        optimizeVocabulary:false,
+        continueTagging:Object.keys(partials).length > 0,
+        tagVocabulary:aiTagVocabulary(),
+        minimumTags:AI_TAG_MIN_COUNT,
+        maximumTags:AI_TAG_MAX_COUNT,
+        retryReason:opts.retryReason || ''
+      })
+    });
+  } catch (error) {
+    if (timedOut) throw new Error(`AI tagger timed out after ${AI_TAGGER_TIMEOUT_MS / 1000}s`);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    if (currentAiTagAbortController === controller) currentAiTagAbortController = null;
+  }
   if (!response.ok) throw new Error(`AI tagger HTTP ${response.status}`);
   const payload = await response.json();
   if (!payload.ok) {
@@ -1753,6 +1772,8 @@ function renderWatchPlatformPicker() {
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
+  syncMaintenancePanelPlacement();
+  window.addEventListener('resize', syncMaintenancePanelPlacement);
   renderAppVersion();
   renderWatchPlatformPicker();
   initExpandedCardObserver();
@@ -2758,6 +2779,7 @@ function stopFetching(opts={}) {
     backgroundAiTimer = null;
   }
   if (currentWikiAbortController) currentWikiAbortController.abort();
+  if (currentAiTagAbortController) currentAiTagAbortController.abort();
   if (currentSleepCancel) currentSleepCancel();
   hideFetchProgress();
   const btn = document.getElementById('expandBtn');
@@ -3685,6 +3707,7 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
       : upsertMoviePreservingUserState(movie);
     stored.manualAdded = true;
     touchRecord(stored);
+    showFetchProgress('Fetching poster & tags...', 55, stored.title || title);
     if (!hasCurrentAiTags(stored)) {
       try {
         await applyAiTags(stored, {force:true});
@@ -5234,6 +5257,7 @@ function toggleControlDeck() {
 }
 
 function toggleMobileNav() {
+  syncMaintenancePanelPlacement();
   const bar=document.querySelector('.tab-bar');
   const header=document.querySelector('header');
   if (!bar) return;
@@ -5447,7 +5471,8 @@ function updateLibraryHealth() {
   if (autoFetchPaused) text = 'Collection paused';
   else if (poolExpansionInProgress) text = `Collecting ${formatStrongMatchCount(health.strongCount, health.target)}`;
   else if (backgroundAiTaggingInProgress) text = `Tagging ${health.pendingTags} pending titles`;
-  else if (health.personalized && health.strongCount >= STRONG_REC_TARGET) text = `Library healthy · ${health.strongCount} strong matches`;
+  else if (!libraryWritesUnlocked && state.drive?.enabled) text = 'Collection waiting for Drive reconnect';
+  else if (health.personalized && health.strongCount >= STRONG_REC_TARGET) text = `Collection paused at ${health.strongCount} strong matches · refills below ${STRONG_REC_REFILL_THRESHOLD}`;
   else if (!health.personalized) text = `Building starter pool · ${health.taggedUnseen}/${INITIAL_TAGGED_POOL_FLOOR}`;
   else text = `Refilling strong matches · ${formatStrongMatchCount(health.strongCount, health.target)}`;
 
@@ -5476,6 +5501,19 @@ function toggleMaintenancePanel() {
   if (!panel) return;
   panel.open = !panel.open;
   if (panel.open) updateLibraryHealth();
+}
+
+function syncMaintenancePanelPlacement() {
+  const panel = document.getElementById('maintenancePanel');
+  const tabBar = document.querySelector('.tab-bar');
+  const controlContent = document.getElementById('controlContent');
+  const mobile = !!window.matchMedia?.('(max-width: 768px)').matches;
+  const target = mobile ? tabBar : controlContent;
+  if (panel && target && panel.parentElement !== target) target.appendChild(panel);
+  if (!mobile) {
+    tabBar?.classList.remove('open');
+    document.querySelector('header')?.classList.remove('nav-open');
+  }
 }
 
 function scheduleBackgroundAiQueue(delay = 700) {
@@ -8333,7 +8371,7 @@ async function restoreDriveSession(showFailure=false, opts={}) {
   driveRestoreInProgress=true;
   setDriveStatus('syncing');
   try {
-    await requestDriveTokenSilent();
+    await requestDriveTokenSilent({allowPromptlessRequest:true});
     // V2 checks a tiny manifest first. It never downloads the catalogue merely
     // to discover whether another device changed anything.
     const manifest=await findDriveManifest();
@@ -8447,11 +8485,11 @@ function clearDriveToken() {
 }
 function driveHeaders(extra={}) { return {...extra, Authorization:`Bearer ${state.drive.accessToken}`}; }
 async function driveFetch(url, opts={}) {
-  if (!state.drive.accessToken) await requestDriveTokenSilent();
+  if (!state.drive.accessToken) await requestDriveTokenSilent({allowPromptlessRequest:true});
   let resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
   if (resp.status===401) {
     clearDriveToken();
-    await requestDriveTokenSilent();
+    await requestDriveTokenSilent({allowPromptlessRequest:true});
     resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
   }
   return resp;
