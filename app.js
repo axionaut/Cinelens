@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 40;
+const APP_VERSION = 41;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -221,7 +221,7 @@ let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const CARD_REFRESH_BATCH_SIZE = 20;
-const WIKI_PARSER_VERSION = 5;
+const WIKI_PARSER_VERSION = 6;
 const REC_INFINITE_PAGE_SIZE = 20;
 const STRONG_REC_TARGET = 40;
 
@@ -1291,9 +1291,18 @@ function reconcileAiTagSet(movie, cleaned) {
   return {tags:mergedTags, evidence:mergedEvidence};
 }
 
+function aiTagMinimumForStory(storyText='') {
+  const length=String(storyText || '').trim().length;
+  if (length >= 1500) return 10;
+  if (length >= 800) return 8;
+  if (length >= 400) return 6;
+  return 5;
+}
+
 function commitAiTagSet(movie, cleaned, model='') {
   const reconciled = reconcileAiTagSet(movie, cleaned);
-  if (reconciled.tags.length < AI_TAG_MIN_COUNT) throw new Error(`AI returned too few usable tags for ${movie.title}`);
+  const minimumTags=aiTagMinimumForStory(movie?.storyText);
+  if (reconciled.tags.length < minimumTags) throw new Error(`AI returned too few usable tags for ${movie.title}`);
   movie.tags = reconciled.tags;
   movie.coreTags = [...reconciled.tags];
   movie.plotTags = [...reconciled.tags];
@@ -1329,13 +1338,14 @@ function mergeAiTagPartials(previous={tags:[], evidence:{}}, next={tags:[], evid
 function aiTagFailureMessage(error, movie=null) {
   const reason = String(error?.message || error || movie?.aiTagging?.error || 'AI tagging failed');
   const partialCount = movie?.aiTagPartial?.tags?.length || 0;
+  const minimumTags=aiTagMinimumForStory(movie?.storyText);
   if (/daily cinelens tagging limit reached/i.test(reason)) {
     return partialCount
-      ? `Daily AI limit reached · ${partialCount}/${AI_TAG_MIN_COUNT} tags saved · choose tags or retry later`
+      ? `Daily AI limit reached · ${partialCount}/${minimumTags} tags saved · choose tags or retry later`
       : 'Daily AI limit reached · choose tags or retry later';
   }
-  if (partialCount) return `AI built ${partialCount}/${AI_TAG_MIN_COUNT} tags · choose tags or retry`;
-  if (/too few usable tags|fewer than/i.test(reason)) return `AI returned fewer than ${AI_TAG_MIN_COUNT} usable tags · choose tags or retry`;
+  if (partialCount) return `AI built ${partialCount}/${minimumTags} tags · choose tags or retry`;
+  if (/too few usable tags|fewer than/i.test(reason)) return `AI returned fewer than ${minimumTags} usable tags · choose tags or retry`;
   return `${reason} · choose tags or retry`;
 }
 
@@ -1420,11 +1430,12 @@ async function requestAiTags(movies, opts={}) {
         items:items.map((movie, index) => {
           const partial = partials[String(movie.id)] || {tags:[]};
           const existingTags = partial.tags || [];
-          const missingTags = Math.max(0, AI_TAG_MIN_COUNT - existingTags.length);
+          const minimumTags = aiTagMinimumForStory(movie.storyText);
+          const missingTags = Math.max(0, minimumTags - existingTags.length);
           const continuationInstruction = existingTags.length
             ? `\n\nCINELENS TAG CONTINUATION: ${existingTags.length} grounded tags are already accepted: ${existingTags.join(', ')}. Generate at least ${missingTags} additional distinct story tags. Do not repeat, rename, or paraphrase the accepted tags.`
             : '';
-          const coverageInstruction = `\n\nCINELENS COVERAGE: Return ${AI_TAG_MIN_COUNT}-${AI_TAG_MAX_COUNT} distinct, reusable recommendation tags when the narrative supports them. For a long-running series, cover the central premise, relationships, social dynamics, work or academic setting, recurring interests, character development, romance, friendship and major long-term arcs across the full supplied narrative. Evidence must come from the supplied narrative; do not return fewer tags merely because the page describes several seasons.`;
+          const coverageInstruction = `\n\nCINELENS COVERAGE: Return ${minimumTags}-${AI_TAG_MAX_COUNT} distinct, reusable recommendation tags when the narrative supports them. For a long-running series, cover the central premise, relationships, social dynamics, work or academic setting, recurring interests, character development, romance, friendship and major long-term arcs across the full supplied narrative. Evidence must come from the supplied narrative; do not return fewer tags merely because the page describes several seasons.`;
           return {
             id:movie.id,
             title:movie.title,
@@ -1434,6 +1445,7 @@ async function requestAiTags(movies, opts={}) {
             genres:movieGenres(movie),
             storyText:`${movie.storyText}${coverageInstruction}${continuationInstruction}`,
             existingTags,
+            minimumTags,
             minimumAdditionalTags:missingTags,
             excludedTags:[...new Set([...(movie.suppressedTags || []), ...(movie.suppressedRawTags || []), ...existingTags])],
             preferredTagVocabulary:index === 0 ? aiTagVocabulary().map(item => item.tag) : undefined
@@ -1442,7 +1454,7 @@ async function requestAiTags(movies, opts={}) {
         optimizeVocabulary:false,
         continueTagging:Object.keys(partials).length > 0,
         tagVocabulary:aiTagVocabulary(),
-        minimumTags:AI_TAG_MIN_COUNT,
+        minimumTags:Math.min(...items.map(movie => aiTagMinimumForStory(movie.storyText))),
         maximumTags:AI_TAG_MAX_COUNT,
         retryReason:opts.retryReason || ''
       })
@@ -1492,13 +1504,14 @@ async function requestAiTags(movies, opts={}) {
       if (!result) throw new Error('AI returned no result');
       const previous = partials[String(movie.id)] || {tags:[], evidence:{}};
       const merged = mergeAiTagPartials(previous, cleanAiTagResults(result, movie));
-      if (merged.tags.length >= AI_TAG_MIN_COUNT) {
+      const minimumTags=aiTagMinimumForStory(movie.storyText);
+      if (merged.tags.length >= minimumTags) {
         commitAiTagSet(movie, merged, payload.model);
         tagged++;
       } else {
         retryItems.push(movie);
         retryPartials[String(movie.id)] = merged;
-        throw new Error(`AI has built ${merged.tags.length}/${AI_TAG_MIN_COUNT} usable tags`);
+        throw new Error(`AI has built ${merged.tags.length}/${minimumTags} usable tags`);
       }
     } catch(e) {
       if (!retryItems.includes(movie)) {
@@ -1516,7 +1529,7 @@ async function requestAiTags(movies, opts={}) {
         attemptedAt:new Date().toISOString()
       };
       movie.retagStatus = 'needs-ai-tags';
-      movie.retagMessage = `AI building tags ${partialCount}/${AI_TAG_MIN_COUNT}`;
+      movie.retagMessage = `AI building tags ${partialCount}/${aiTagMinimumForStory(movie.storyText)}`;
       failed++;
     }
   });
@@ -4255,7 +4268,7 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   if (!mediaEvidence.film && !mediaEvidence.show && !preliminaryFormat.strong && !infoboxMedia && !trustedLane) return rejectWikiParse(diagnostics, 'no film/show evidence');
   const formatDecision = preliminaryFormat;
   const format = formatDecision.strong ? formatDecision.format : (infobox.type === 'show' ? 'series' : (trustedLane ? (trustedLane.mode === 'shows' ? 'series' : null) : formatDecision.format));
-  const storyText = buildStoryTextForFormat(extract, format);
+  const storyText = buildStoryTextForFormat(extract, format, wikitext);
   if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return rejectWikiParse(diagnostics, 'no usable narrative section');
   const reception = parseReceptionFromExtract(extract);
 
@@ -4392,10 +4405,89 @@ function extractEpisodeSynopses(extract, capChars=SHOW_STORY_MAX_CHARS) {
   return synopses.join(' ').replace(/\s+/g, ' ').trim().slice(0, capChars).trim();
 }
 
-function buildStoryTextForFormat(extract, format) {
+function episodeWikitextTemplateBlocks(wikitext) {
+  const text=String(wikitext || '');
+  const blocks=[];
+  const opener=/\{\{\s*episode\s+(?:list|table)\b/gi;
+  let match;
+  while ((match=opener.exec(text))) {
+    let depth=0;
+    let end=-1;
+    for (let index=match.index; index<text.length-1; index++) {
+      const pair=text.slice(index, index+2);
+      if (pair === '{{') { depth++; index++; continue; }
+      if (pair === '}}') {
+        depth--;
+        index++;
+        if (!depth) { end=index+1; break; }
+      }
+    }
+    if (end > match.index) blocks.push(text.slice(match.index, end));
+    opener.lastIndex=match.index+2;
+  }
+  return blocks;
+}
+
+function wikitextEpisodeSummaryValue(block, start) {
+  const text=String(block || '');
+  let nestedTemplates=0;
+  for (let index=start; index<text.length; index++) {
+    const pair=text.slice(index, index+2);
+    if (pair === '{{') { nestedTemplates++; index++; continue; }
+    if (pair === '}}') {
+      if (!nestedTemplates) return text.slice(start, index);
+      nestedTemplates--;
+      index++;
+      continue;
+    }
+    if (text[index] === '\n' && !nestedTemplates && /^\n\s*\|\s*[A-Za-z][\w ]*\s*=/.test(text.slice(index))) return text.slice(start, index);
+  }
+  return text.slice(start);
+}
+
+function cleanWikitextEpisodeSummary(summary) {
+  let text=String(summary || '')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<ref\b[^>]*>[\s\S]*?<\/ref\s*>/gi, ' ')
+    .replace(/<ref\b[^>]*\/\s*>/gi, ' ');
+  let previous='';
+  while (text !== previous) {
+    previous=text;
+    text=text.replace(/\{\{[^{}]*\}\}/g, ' ');
+  }
+  return cleanEpisodeSynopsisBlock(text
+    .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, '$2')
+    .replace(/\[\[([^\]]+)\]\]/g, '$1')
+    .replace(/'{2,}/g, ' ')
+    .replace(/<[^>]+>/g, ' '));
+}
+
+function extractWikitextEpisodeSummaries(wikitext, capChars=SHOW_STORY_MAX_CHARS) {
+  const summaries=[];
+  const seen=new Set();
+  episodeWikitextTemplateBlocks(wikitext).forEach(block => {
+    const parameter=/\|\s*ShortSummary\s*=/gi;
+    let match;
+    while ((match=parameter.exec(block))) {
+      if (summaries.join(' ').length >= capChars) return;
+      const summary=wikitextEpisodeSummaryValue(block, match.index+match[0].length);
+      const candidate=episodeSynopsisCandidate(cleanWikitextEpisodeSummary(summary));
+      if (candidate && !seen.has(candidate)) {
+        seen.add(candidate);
+        summaries.push(candidate);
+      }
+    }
+  });
+  return summaries.join(' ').replace(/\s+/g, ' ').trim().slice(0, capChars).trim();
+}
+
+function buildStoryTextForFormat(extract, format, wikitext='') {
   const primary = extractNarrativeSection(extract);
   if (!format) return primary;
-  const episodeText = extractEpisodeSynopses(extract, SHOW_STORY_MAX_CHARS);
+  const extractedEpisodeText = extractEpisodeSynopses(extract, SHOW_STORY_MAX_CHARS);
+  const episodeText = extractedEpisodeText.length >= MIN_STORY_SECTION_CHARS
+    ? extractedEpisodeText
+    : extractWikitextEpisodeSummaries(wikitext, SHOW_STORY_MAX_CHARS) || extractedEpisodeText;
   return [primary, episodeText]
     .filter(Boolean)
     .join(' ')
