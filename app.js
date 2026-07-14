@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 38;
+const APP_VERSION = 39;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -8112,6 +8112,7 @@ let driveSilentRenewInFlight=null;
 let driveSilentRenewBlockedUntil=0;
 let driveSilentRenewLastAttemptAt=0;
 let driveTokenRequestInFlight=null;
+let driveTokenRequestPrompt='';
 
 
 function rememberDriveToken(token, expiresInSeconds=3300) {
@@ -8388,6 +8389,7 @@ function tokenRequest(prompt, opts={}) {
   if (driveTokenRequestInFlight) return driveTokenRequestInFlight;
   initDriveTokenClient();
   const timeoutMs = Number(opts.timeoutMs || 0);
+  driveTokenRequestPrompt=prompt;
   const request=new Promise((resolve,reject) => {
     let settled = false;
     let timer = null;
@@ -8411,7 +8413,10 @@ function tokenRequest(prompt, opts={}) {
   });
   driveTokenRequestInFlight=request;
   request.finally(() => {
-    if (driveTokenRequestInFlight === request) driveTokenRequestInFlight=null;
+    if (driveTokenRequestInFlight === request) {
+      driveTokenRequestInFlight=null;
+      driveTokenRequestPrompt='';
+    }
   }).catch(() => {});
   return request;
 }
@@ -8419,6 +8424,12 @@ async function requestDriveTokenInteractive(opts={}) {
   const stored=opts.forcePrompt ? '' : getStoredDriveToken();
   if (stored) { state.drive.accessToken=stored; return stored; }
   await waitForGoogleIdentity();
+  // A user tap must not inherit a failing background prompt:none request.
+  // Let that request settle so the shared GIS callback stays serialized, then
+  // continue with the one interactive request the user explicitly asked for.
+  if (driveTokenRequestInFlight && driveTokenRequestPrompt === 'none') {
+    try { return await driveTokenRequestInFlight; } catch(e) {}
+  }
   return tokenRequest('');
 }
 async function requestDriveTokenSilent(opts={}) {
