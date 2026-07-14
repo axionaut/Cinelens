@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 39;
+const APP_VERSION = 40;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -8105,6 +8105,7 @@ const DRIVE_SYNC_DEBOUNCE_MS=1200;
 let DRIVE_SYNC_MAX_DEFER_MS=10000;
 const DRIVE_TOKEN_KEY='cinelens_drive_token_v1';
 const DRIVE_TOKEN_EXPIRY_KEY='cinelens_drive_token_expiry_v1';
+const DRIVE_SILENT_BLOCK_KEY='cinelens_drive_silent_block_until_v1';
 const DRIVE_SILENT_TOKEN_TIMEOUT_MS=8000;
 const DRIVE_SILENT_RENEW_DEBOUNCE_MS=30000;
 const DRIVE_SILENT_RENEW_BLOCK_MS=10 * 60 * 1000;
@@ -8127,7 +8128,21 @@ function rememberDriveToken(token, expiresInSeconds=3300) {
   scheduleDriveTokenRefresh(expiry);
 }
 
+function setSilentDriveRenewalBlockUntil(until=0) {
+  const value=Math.max(0, Number(until)||0);
+  driveSilentRenewBlockedUntil=value;
+  try {
+    if (value) localStorage.setItem(DRIVE_SILENT_BLOCK_KEY, String(value));
+    else localStorage.removeItem(DRIVE_SILENT_BLOCK_KEY);
+  } catch(e) {}
+}
+
 function silentDriveRenewalBlocked(now=Date.now()) {
+  try {
+    const persisted=Number(localStorage.getItem(DRIVE_SILENT_BLOCK_KEY)||0);
+    if (persisted > now) driveSilentRenewBlockedUntil=Math.max(driveSilentRenewBlockedUntil, persisted);
+    else if (persisted) localStorage.removeItem(DRIVE_SILENT_BLOCK_KEY);
+  } catch(e) {}
   return now < driveSilentRenewBlockedUntil;
 }
 
@@ -8136,12 +8151,10 @@ function silentlyRenewDriveToken() {
   if (driveSilentRenewInFlight) return driveSilentRenewInFlight;
   const now=Date.now();
   if (silentDriveRenewalBlocked(now) || now - driveSilentRenewLastAttemptAt < DRIVE_SILENT_RENEW_DEBOUNCE_MS) return Promise.resolve(false);
-  driveSilentRenewLastAttemptAt=now;
   const renewal=(async () => {
     try {
       state.drive.accessToken = '';
       await requestDriveTokenSilent({allowPromptlessRequest:true});
-      driveSilentRenewBlockedUntil=0;
       state.drive.connected = true;
       setDriveStatus('connected');
       if (!libraryWritesUnlocked) {
@@ -8153,7 +8166,6 @@ function silentlyRenewDriveToken() {
       }
       return true;
     } catch(e) {
-      driveSilentRenewBlockedUntil=Date.now()+DRIVE_SILENT_RENEW_BLOCK_MS;
       state.drive.connected = false;
       setDriveStatus('');
       return false;
@@ -8292,7 +8304,7 @@ async function connectDrive() {
     }
     state.drive.connected=true;
     connected = true;
-    driveSilentRenewBlockedUntil=0;
+    setSilentDriveRenewalBlockUntil(0);
     state.drive.lastConnectedAt=Date.now();
     saveLocalState({preserveUpdatedAt:true});
     setDriveStatus('connected');
@@ -8437,9 +8449,22 @@ async function requestDriveTokenSilent(opts={}) {
   const stored=getStoredDriveToken();
   if (stored) { state.drive.accessToken=stored; return stored; }
   if (!opts.allowPromptlessRequest) throw {error:'interaction_required'};
-  if (silentDriveRenewalBlocked()) throw {error:'interaction_required', cinelensSilentRenewBlocked:true};
+  const blockedError=() => ({error:'interaction_required', cinelensSilentRenewBlocked:true});
+  let now=Date.now();
+  if (silentDriveRenewalBlocked(now) || now - driveSilentRenewLastAttemptAt < DRIVE_SILENT_RENEW_DEBOUNCE_MS) throw blockedError();
   await waitForGoogleIdentity();
-  return tokenRequest('none', {timeoutMs:DRIVE_SILENT_TOKEN_TIMEOUT_MS});
+  if (driveTokenRequestInFlight) return driveTokenRequestInFlight;
+  now=Date.now();
+  if (silentDriveRenewalBlocked(now) || now - driveSilentRenewLastAttemptAt < DRIVE_SILENT_RENEW_DEBOUNCE_MS) throw blockedError();
+  driveSilentRenewLastAttemptAt=now;
+  try {
+    const token=await tokenRequest('none', {timeoutMs:DRIVE_SILENT_TOKEN_TIMEOUT_MS});
+    setSilentDriveRenewalBlockUntil(0);
+    return token;
+  } catch(e) {
+    setSilentDriveRenewalBlockUntil(Date.now()+DRIVE_SILENT_RENEW_BLOCK_MS);
+    throw e;
+  }
 }
 async function requestDriveToken(prompt='select_account') {
   return prompt === 'none' ? requestDriveTokenSilent() : requestDriveTokenInteractive();
