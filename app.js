@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 47;
+const APP_VERSION = 48;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -274,7 +274,11 @@ const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // Hotstar" in India), so each canonical platform is matched by pattern
 // rather than exact string, and the derived per-platform country list is the
 // only thing stored — never the full raw multi-region response.
-const TMDB_DATA_VERSION = 4;
+// Bumping this triggers a one-time TMDB refetch (needsTmdbBackfill) for every
+// already-matched title in the library — used whenever we start reading a new
+// field off the existing TMDB details response. v5: adds vote_average/
+// vote_count (the TMDB user score reception signal).
+const TMDB_DATA_VERSION = 5;
 // JioHotstar's own pattern is checked before Disney+'s: Disney+'s pattern
 // matches "hotstar" generically (regional naming, e.g. "Disney+ Hotstar" in
 // India before the 2025 merger), and "JioHotstar" contains that same
@@ -1955,6 +1959,8 @@ function normaliseReceptionRecord(reception=null) {
     rtCount:reception.rtCount == null ? null : Math.max(0, parseInt(reception.rtCount, 10) || 0),
     mcScore:reception.mcScore == null ? null : clamp(Number(reception.mcScore), 0, 100),
     mcCount:reception.mcCount == null ? null : Math.max(0, parseInt(reception.mcCount, 10) || 0),
+    tmdbScore:reception.tmdbScore == null ? null : clamp(Number(reception.tmdbScore), 0, 10),
+    tmdbVoteCount:reception.tmdbVoteCount == null ? null : Math.max(0, parseInt(reception.tmdbVoteCount, 10) || 0),
     consensus:['acclaimed','positive','mixed','negative'].includes(reception.consensus) ? reception.consensus : '',
     praise:[...new Set((reception.praise || []).filter(facet => ['acting','direction','writing','dialogue','pacing','editing','coherence'].includes(facet)))],
     criticism:[...new Set((reception.criticism || []).filter(facet => ['acting','direction','writing','dialogue','pacing','editing','coherence','melodrama'].includes(facet)))],
@@ -3628,7 +3634,9 @@ async function tmdbDetailsWithAvailability(id, mediaType) {
   return {
     posterUrl: posterPath ? TMDB_IMAGE_BASE + posterPath : '',
     watchAvailability: buildWatchAvailability(data['watch/providers']?.results),
-    genres: tmdbGenresToCanonical(data.genres)
+    genres: tmdbGenresToCanonical(data.genres),
+    voteAverage: Number.isFinite(Number(data.vote_average)) && Number(data.vote_average) > 0 ? Number(data.vote_average) : null,
+    voteCount: Math.max(0, parseInt(data.vote_count, 10) || 0)
   };
 }
 
@@ -3640,12 +3648,18 @@ async function fetchTmdbDetails(title, year, format) {
     if (!candidate?.id) return null;
     const details = await tmdbDetailsWithAvailability(candidate.id, mediaType);
     const fallbackPoster = candidate.poster_path ? TMDB_IMAGE_BASE + candidate.poster_path : '';
+    // The search result itself also carries vote_average/vote_count — a
+    // fallback if the details call failed but the search candidate is
+    // still trustworthy (same id, same popularity ranking already applied).
+    const fallbackVoteAverage = Number.isFinite(Number(candidate.vote_average)) && Number(candidate.vote_average) > 0 ? Number(candidate.vote_average) : null;
     return {
       tmdbId: candidate.id,
       tmdbMediaType: mediaType,
       posterUrl: details?.posterUrl || fallbackPoster || '',
       watchAvailability: details?.watchAvailability || null,
-      genres: details?.genres || []
+      genres: details?.genres || [],
+      voteAverage: details?.voteAverage ?? fallbackVoteAverage,
+      voteCount: details?.voteAverage != null ? details.voteCount : Math.max(0, parseInt(candidate.vote_count, 10) || 0)
     };
   } catch(_) {
     return null;
@@ -3663,6 +3677,7 @@ async function attachTmdbDetails(movie) {
     // fallback whenever TMDB actually returns genres for this title.
     if (tmdb.genres && tmdb.genres.length) movie.genres = tmdb.genres;
     movie.tmdbDataVersion = TMDB_DATA_VERSION;
+    if (tmdb.voteAverage != null) applyTmdbReceptionSignal(movie, {voteAverage:tmdb.voteAverage, voteCount:tmdb.voteCount});
   }
   delete movie.watchProviders;
   delete movie.posterBackfillAttemptedAt;
@@ -4651,6 +4666,8 @@ function emptyReception(present=false) {
     rtCount:null,
     mcScore:null,
     mcCount:null,
+    tmdbScore:null,
+    tmdbVoteCount:null,
     consensus:'',
     praise:[],
     criticism:[],
@@ -4730,6 +4747,65 @@ function aggregatorSignal(score) {
   return clamp((Number(score) - 58) / 42, -1, 1);
 }
 
+// TMDB's vote_average sits on a 0-10 scale with a much higher typical
+// midpoint than critic aggregators (people who bother to rate on TMDB skew
+// positive), so it gets its own conversion rather than reusing
+// aggregatorSignal's 58%-midpoint RT/MC curve.
+function tmdbAggregatorSignal(score) {
+  if (score == null) return null;
+  return clamp((Number(score) * 10 - 60) / 35, -1, 1);
+}
+
+// Real audience votes (TMDB user score) are given more weight than either
+// critic aggregator once there's a meaningful sample size — Nitin's explicit
+// call: ordinary viewers' opinions should count for more than critics' in
+// this system. Weight scales with vote count the same way RT/MC's
+// review-count bonus does, but the ceiling and floor both sit above RT/MC's
+// max of 3 so a well-voted TMDB score always outweighs a single critic
+// aggregator in the blend.
+function tmdbReceptionWeight(voteCount) {
+  const count = Math.max(0, Number(voteCount) || 0);
+  if (count >= 200) return 5;
+  if (count >= 20) return 4;
+  return 3.5;
+}
+
+// Recomputes qualitySignal/strength from whatever source fields are present
+// on the reception record (RT/MC/consensus/facets from Wikipedia, tmdbScore
+// from TMDB) — shared by the initial Wikipedia parse and by the TMDB
+// backfill/attach path so either source can arrive first or be refreshed
+// independently without the other's data being lost or needing a full
+// Wikipedia refetch.
+function computeReceptionQuality(reception) {
+  const signals = [];
+  const rt = aggregatorSignal(reception.rtScore);
+  const mc = aggregatorSignal(reception.mcScore);
+  const tmdb = tmdbAggregatorSignal(reception.tmdbScore);
+  if (rt != null) signals.push({value:rt, weight:reception.rtCount ? 3 : 2});
+  if (mc != null) signals.push({value:mc, weight:reception.mcCount ? 3 : 2});
+  if (tmdb != null) signals.push({value:tmdb, weight:tmdbReceptionWeight(reception.tmdbVoteCount)});
+  const consensusSignal = {acclaimed:0.85, positive:0.45, mixed:0, negative:-0.75}[reception.consensus];
+  if (consensusSignal != null) signals.push({value:consensusSignal, weight:1.4});
+  const facetSignal = clamp(((reception.praise?.length || 0) - (reception.criticism?.length || 0)) / 4, -0.6, 0.6);
+  if (reception.praise?.length || reception.criticism?.length) signals.push({value:facetSignal, weight:0.8});
+  const totalWeight = signals.reduce((sum, item) => sum + item.weight, 0);
+  const qualitySignal = totalWeight ? clamp(signals.reduce((sum, item) => sum + item.value * item.weight, 0) / totalWeight, -1, 1) : 0;
+
+  const reviewCount = Math.max(Number(reception.rtCount || 0), Number(reception.mcCount || 0));
+  const tmdbVoteCount = Math.max(0, Number(reception.tmdbVoteCount) || 0);
+  let strength = 0;
+  if (reviewCount) strength = 0.55 + Math.min(0.4, Math.log10(reviewCount + 1) / 5);
+  else if (reception.rtScore != null || reception.mcScore != null) strength = 0.55;
+  else if (reception.consensus) strength = 0.4;
+  else if (reception.praise?.length || reception.criticism?.length) strength = 0.25;
+  else if (reception.tmdbScore != null) strength = 0;
+  else strength = (reception.textLength || 0) > 140 ? 0.18 : 0.08;
+  if (tmdbVoteCount) strength = Math.max(strength, 0.5 + Math.min(0.4, Math.log10(tmdbVoteCount + 1) / 5));
+  else if (reception.tmdbScore != null) strength = Math.max(strength, 0.3);
+
+  return {qualitySignal, strength:clamp(strength, 0, 1)};
+}
+
 function parseReceptionFromExtract(extract) {
   const section = receptionSectionText(extract);
   if (!section || section.length < 24) return emptyReception(false);
@@ -4739,28 +4815,34 @@ function parseReceptionFromExtract(extract) {
   const facets = receptionFacets(section);
   reception.praise = facets.praise;
   reception.criticism = facets.criticism;
-
-  const signals = [];
-  const rt = aggregatorSignal(reception.rtScore);
-  const mc = aggregatorSignal(reception.mcScore);
-  if (rt != null) signals.push({value:rt, weight:reception.rtCount ? 3 : 2});
-  if (mc != null) signals.push({value:mc, weight:reception.mcCount ? 3 : 2});
-  const consensusSignal = {acclaimed:0.85, positive:0.45, mixed:0, negative:-0.75}[reception.consensus];
-  if (consensusSignal != null) signals.push({value:consensusSignal, weight:1.4});
-  const facetSignal = clamp((reception.praise.length - reception.criticism.length) / 4, -0.6, 0.6);
-  if (reception.praise.length || reception.criticism.length) signals.push({value:facetSignal, weight:0.8});
-  const totalWeight = signals.reduce((sum, item) => sum + item.weight, 0);
-  reception.qualitySignal = totalWeight ? clamp(signals.reduce((sum, item) => sum + item.value * item.weight, 0) / totalWeight, -1, 1) : 0;
-  const reviewCount = Math.max(Number(reception.rtCount || 0), Number(reception.mcCount || 0));
-  let strength = 0;
-  if (reviewCount) strength = 0.55 + Math.min(0.4, Math.log10(reviewCount + 1) / 5);
-  else if (reception.rtScore != null || reception.mcScore != null) strength = 0.55;
-  else if (reception.consensus) strength = 0.4;
-  else if (reception.praise.length || reception.criticism.length) strength = 0.25;
-  else strength = section.length > 140 ? 0.18 : 0.08;
-  reception.strength = clamp(strength, 0, 1);
+  reception.textLength = section.length;
+  const {qualitySignal, strength} = computeReceptionQuality(reception);
+  reception.qualitySignal = qualitySignal;
+  reception.strength = strength;
+  delete reception.textLength;
   if (!reception.strength) reception.present = false;
   return reception;
+}
+
+// Folds a TMDB user score into a movie's reception record, independent of
+// whether Wikipedia ever had (or will ever have) a Reception section — a
+// title with no critic aggregator data can still carry a real audience
+// signal from TMDB alone. Recomputes the blended qualitySignal/strength so
+// the two sources are always consistent regardless of fetch order.
+function applyTmdbReceptionSignal(movie, {voteAverage, voteCount}={}) {
+  if (!movie || voteAverage == null) return;
+  const reception = movie.reception && typeof movie.reception === 'object'
+    ? {...movie.reception}
+    : emptyReception(false);
+  reception.version = RECEPTION_VERSION;
+  reception.tmdbScore = clamp(Number(voteAverage), 0, 10);
+  reception.tmdbVoteCount = Math.max(0, parseInt(voteCount, 10) || 0);
+  const {qualitySignal, strength} = computeReceptionQuality(reception);
+  reception.qualitySignal = qualitySignal;
+  reception.strength = strength;
+  reception.present = reception.present || strength > 0;
+  reception.parsedAt = nowStamp();
+  movie.reception = reception;
 }
 
 function extractInlineNarrative(text) {
