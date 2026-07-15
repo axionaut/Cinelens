@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 44;
+const APP_VERSION = 45;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -221,6 +221,7 @@ let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const MOVIELENS_CSV_HEADER = ['movie_id','imdb_id','tmdb_id','rating','average_rating','title'];
+const MOVIELENS_IMPORT_FETCH_CONCURRENCY = 3;
 const CARD_REFRESH_BATCH_SIZE = 20;
 const WIKI_PARSER_VERSION = 6;
 const REC_INFINITE_PAGE_SIZE = 20;
@@ -4103,6 +4104,44 @@ async function fetchMovieLensQueueItem(item) {
   return {fresh, reason:diagnostics.reason || 'Wikipedia rejected title'};
 }
 
+function removeMovieLensQueueItem(queue, item) {
+  const index = queue.findIndex(queued => movieLensQueueKey(queued) === movieLensQueueKey(item));
+  if (index >= 0) queue.splice(index, 1);
+}
+
+function reconcileMovieLensQueueItem(queue, item, result, changedMovieIds) {
+  const fetched = result?.fresh;
+  if (!fetched) {
+    removeMovieLensQueueItem(queue, item);
+    movieLensSkipQueueItem(item, result?.reason || 'Wikipedia request failed');
+    return;
+  }
+  if (!sameCanonicalTitle(fetched.title || fetched.pageTitle, item.title) || (item.year && (!Number.isFinite(Number(fetched.year)) || Math.abs(Number(fetched.year) - item.year) > 1))) {
+    removeMovieLensQueueItem(queue, item);
+    movieLensSkipQueueItem(item, 'Wikipedia returned a different title or year');
+    return;
+  }
+  if (isMovieHidden(fetched)) {
+    removeMovieLensQueueItem(queue, item);
+    movieLensSkipQueueItem(item, 'Title is permanently removed from this library');
+    return;
+  }
+  const stored = upsertMoviePreservingUserState(fetched);
+  if (!stored) {
+    removeMovieLensQueueItem(queue, item);
+    movieLensSkipQueueItem(item, 'Wikipedia record could not be stored');
+    return;
+  }
+  applyMovieLensRating(stored, item.rating);
+  removeMovieLensQueueItem(queue, item);
+  state.meta.movielensImportSummary = {
+    ...(state.meta.movielensImportSummary || {}),
+    checkpoint: Number(state.meta.movielensImportSummary?.checkpoint || 0) + 1,
+    imported: Number(state.meta.movielensImportSummary?.imported || 0) + 1
+  };
+  changedMovieIds.add(String(stored.id));
+}
+
 async function runMovieLensImport() {
   if (
     autoFetchPaused ||
@@ -4117,59 +4156,37 @@ async function runMovieLensImport() {
     return;
   }
   const queue = state.meta?.movielensImportQueue;
-  const item = Array.isArray(queue) ? queue[0] : null;
-  if (!item) return;
+  const batch = Array.isArray(queue) ? queue.slice(0, MOVIELENS_IMPORT_FETCH_CONCURRENCY) : [];
+  if (!batch.length) return;
 
   movielensImportInProgress = true;
   try {
     const summary = state.meta.movielensImportSummary || {};
+    const first = Number(summary.checkpoint || 0) + 1;
+    const last = first + batch.length - 1;
     showFetchProgress(
-      `MovieLens import · ${Number(summary.checkpoint || 0) + 1}/${Number(summary.total || queue.length)}`,
-      Math.round(((Number(summary.checkpoint || 0) + 1) / Math.max(1, Number(summary.total || queue.length))) * 100),
-      item.title
+      `MovieLens import · ${first}-${last}/${Number(summary.total || queue.length)}`,
+      Math.round((last / Math.max(1, Number(summary.total || queue.length))) * 100),
+      batch.map(item => item.title).join(' · ')
     );
-    let fetched;
-    let rejectionReason = '';
-    try {
-      const result = await fetchMovieLensQueueItem(item);
-      fetched = result.fresh;
-      rejectionReason = result.reason;
-    } catch (error) {
-      if (autoFetchPaused || fetchAbortRequested || error?.name === 'AbortError') return;
-      rejectionReason = String(error?.message || 'Wikipedia request failed');
-    }
+    // Match pool expansion: requests overlap, but state mutation remains
+    // serial and the whole group shares one local save and Drive sync.
+    const results = await Promise.all(batch.map(async item => {
+      try {
+        return await fetchMovieLensQueueItem(item);
+      } catch (error) {
+        if (autoFetchPaused || fetchAbortRequested || error?.name === 'AbortError') throw error;
+        return {fresh:null, reason:String(error?.message || 'Wikipedia request failed')};
+      }
+    }));
     if (autoFetchPaused || fetchAbortRequested) return;
 
-    let changedMovieIds = [];
-    if (!fetched) {
-      queue.shift();
-      movieLensSkipQueueItem(item, rejectionReason);
-    } else if (!sameCanonicalTitle(fetched.title || fetched.pageTitle, item.title) || (item.year && (!Number.isFinite(Number(fetched.year)) || Math.abs(Number(fetched.year) - item.year) > 1))) {
-      queue.shift();
-      movieLensSkipQueueItem(item, 'Wikipedia returned a different title or year');
-    } else if (isMovieHidden(fetched)) {
-      queue.shift();
-      movieLensSkipQueueItem(item, 'Title is permanently removed from this library');
-    } else {
-      const stored = upsertMoviePreservingUserState(fetched);
-      if (!stored) {
-        queue.shift();
-        movieLensSkipQueueItem(item, 'Wikipedia record could not be stored');
-      } else {
-        applyMovieLensRating(stored, item.rating);
-        queue.shift();
-        state.meta.movielensImportSummary = {
-          ...(state.meta.movielensImportSummary || {}),
-          checkpoint: Number(state.meta.movielensImportSummary?.checkpoint || 0) + 1,
-          imported: Number(state.meta.movielensImportSummary?.imported || 0) + 1
-        };
-        changedMovieIds = [String(stored.id)];
-      }
-    }
+    const changedMovieIds = new Set();
+    batch.forEach((item, index) => reconcileMovieLensQueueItem(queue, item, results[index], changedMovieIds));
     invalidateTasteModel();
     computeTagWeights();
     scheduleReceptionCalibrationUpdate();
-    saveLocalState({preserveUpdatedAt:true, changedMovieIds});
+    saveLocalState({preserveUpdatedAt:true, changedMovieIds:[...changedMovieIds]});
     queueDriveSync();
     render();
   } finally {
@@ -4177,8 +4194,8 @@ async function runMovieLensImport() {
     hideFetchProgress();
     updateLibraryHealth();
     if (!autoFetchPaused) {
-      scheduleBackgroundAiQueue(1200);
-      scheduleMovieLensImport(1800);
+      if (state.meta?.movielensImportQueue?.length) scheduleMovieLensImport(600);
+      else scheduleBackgroundAiQueue(1200);
     }
   }
 }
