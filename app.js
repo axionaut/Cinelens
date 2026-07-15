@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 41;
+const APP_VERSION = 42;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -354,6 +354,11 @@ const DRIVE_TOKEN_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
 const TASTE_STORY_VERSION = 'cinelens-taste-story-v1';
 const TASTE_STORY_MIN_RATINGS = 3;
 const TASTE_STORY_DEBOUNCE_MS = 1200;
+const TASTE_STORY_POSITIVE_ANCHORS = 12;
+const TASTE_STORY_NEGATIVE_ANCHORS = 6;
+const TASTE_STORY_POSITIVE_TAG_LIMIT = 42;
+const TASTE_STORY_NEGATIVE_TAG_LIMIT = 28;
+const TASTE_STORY_TITLE_HISTORY_LIMIT = 3;
 let recVisibleLimit = 10;
 let currentWikiAbortController = null;
 let currentAiTagAbortController = null;
@@ -7094,7 +7099,10 @@ function normaliseTasteStory(value={}) {
     generatedAt:String(value?.generatedAt || ''),
     status:['idle','queued','writing','ready','error'].includes(value?.status) ? value.status : 'idle',
     error:String(value?.error || '').slice(0, 240),
-    ratingCount:Math.max(0, Number(value?.ratingCount || 0))
+    ratingCount:Math.max(0, Number(value?.ratingCount || 0)),
+    titleHistory:[...new Set((Array.isArray(value?.titleHistory) ? value.titleHistory : [])
+      .map(title => String(title || '').trim().slice(0, 180))
+      .filter(Boolean))].slice(0, TASTE_STORY_TITLE_HISTORY_LIMIT)
   };
 }
 
@@ -7102,14 +7110,45 @@ function tasteStoryRatingCount() {
   return tasteEvidenceMovies().filter(movie => Number(movie?.rating || 0) > 0).length;
 }
 
-function buildTasteStoryProfile() {
+function weightedSampleWithoutReplacement(items, count, rng=Math.random) {
+  const remaining=[...(items || [])];
+  const sample=[];
+  while (remaining.length && sample.length < count) {
+    const total=remaining.reduce((sum, item) => sum + Math.max(0, Number(item.weight || 0)), 0);
+    if (!total) break;
+    let threshold=Math.max(0, Math.min(0.999999999, Number(rng()) || 0)) * total;
+    let chosen=remaining.length - 1;
+    for (let index=0; index<remaining.length; index++) {
+      threshold-=Math.max(0, Number(remaining[index].weight || 0));
+      if (threshold <= 0) { chosen=index; break; }
+    }
+    sample.push(remaining.splice(chosen, 1)[0]);
+  }
+  return sample;
+}
+
+function tasteStoryTagsForVariation(items, anchorCount, limit, rng) {
+  const anchors=items.slice(0, anchorCount);
+  return [...anchors, ...weightedSampleWithoutReplacement(items.slice(anchorCount), Math.max(0, limit - anchors.length), rng)];
+}
+
+function tasteStoryTitleHistory(existing={}) {
+  return [...new Set([
+    String(existing?.title || '').trim(),
+    ...(Array.isArray(existing?.titleHistory) ? existing.titleHistory : [])
+  ].filter(Boolean))].slice(0, TASTE_STORY_TITLE_HISTORY_LIMIT);
+}
+
+function buildTasteStoryProfile(rng=Math.random, variationSeed='') {
   computeTagWeights();
   const weighted=Object.entries(state.tagWeights || {})
     .map(([tag, weight]) => ({tag:normaliseTagName(tag), weight:Number(weight || 0)}))
     .filter(item => item.tag && item.weight)
     .sort((a,b) => Math.abs(b.weight) - Math.abs(a.weight) || a.tag.localeCompare(b.tag));
-  const likedTags=weighted.filter(item => item.weight > 0).slice(0, 42);
-  const avoidedTags=weighted.filter(item => item.weight < 0).slice(0, 28);
+  const positiveCloud=weighted.filter(item => item.weight > 0);
+  const negativeCloud=weighted.filter(item => item.weight < 0);
+  const likedTags=tasteStoryTagsForVariation(positiveCloud, TASTE_STORY_POSITIVE_ANCHORS, TASTE_STORY_POSITIVE_TAG_LIMIT, rng);
+  const avoidedTags=tasteStoryTagsForVariation(negativeCloud, TASTE_STORY_NEGATIVE_ANCHORS, TASTE_STORY_NEGATIVE_TAG_LIMIT, rng);
   const preferredGenres=Object.entries(state.genreWeights || {})
     .map(([genre, weight]) => ({genre:normaliseTagName(genre), weight:Number(weight || 0)}))
     .filter(item => item.genre && item.weight > 0)
@@ -7121,15 +7160,24 @@ function buildTasteStoryProfile() {
     .sort((a,b) => a.weight - b.weight || a.genre.localeCompare(b.genre))
     .slice(0, 10);
   const ratingCount=tasteStoryRatingCount();
-  const profile={
+  const deterministicProfile={
+    version:TASTE_STORY_VERSION,
+    ratingCount,
+    positiveCloud,
+    negativeCloud,
+    preferredGenres,
+    avoidedGenres
+  };
+  return {
     version:TASTE_STORY_VERSION,
     ratingCount,
     likedTags,
     avoidedTags,
     preferredGenres,
-    avoidedGenres
+    avoidedGenres,
+    variationSeed:String(variationSeed || ''),
+    profileHash:String(stableHash(JSON.stringify(deterministicProfile)))
   };
-  return {...profile, profileHash:String(stableHash(JSON.stringify(profile)))};
 }
 
 function ensureTasteStoryCard() {
@@ -7177,7 +7225,7 @@ function renderTasteStoryCard() {
     const paragraphs=attrSafe(story.story).split(/\n{2,}/).map(p => `<p>${p.replace(/\n/g,'<br>')}</p>`).join('');
     body.innerHTML=title+paragraphs;
     meta.textContent=story.status === 'writing'
-      ? 'Your next story is being written from your latest ratings…'
+      ? 'Your next story is being written from your overall taste profile…'
       : `Written from ${ratingCount} ratings${story.generatedAt ? ` · updated ${new Date(story.generatedAt).toLocaleString()}` : ''}`;
   } else if (story.status === 'writing' || story.status === 'queued') {
     body.innerHTML='<span style="color:var(--muted)">Gemini is writing an original story from the story patterns your ratings favour.</span>';
@@ -7188,12 +7236,12 @@ function renderTasteStoryCard() {
   }
 }
 
-async function generateTasteStory({force=false}={}) {
+async function generateTasteStory({force=false, rng=Math.random, variationSeed=''}={}) {
   if (tasteStoryInProgress) {
     tasteStoryRefreshPending = true;
     return false;
   }
-  const profile=buildTasteStoryProfile();
+  const profile=buildTasteStoryProfile(rng, variationSeed || `taste-story-${Date.now()}-${Math.floor(Math.max(0, Math.min(0.999999999, Number(rng()) || 0)) * 1e9)}`);
   if (profile.ratingCount < TASTE_STORY_MIN_RATINGS) return false;
   const existing=normaliseTasteStory(state.tasteStory || {});
   if (!force && existing.profileHash === profile.profileHash && existing.story) return true;
@@ -7207,7 +7255,11 @@ async function generateTasteStory({force=false}={}) {
     const response=await fetch(AI_TAGGER_URL, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify({task:'generate-taste-story', profile})
+      body:JSON.stringify({task:'generate-taste-story', profile:{
+        ...profile,
+        previousStoryTitle:tasteStoryTitleHistory(existing)[0] || '',
+        previousStoryTitles:tasteStoryTitleHistory(existing)
+      }})
     });
     if (!response.ok) throw new Error(`Taste story HTTP ${response.status}`);
     const payload=await response.json();
@@ -7223,7 +7275,8 @@ async function generateTasteStory({force=false}={}) {
       generatedAt:nowStamp(),
       status:'ready',
       error:'',
-      ratingCount:profile.ratingCount
+      ratingCount:profile.ratingCount,
+      titleHistory:[...new Set([title, ...tasteStoryTitleHistory(existing)])].slice(0, TASTE_STORY_TITLE_HISTORY_LIMIT)
     };
     saveLocalState();
     queueDriveSync();
