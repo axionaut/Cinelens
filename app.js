@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 46;
+const APP_VERSION = 47;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -221,7 +221,7 @@ let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const MOVIELENS_CSV_HEADER = ['movie_id','imdb_id','tmdb_id','rating','average_rating','title'];
-const MOVIELENS_IMPORT_FETCH_CONCURRENCY = 8;
+const MOVIELENS_IMPORT_FETCH_CONCURRENCY = 16;
 const CARD_REFRESH_BATCH_SIZE = 20;
 const WIKI_PARSER_VERSION = 6;
 const REC_INFINITE_PAGE_SIZE = 20;
@@ -4172,7 +4172,9 @@ function scheduleMovieLensImport(delay=3500) {
     movielensImportTimer = null;
     runMovieLensImport();
   };
-  if ('requestIdleCallback' in window) {
+  if (delay <= 0) {
+    movielensImportTimer = setTimeout(run, 0);
+  } else if ('requestIdleCallback' in window) {
     movielensImportTimer = setTimeout(() => requestIdleCallback(run, {timeout:1500}), delay);
   } else {
     movielensImportTimer = setTimeout(run, delay);
@@ -4252,45 +4254,61 @@ async function runMovieLensImport() {
     return;
   }
   const queue = state.meta?.movielensImportQueue;
-  const batch = Array.isArray(queue) ? queue.slice(0, MOVIELENS_IMPORT_FETCH_CONCURRENCY) : [];
-  if (!batch.length) return;
+  const pending = Array.isArray(queue) ? [...queue] : [];
+  if (!pending.length) return;
 
   movielensImportInProgress = true;
   try {
     const summary = state.meta.movielensImportSummary || {};
-    const first = Number(summary.checkpoint || 0) + 1;
-    const last = first + batch.length - 1;
-    showFetchProgress(
-      `MovieLens import · ${first}-${last}/${Number(summary.total || queue.length)}`,
-      Math.round((last / Math.max(1, Number(summary.total || queue.length))) * 100),
-      batch.map(item => item.title).join(' · ')
-    );
-    // Match pool expansion: requests overlap, but state mutation remains
-    // serial and the whole group shares one local save and Drive sync.
-    const results = await Promise.all(batch.map(async item => {
-      try {
-        return await fetchMovieLensQueueItem(item);
-      } catch (error) {
-        if (autoFetchPaused || fetchAbortRequested || error?.name === 'AbortError') throw error;
-        return {fresh:null, reason:String(error?.message || 'Wikipedia request failed')};
-      }
-    }));
-    if (autoFetchPaused || fetchAbortRequested) return;
-
+    const startingCheckpoint = Number(summary.checkpoint || 0);
+    const total = Number(summary.total || startingCheckpoint + pending.length);
+    let nextIndex = 0;
+    let completed = 0;
     const changedMovieIds = new Set();
-    batch.forEach((item, index) => reconcileMovieLensQueueItem(queue, item, results[index], changedMovieIds));
-    invalidateTasteModel();
-    computeTagWeights();
-    scheduleReceptionCalibrationUpdate();
-    saveLocalState({preserveUpdatedAt:true, changedMovieIds:[...changedMovieIds]});
-    queueDriveSync();
-    render();
+    showFetchProgress(
+      `MovieLens metadata · ${startingCheckpoint}/${total}`,
+      Math.round((startingCheckpoint / Math.max(1, total)) * 100),
+      `${pending.length} titles pending`
+    );
+
+    const worker = async () => {
+      while (nextIndex < pending.length && !autoFetchPaused && !fetchAbortRequested) {
+        const item = pending[nextIndex++];
+        let result;
+        try {
+          result = await fetchMovieLensQueueItem(item);
+        } catch (error) {
+          if (autoFetchPaused || fetchAbortRequested || error?.name === 'AbortError') return;
+          result = {fresh:null, reason:String(error?.message || 'Wikipedia request failed')};
+        }
+        if (autoFetchPaused || fetchAbortRequested) return;
+        reconcileMovieLensQueueItem(queue, item, result, changedMovieIds);
+        completed++;
+        const checkpoint = startingCheckpoint + completed;
+        showFetchProgress(
+          `MovieLens metadata · ${checkpoint}/${total}`,
+          Math.round((checkpoint / Math.max(1, total)) * 100),
+          item.title
+        );
+      }
+    };
+
+    const workerCount = Math.min(MOVIELENS_IMPORT_FETCH_CONCURRENCY, pending.length);
+    await Promise.all(Array.from({length:workerCount}, worker));
+    if (completed) {
+      invalidateTasteModel();
+      computeTagWeights();
+      scheduleReceptionCalibrationUpdate();
+      saveLocalState({preserveUpdatedAt:true, changedMovieIds:[...changedMovieIds]});
+      queueDriveSync();
+      render();
+    }
   } finally {
     movielensImportInProgress = false;
     hideFetchProgress();
     updateLibraryHealth();
     if (!autoFetchPaused) {
-      if (state.meta?.movielensImportQueue?.length) scheduleMovieLensImport(150);
+      if (state.meta?.movielensImportQueue?.length) scheduleMovieLensImport(0);
       else scheduleBackgroundAiQueue(1200);
     }
   }
@@ -4304,7 +4322,8 @@ async function importMovieLensRatingsCsv(file) {
   const input = document.getElementById('movielensRatingsCsvInput');
   if (!file) return;
   try {
-    const rows = parseMovieLensRatingsCsv(await file.text());
+    const csvText = await file.text();
+    const rows = parseMovieLensRatingsCsv(csvText);
     if (!rows.length) throw new Error('Ratings CSV has no usable rating rows');
     const sourceHash = String(stableHash(rows.map(row => [row.tmdbId, row.rating, row.title, row.year || ''].join('|')).join('\n')));
     const sameSource = state.meta?.movielensImportSourceHash === sourceHash;
@@ -4341,11 +4360,11 @@ async function importMovieLensRatingsCsv(file) {
       invalidateTasteModel();
       computeTagWeights();
       scheduleReceptionCalibrationUpdate();
-      saveLocalState({preserveUpdatedAt:true, changedMovieIds});
+      saveLocalState({preserveUpdatedAt:true, changedMovieIds, localSaveDelay:0});
       queueDriveSync();
       render();
     }
-    scheduleMovieLensImport(500);
+    scheduleMovieLensImport(0);
     updateLibraryHealth();
     showToast(
       sameSource ? 'MovieLens ratings already imported; pending titles remain queued.' : `MovieLens ratings imported: ${matched} matched, ${enqueued} queued.`,
@@ -8279,7 +8298,7 @@ function saveLocalState(opts={}) {
       updatedAt:state.meta?.updatedAt || nowStamp()
     }));
   } catch(e) { console.warn('Local bootstrap save failed',e); }
-  queueIndexedDbSave(450, opts.changedMovieIds);
+  queueIndexedDbSave(opts.localSaveDelay ?? 450, opts.changedMovieIds);
   updateStats();
 }
 function loadLocalState() {
