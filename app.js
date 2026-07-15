@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 42;
+const APP_VERSION = 43;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -340,15 +340,6 @@ function countryName(code) {
 let lastTmdbRequestAt = 0;
 let tmdbBackfillTimer = null;
 let tmdbBackfillInProgress = false;
-// The active unseen catalogue is intentionally bounded, but not by one global cap.
-// Ratings, watchlist items, manual additions and hidden records are personal history
-// and are never rotated. Automatic unseen titles compete within their own
-// year × language × format segment so older eras and both movies/shows remain represented.
-const ROLLING_POOL_MIN_PER_SEGMENT = 24;
-const ROLLING_POOL_MAX_PER_SEGMENT = 90;
-const ROLLING_POOL_PENDING_MIN_PER_SEGMENT = 2;
-const ROLLING_POOL_PENDING_MAX_PER_SEGMENT = 8;
-const ROLLING_POOL_EXCLUSION_CAP = 5000;
 const DISCOVERY_LEDGER_CAP = 2000;
 const DRIVE_TOKEN_REFRESH_LEEWAY_MS = 5 * 60 * 1000;
 const TASTE_STORY_VERSION = 'cinelens-taste-story-v1';
@@ -393,6 +384,7 @@ let similarTitleSourceId = '';
 // A searched title remains visible after adding. Its search is cleared only when
 // that same title is subsequently rated.
 let pendingSearchResetAfterRatingId = '';
+let legacyDiscoveryExclusionsRemovedDuringLoad = false;
 const yearCategoryMembersCache = {};
 let state = {
   movies: {},
@@ -404,10 +396,6 @@ let state = {
   wrongPicks: {},
   deletedMovieRecords: {},
   unblockedTitleRecords: {},
-  // Lightweight fingerprints for automatically evicted low-value candidates.
-  // This prevents the collector from repeatedly fetching and tagging the same
-  // titles without retaining their plot/tag payloads.
-  rollingPoolExclusions: {},
   legacyTagAliases: {},
   tagStats: { candidates:0, tags:0, rebuiltAt:'' },
   tagNormalization: { version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:'' },
@@ -1643,8 +1631,10 @@ function runStartupMaintenance() {
       const ratedAtMigrated = ensureRatedAtMetadata();
       const retiredWatchlist = retireWatchlistForRecentlyAdded();
       const changed = cleanContaminatedTags(true);
-      const rotation = pruneRollingCandidatePool({reason:'startup'});
-      if (removedHindiShows || removedConventionalHorror || excludedSensitiveTitles || addedAtMigrated || ratedAtMigrated || retiredWatchlist || changed || rotation.evicted) {
+      const removedLegacyPoolExclusions = legacyDiscoveryExclusionsRemovedDuringLoad || Object.hasOwn(state, 'rollingPoolExclusions');
+      legacyDiscoveryExclusionsRemovedDuringLoad = false;
+      if (Object.hasOwn(state, 'rollingPoolExclusions')) delete state.rollingPoolExclusions;
+      if (removedHindiShows || removedConventionalHorror || excludedSensitiveTitles || addedAtMigrated || ratedAtMigrated || retiredWatchlist || changed || removedLegacyPoolExclusions) {
         saveLocalState();
         queueDriveSync();
         render();
@@ -2440,263 +2430,6 @@ function isMovieHidden(movie) {
   return false;
 }
 
-function rollingPoolExclusionMatches(value) {
-  return Object.values(state.rollingPoolExclusions || {}).some(record => recordMatchesDiscoveryCandidate(record, value));
-}
-
-function isRollingPoolExcluded(movie) {
-  if (!movie) return false;
-  if (movie.id && state.rollingPoolExclusions?.[movie.id]) return true;
-  return [movie.title, movie.wikiTitle, movie.pageTitle].some(title => rollingPoolExclusionMatches(title));
-}
-
-function releaseRollingPoolExclusion(value) {
-  const key = normaliseTitleKey(typeof value === 'string' ? value : value?.title);
-  const pageId = candidatePageId(typeof value === 'string' ? null : value);
-  if ((!key && !pageId) || !state.rollingPoolExclusions) return false;
-  let changed = false;
-  Object.entries(state.rollingPoolExclusions).forEach(([recordKey, record]) => {
-    const matches = recordMatchesDiscoveryCandidate(record, value);
-    if (!matches) return;
-    delete state.rollingPoolExclusions[recordKey];
-    changed = true;
-  });
-  return changed;
-}
-
-function isReplaceableRollingCandidate(movie) {
-  return !!movie
-    && Number(movie.rating || 0) === 0
-    && !movie.watchlist
-    && !movie.manualAdded;
-}
-
-function trimRollingPoolExclusions() {
-  const records = Object.entries(state.rollingPoolExclusions || {});
-  if (records.length <= ROLLING_POOL_EXCLUSION_CAP) return 0;
-  records
-    .sort(([, a], [, b]) => recordTimestamp(a) - recordTimestamp(b))
-    .slice(0, records.length - ROLLING_POOL_EXCLUSION_CAP)
-    .forEach(([key]) => delete state.rollingPoolExclusions[key]);
-  return Math.max(0, records.length - ROLLING_POOL_EXCLUSION_CAP);
-}
-
-function rollingPoolSegmentYear(movie) {
-  const year = Number(movie?.year);
-  return Number.isFinite(year) && year >= 1900 ? year : 'unknown';
-}
-
-function rollingPoolSegmentKey(movie) {
-  const year = rollingPoolSegmentYear(movie);
-  const language = String(movie?.language || 'Unknown').trim() || 'Unknown';
-  const format = movie?.format ? 'show' : 'movie';
-  return [year, language, format].join('│');
-}
-
-function rollingPoolSegmentStats(segmentKey, items) {
-  const pool = Array.isArray(items) ? items : [];
-  const count = pool.length;
-  const taggedCount = pool.filter(item => item.type === 'tagged').length;
-  const pendingCount = count - taggedCount;
-  const strongCount = pool.filter(item => item.type === 'tagged' && item.predictedRating >= 4 && item.posOverlap >= STRONG_REC_MIN_OVERLAP).length;
-  const avgPredicted = taggedCount ? pool.filter(item => item.type === 'tagged').reduce((sum, item) => sum + item.predictedRating, 0) / taggedCount : 3;
-
-  const history = [
-    ...Object.values(state.movies || {}),
-    ...Object.values(state.hiddenTitles || {})
-  ].filter(movie => Number(movie?.rating || 0) > 0 && rollingPoolSegmentKey(movie) === segmentKey);
-
-  const ratingCount = history.length;
-  const avgRating = ratingCount ? history.reduce((sum, movie) => sum + Number(movie.rating || 0), 0) / ratingCount : 0;
-  const ratingAffinity = ratingCount ? Math.max(0, Math.min(1, (avgRating - 2.5) / 2.5)) : 0;
-  const engagement = Math.max(0, Math.min(1, ratingCount / 12));
-  const strongShare = taggedCount ? strongCount / taggedCount : 0;
-  const quality = Math.max(0, Math.min(1,
-    0.45 * ((avgPredicted - 1) / 4) +
-    0.30 * strongShare +
-    0.15 * ratingAffinity +
-    0.10 * engagement
-  ));
-  const year = pool[0]?.yearValue ?? rollingPoolSegmentYear(pool[0]?.movie || {});
-  const currentYear = new Date().getFullYear();
-  const recency = typeof year === 'number' ? Math.max(0, Math.min(1, (year - 1970) / Math.max(1, currentYear - 1970))) : 0.35;
-  const supply = Math.max(0, Math.min(1, Math.log(count + 1) / Math.log(90)));
-
-  const keepRatio = Math.max(0.58, Math.min(0.95,
-    0.66 +
-    0.16 * quality +
-    0.07 * engagement +
-    0.06 * recency +
-    0.03 * supply
-  ));
-
-  const minKeep = Math.max(
-    ROLLING_POOL_MIN_PER_SEGMENT,
-    Math.min(
-      ROLLING_POOL_MAX_PER_SEGMENT,
-      Math.round(ROLLING_POOL_MIN_PER_SEGMENT + 12 * quality + 8 * engagement + 4 * recency)
-    )
-  );
-
-  const pendingAllowance = Math.max(
-    ROLLING_POOL_PENDING_MIN_PER_SEGMENT,
-    Math.min(
-      ROLLING_POOL_PENDING_MAX_PER_SEGMENT,
-      Math.round(ROLLING_POOL_PENDING_MIN_PER_SEGMENT + 4 * quality + 2 * engagement)
-    )
-  );
-
-  return {
-    count,
-    taggedCount,
-    pendingCount,
-    strongCount,
-    avgPredicted,
-    ratingCount,
-    avgRating,
-    ratingAffinity,
-    engagement,
-    quality,
-    recency,
-    supply,
-    keepRatio,
-    minKeep,
-    pendingAllowance
-  };
-}
-
-function pruneRollingCandidatePool({reason='rotation'}={}) {
-  const replaceable = Object.values(state.movies || {}).filter(isReplaceableRollingCandidate);
-  if (!replaceable.length) return {evicted:0, retained:0, pending:0, reason};
-
-  const hasTasteModel = personalizedEnough();
-  const segments = new Map();
-  const pendingBySegment = new Map();
-
-  replaceable.forEach(movie => {
-    const segmentKey = rollingPoolSegmentKey(movie);
-    if (!segments.has(segmentKey)) segments.set(segmentKey, []);
-    if (!pendingBySegment.has(segmentKey)) pendingBySegment.set(segmentKey, []);
-    const yearValue = rollingPoolSegmentYear(movie);
-    const tagCount = rawScoringTags(movie).length;
-
-    if (!tagCount) {
-      pendingBySegment.get(segmentKey).push({movie, type:'pending', yearValue, updatedAt:recordTimestamp(movie)});
-      return;
-    }
-
-    const fit = hasTasteModel ? predictTasteFit(movie) : null;
-    segments.get(segmentKey).push({
-      movie,
-      type:'tagged',
-      yearValue,
-      predictedRating:Number(fit?.predictedRating || 3),
-      positiveScore:Number(fit?.positiveScore || 0),
-      negativePenalty:Number(fit?.negativePenalty || 0),
-      posOverlap:Number(fit?.posOverlap || 0),
-      updatedAt:recordTimestamp(movie)
-    });
-  });
-
-  const keepIds = new Set();
-  let retainedTagged = 0;
-  let retainedPending = 0;
-  const poolStats = [];
-
-  const taggedSorter = (a, b) =>
-    b.predictedRating - a.predictedRating ||
-    b.positiveScore - a.positiveScore ||
-    a.negativePenalty - b.negativePenalty ||
-    b.posOverlap - a.posOverlap ||
-    b.updatedAt - a.updatedAt ||
-    String(a.movie.title || '').localeCompare(String(b.movie.title || ''));
-
-  const pendingSorter = (a, b) =>
-    b.updatedAt - a.updatedAt ||
-    String(a.movie.title || '').localeCompare(String(b.movie.title || ''));
-
-  const segmentKeys = new Set([...segments.keys(), ...pendingBySegment.keys()]);
-  [...segmentKeys].sort().forEach(segmentKey => {
-    const tagged = (segments.get(segmentKey) || []).sort(taggedSorter);
-    const pending = (pendingBySegment.get(segmentKey) || []).sort(pendingSorter);
-    const stats = rollingPoolSegmentStats(segmentKey, [...tagged, ...pending]);
-    const keepTagged = Math.min(
-      tagged.length,
-      Math.max(stats.minKeep, Math.ceil(tagged.length * stats.keepRatio))
-    );
-    const keepPending = Math.min(pending.length, stats.pendingAllowance);
-
-    tagged.slice(0, keepTagged).forEach(item => keepIds.add(String(item.movie.id)));
-    pending.slice(0, keepPending).forEach(item => keepIds.add(String(item.movie.id)));
-    retainedTagged += keepTagged;
-    retainedPending += keepPending;
-    poolStats.push({segmentKey, keepTagged, keepPending, ...stats});
-  });
-
-  const evicted = replaceable.filter(movie => !keepIds.has(String(movie.id)));
-  if (!evicted.length) {
-    trimRollingPoolExclusions();
-    state.meta = state.meta || {};
-    state.meta.rollingPool = {
-      policy:'adaptive-segmented',
-      segmentCount:poolStats.length,
-      retainedTagged,
-      retainedPending,
-      lastRotatedAt:nowStamp(),
-      lastEvicted:0,
-      reason
-    };
-    return {evicted:0, retained:keepIds.size, pending:retainedPending, segmentCount:poolStats.length, reason};
-  }
-
-  const stamp = nowStamp();
-  state.rollingPoolExclusions = state.rollingPoolExclusions || {};
-  evicted.forEach(movie => {
-    const key = normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title) || String(movie.id);
-    state.rollingPoolExclusions[key] = {
-      id:String(movie.id || ''),
-      title:movie.title || '',
-      wikiTitle:movie.wikiTitle || '',
-      pageTitle:movie.pageTitle || '',
-      wikiPageId:movie.wikiPageId || wikiPageIdFromMovie(movie),
-      discoveryLane:movie.discoveryLane || '',
-      discoveryCycle:Number(movie.discoveryCycle || 0),
-      discoverySource:movie.discoverySource || '',
-      reason:'rolling-pool',
-      at:stamp,
-      updatedAt:stamp
-    };
-    delete state.movies[movie.id];
-  });
-  trimRollingPoolExclusions();
-  state.meta = state.meta || {};
-  state.meta.rollingPool = {
-    policy:'adaptive-segmented',
-    segmentCount:poolStats.length,
-    retainedTagged,
-    retainedPending,
-    lastRotatedAt:stamp,
-    lastEvicted:evicted.length,
-    reason,
-    sample: poolStats.slice(0, 12).map(item => ({
-      segment:item.segmentKey,
-      keepTagged:item.keepTagged,
-      keepPending:item.keepPending,
-      tagged:item.taggedCount,
-      pending:item.pendingCount,
-      avgPredicted:Number(item.avgPredicted.toFixed(2)),
-      strong:item.strongCount,
-      rated:item.ratingCount,
-      ratio:Number(item.keepRatio.toFixed(2))
-    }))
-  };
-  invalidateTagCaches();
-  invalidateTasteModel();
-  rebuildTagBrain();
-  computeTagWeights();
-  return {evicted:evicted.length, retained:keepIds.size, pending:retainedPending, segmentCount:poolStats.length, reason};
-}
-
 function stopOrExpandPool() {
   if (poolExpansionInProgress) stopFetching();
   else {
@@ -2947,10 +2680,6 @@ function noteDiscoveryEncounter(candidate, status, reason='') {
   trimDiscoveryLedger();
 }
 
-function rollingPoolRecordForCandidate(candidate) {
-  return Object.values(state.rollingPoolExclusions || {}).find(record => recordMatchesDiscoveryCandidate(record, candidate));
-}
-
 function discoveryCandidateDecision(title, lane, existing, seenThisRun, opts={}) {
   const candidateTitle = typeof title === 'string' ? title : title?.title;
   const pageId = candidatePageId(typeof title === 'string' ? null : title);
@@ -2968,13 +2697,6 @@ function discoveryCandidateDecision(title, lane, existing, seenThisRun, opts={})
   if (Number(ledgerRecord?.parserVersion || 0) === WIKI_PARSER_VERSION
       && ledgerRecord.status === 'rejected-after-fetch') {
     return {allowed:false, reason:`already validated: ${ledgerRecord.reason || ledgerRecord.status}`};
-  }
-  const rollingRecord = rollingPoolRecordForCandidate(title);
-  if (rollingRecord) {
-    const cycle = Number(title?.discoveryCycle || 0);
-    const blockedCycle = Number(rollingRecord.discoveryCycle || 0);
-    if (cycle <= blockedCycle) return {allowed:false, reason:'rolling exclusion for this traversal'};
-    if (opts.mutate !== false) releaseRollingPoolExclusion(title);
   }
   return {allowed:true, reason:''};
 }
@@ -3083,8 +2805,7 @@ function discoveryStateMatches(candidate) {
     wrongPicks:matches(state.wrongPicks),
     deleted:Object.values(state.deletedMovieRecords || {}).filter(record =>
       recordMatchesDiscoveryCandidate(record, candidate) || record?.titleKey === titleKey
-    ),
-    rolling:matches(state.rollingPoolExclusions)
+    )
   };
 }
 
@@ -3234,7 +2955,6 @@ async function expandPool(manual=true) {
   const seenThisRun = new Set();
   const pendingAiMovies = [];
   let added = 0;
-  let rotatedOut = 0;
   let attempts = 0;
   let aiFailure = '';
   let collectionSatisfied = false;
@@ -3253,16 +2973,11 @@ async function expandPool(manual=true) {
   const progress = (label, title='') => {
     const health = collectionHealth();
     const pct = Math.min(98, Math.round((attempts / Math.max(1, attemptBudget)) * 100));
-    const kept = Math.max(0, added - rotatedOut);
     showFetchProgress(
       label,
       pct,
-      `${attempts}/${attemptBudget} checked · ${added} fetched · ${rotatedOut} rotated out · +${kept} kept · ${formatStrongMatchCount(health.strongCount, health.target)}${title ? ` · ${title}` : ''}`
+      `${attempts}/${attemptBudget} checked · ${added} fetched · ${added} kept · ${formatStrongMatchCount(health.strongCount, health.target)}${title ? ` · ${title}` : ''}`
     );
-  };
-
-  const noteRotation = rotation => {
-    rotatedOut += Number(rotation?.evicted || 0);
   };
 
   const flushPendingAiMovies = async () => {
@@ -3280,15 +2995,9 @@ async function expandPool(manual=true) {
     try {
       const result = await requestAiTags(movies);
       outcomes.ai += Number(result?.failed || 0);
-      const rotation = pruneRollingCandidatePool({reason:'collection'});
-      noteRotation(rotation);
       rebuildTagBrain();
       computeTagWeights();
-      if (rotation.evicted) {
-        pendingCollectionSaveIds.clear();
-        saveLocalState();
-      } else saveCollectionState();
-      if (rotation.evicted) console.info('CineLens rolling pool rotated', rotation);
+      saveCollectionState();
       if (!manual && !shouldRunBackgroundCollection()) collectionSatisfied = true;
     } catch (error) {
       const message = String(error?.message || error);
@@ -3390,9 +3099,9 @@ async function expandPool(manual=true) {
             movie.discoveryCycle = Number(candidate?.discoveryCycle || 0);
             movie.discoverySource = String(candidate?.sourceCategory || '');
           }
-          if (movie && (isMovieHidden(movie) || isRollingPoolExcluded(movie))) {
+          if (movie && isMovieHidden(movie)) {
             outcomes.hidden++;
-            noteDiscoveryEncounter(candidate, 'excluded-after-fetch', isMovieHidden(movie) ? 'manual removal identity' : 'rolling exclusion');
+            noteDiscoveryEncounter(candidate, 'excluded-after-fetch', 'manual removal identity');
           } else if (movie && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
             const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
             const stored = upsertMoviePreservingUserState(movie, existingMovie);
@@ -3453,27 +3162,20 @@ async function expandPool(manual=true) {
     }
 
     hideFetchProgress();
-    const finalRotation = pruneRollingCandidatePool({reason:'collection-finalize'});
-    noteRotation(finalRotation);
     rebuildTagBrain();
     computeTagWeights();
-    if (finalRotation.evicted) {
-      pendingCollectionSaveIds.clear();
-      saveLocalState();
-    } else saveCollectionState();
-    if (finalRotation.evicted) console.info('CineLens rolling pool rotated', finalRotation);
+    saveCollectionState();
     queueDriveSync();
     scheduleTagCloudNormalization(1500);
     render();
 
     const outcomeSummary = `parser ${outcomes.parser}, duplicate ${outcomes.duplicate}, hidden ${outcomes.hidden}, filters ${outcomes.filtered}, AI pending ${outcomes.ai}`;
-    const kept = Math.max(0, added - rotatedOut);
-    console.info('CineLens expansion outcomes', {attempts, added, rotatedOut, kept, outcomes, parserReasons, health:collectionHealth()});
+    console.info('CineLens expansion outcomes', {attempts, added, kept:added, outcomes, parserReasons, health:collectionHealth()});
 
     if (manual && aiFailure) {
-      showToast(`Checked ${attempts}, fetched ${added}, rotated out ${rotatedOut}, kept +${kept}. AI tagging deferred: ${aiFailure}`, 'error');
+      showToast(`Checked ${attempts}, fetched ${added}, kept ${added}. AI tagging deferred: ${aiFailure}`, 'error');
     } else if (manual) {
-      showToast(`Checked ${attempts}, fetched ${added}, rotated out ${rotatedOut}, kept +${kept}. ${outcomeSummary}.`, kept ? 'success' : '');
+      showToast(`Checked ${attempts}, fetched ${added}, kept ${added}. ${outcomeSummary}.`, added ? 'success' : '');
     } else if (stopped && aiFailure) {
       console.warn('Background expansion paused:', aiFailure);
     }
@@ -3604,7 +3306,6 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
     // searching for a removed title IS the re-add gesture: lift the block
     // and surface the existing record.
     unblockTitleForManualSearch(existing.wikiTitle || existing.pageTitle || existing.title);
-    releaseRollingPoolExclusion(existing.title);
     touchRecord(existing);
     pendingSearchResetAfterRatingId = String(existing.id || '');
     saveLocalState();
@@ -3623,7 +3324,6 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
     return true;
   }
   unblockTitleForManualSearch(title);
-  releaseRollingPoolExclusion(title);
   if (btn) { btn.disabled = true; btn.textContent = 'fetching...'; }
   showFetchProgress('Fetching from Wikipedia...', 12, title);
   try {
@@ -5343,8 +5043,7 @@ function localTitleSearchMatches() {
   const active = Object.values(state.movies || {}).filter(matchesTitleSearch).sort(byNewest);
   const represented = new Set(active.map(movie => canonicalTitle(movie.title || movie.wikiTitle || movie.pageTitle)));
   const blocked = [
-    ...Object.values(state.wrongPicks || {}),
-    ...Object.values(state.rollingPoolExclusions || {})
+    ...Object.values(state.wrongPicks || {})
   ].filter(matchesRecord).filter(record => !represented.has(canonicalTitle(record.title || record.wikiTitle || record.pageTitle)));
   return {active, blocked};
 }
@@ -7535,7 +7234,6 @@ async function resetAllData() {
   state.hiddenTitles = {};
   state.wrongPicks = {};
   state.deletedMovieRecords = {};
-  state.rollingPoolExclusions = {};
   state.unblockedTitleRecords = {};
   state.legacyTagAliases = {};
   invalidateTagCaches();
@@ -7627,7 +7325,6 @@ function localProfilePayload() {
     settings:state.settings,
     wrongPicks:state.wrongPicks,
     deletedMovieRecords:state.deletedMovieRecords,
-    rollingPoolExclusions:state.rollingPoolExclusions,
     unblockedTitleRecords:state.unblockedTitleRecords,
     legacyTagAliases:state.legacyTagAliases,
     tagStats:state.tagStats,
@@ -7790,8 +7487,7 @@ function dataTimestamp(data) {
     ...Object.values(data?.movies || {}),
     ...Object.values(data?.hiddenTitles || {}),
     ...Object.values(data?.wrongPicks || {}),
-    ...Object.values(data?.deletedMovieRecords || {}),
-    ...Object.values(data?.rollingPoolExclusions || {})
+    ...Object.values(data?.deletedMovieRecords || {})
   ].map(recordTimestamp);
   return Math.max(
     Date.parse(data?.meta?.updatedAt || data?.updatedAt || '') || 0,
@@ -7877,9 +7573,6 @@ function ensureSyncMetadata({touchDataset=false}={}) {
   Object.values(state.wrongPicks || {}).forEach(record => {
     if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
   });
-  Object.values(state.rollingPoolExclusions || {}).forEach(record => {
-    if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
-  });
   if (!state.meta) state.meta = {};
   if (touchDataset || !state.meta.updatedAt) state.meta.updatedAt = stamp;
   if (!state.settings) state.settings = {};
@@ -7896,7 +7589,6 @@ function exportCinelensData() {
     hiddenTitles: state.hiddenTitles,
     wrongPicks: state.wrongPicks,
     deletedMovieRecords: state.deletedMovieRecords,
-    rollingPoolExclusions: state.rollingPoolExclusions,
     unblockedTitleRecords: state.unblockedTitleRecords,
     tagStats: state.tagStats,
     tagNormalization: state.tagNormalization,
@@ -7954,6 +7646,7 @@ function mergeDiscoveryCursor(local={}, remote={}) {
 }
 
 function normaliseIncomingData(d={}) {
+  if (Object.hasOwn(d, 'rollingPoolExclusions')) legacyDiscoveryExclusionsRemovedDuringLoad = true;
   const tagStats = d.tagStats || (d.canonicalTagStats ? {candidates:d.canonicalTagStats.raw||0,tags:d.canonicalTagStats.canonical||0,rebuiltAt:d.canonicalTagStats.rebuiltAt||''} : state.tagStats);
   const settings = {...(d.settings || {})};
   const restored = restoreHiddenRecordsToMovies(d.movies || {}, d.hiddenTitles || {});
@@ -7965,7 +7658,6 @@ function normaliseIncomingData(d={}) {
     hiddenTitles: restored.hiddenTitles,
     wrongPicks: d.wrongPicks || {},
     deletedMovieRecords: d.deletedMovieRecords || {},
-    rollingPoolExclusions: d.rollingPoolExclusions || {},
     unblockedTitleRecords: d.unblockedTitleRecords || {},
     legacyTagAliases: d.tagAliases || d.legacyTagAliases || {},
     tagStats,
@@ -7996,7 +7688,6 @@ function replaceStateFromDataset(dataset) {
   state.hiddenTitles = incoming.hiddenTitles;
   state.wrongPicks = incoming.wrongPicks;
   state.deletedMovieRecords = incoming.deletedMovieRecords;
-  state.rollingPoolExclusions = incoming.rollingPoolExclusions || {};
   state.unblockedTitleRecords = incoming.unblockedTitleRecords || {};
   state.legacyTagAliases = incoming.legacyTagAliases;
   state.tagStats = incoming.tagStats;
@@ -8059,7 +7750,6 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
   const unblockedTitleRecords=mergeRecordMap(local.unblockedTitleRecords, remote.unblockedTitleRecords);
   const wrongPicks=mergeRecordMap(local.wrongPicks, remote.wrongPicks);
   const deletedMovieRecords=mergeRecordMap(local.deletedMovieRecords, remote.deletedMovieRecords);
-  const rollingPoolExclusions=mergeRecordMap(local.rollingPoolExclusions, remote.rollingPoolExclusions);
   const discoveryLedger=mergeRecordMap(local.discoveryLedger, remote.discoveryLedger);
 
   // A deliberate manual re-add is also synchronized. It clears an older wrong-pick
@@ -8085,16 +7775,6 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
   };
   Object.keys(movies).forEach(id => { if (removalBlocksMovie(movies[id])) delete movies[id]; });
   Object.keys(hiddenTitles).forEach(id => { if (removalBlocksMovie(hiddenTitles[id])) delete hiddenTitles[id]; });
-
-  // Rolling-pool exclusions are not user rejections. They only suppress stale,
-  // replaceable unseen candidates from another device; rated, watchlisted and
-  // manual titles always survive.
-  const rollingBlocksMovie = movie => {
-    if (!isReplaceableRollingCandidate(movie)) return false;
-    const record=rollingPoolExclusions[movie.id] || Object.values(rollingPoolExclusions).find(item => recordMatchesDiscoveryCandidate(item, movie));
-    return !!record && recordTimestamp(record) >= recordTimestamp(movie);
-  };
-  Object.keys(movies).forEach(id => { if (rollingBlocksMovie(movies[id])) delete movies[id]; });
 
   // A title cannot be active and hidden at once. Newer state wins; on an exact
   // timestamp tie, hidden wins so an old active cache cannot resurrect it.
@@ -8125,7 +7805,6 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
     hiddenTitles,
     wrongPicks,
     deletedMovieRecords,
-    rollingPoolExclusions,
     unblockedTitleRecords,
     legacyTagAliases:{...remote.legacyTagAliases, ...local.legacyTagAliases},
     tagStats:{candidates:0, tags:0, rebuiltAt:''},
@@ -8702,7 +8381,6 @@ function exportDriveProfile() {
     hiddenTitles:state.hiddenTitles,
     wrongPicks:state.wrongPicks,
     deletedMovieRecords:state.deletedMovieRecords,
-    rollingPoolExclusions:state.rollingPoolExclusions,
     unblockedTitleRecords:state.unblockedTitleRecords,
     legacyTagAliases:state.legacyTagAliases,
     tagStats:state.tagStats,
@@ -8722,7 +8400,6 @@ function applyDriveProfile(profile,{merge=true,preferDrive=false}={}) {
   state.hiddenTitles=merge ? mergeRecordMap(state.hiddenTitles,profile.hiddenTitles || {}) : (profile.hiddenTitles || {});
   state.wrongPicks=merge ? mergeRecordMap(state.wrongPicks,profile.wrongPicks || {}) : (profile.wrongPicks || {});
   state.deletedMovieRecords=merge ? mergeRecordMap(state.deletedMovieRecords,profile.deletedMovieRecords || {}) : (profile.deletedMovieRecords || {});
-  state.rollingPoolExclusions=merge ? mergeRecordMap(state.rollingPoolExclusions,profile.rollingPoolExclusions || {}) : (profile.rollingPoolExclusions || {});
   state.unblockedTitleRecords=merge ? mergeRecordMap(state.unblockedTitleRecords,profile.unblockedTitleRecords || {}) : (profile.unblockedTitleRecords || {});
   state.legacyTagAliases={...(profile.legacyTagAliases || {}),...(state.legacyTagAliases || {})};
   state.tagStats=profile.tagStats || state.tagStats;
