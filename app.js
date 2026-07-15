@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 43;
+const APP_VERSION = 44;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -220,6 +220,7 @@ let lastAutoExpandAt = 0;
 let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
+const MOVIELENS_CSV_HEADER = ['movie_id','imdb_id','tmdb_id','rating','average_rating','title'];
 const CARD_REFRESH_BATCH_SIZE = 20;
 const WIKI_PARSER_VERSION = 6;
 const REC_INFINITE_PAGE_SIZE = 20;
@@ -362,6 +363,8 @@ let receptionBackfillInProgress = false;
 let receptionCalibrationTimer = null;
 let backgroundAiTaggingInProgress = false;
 let backgroundAiTimer = null;
+let movielensImportTimer = null;
+let movielensImportInProgress = false;
 let startupDriveRestoreDone = false;
 // A browser with no local library must restore Drive before background work can
 // create titles or advance the dataset timestamp.
@@ -1683,6 +1686,7 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
     scheduleTagCloudNormalization(1800);
     scheduleReceptionBackfill(4500);
     scheduleTmdbBackfill(4500);
+    scheduleMovieLensImport(5000);
   }
 
   render();
@@ -2435,6 +2439,7 @@ function stopOrExpandPool() {
   else {
     autoFetchPaused = false;
     expandPool(true);
+    scheduleMovieLensImport(500);
   }
 }
 
@@ -3746,7 +3751,7 @@ async function runReceptionBackfill() {
   // the shared progress bar at any moment. autoFetchPaused ("Pause
   // collection") halts this loop too but keeps polling so it resumes
   // automatically once collection resumes.
-  if (autoFetchPaused || !libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || tmdbBackfillInProgress) {
+  if (autoFetchPaused || !libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || tmdbBackfillInProgress || movielensImportInProgress) {
     scheduleReceptionBackfill(3000);
     return;
   }
@@ -3890,7 +3895,7 @@ async function runTmdbBackfill() {
   // polling so it resumes by itself the moment collection is resumed —
   // pausing collection should quiet ALL background fetching, not leave the
   // progress bar reappearing seconds later for a different loop.
-  if (autoFetchPaused || !libraryWritesUnlocked || tmdbBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) {
+  if (autoFetchPaused || !libraryWritesUnlocked || tmdbBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress || movielensImportInProgress) {
     scheduleTmdbBackfill(3000);
     return;
   }
@@ -3933,6 +3938,308 @@ async function runTmdbBackfill() {
     tmdbBackfillInProgress = false;
     hideFetchProgress();
     scheduleTmdbBackfill(6000);
+  }
+}
+
+function parseQuotedCsv(text) {
+  const rows = [];
+  const source = String(text || '').replace(/^\uFEFF/, '');
+  let row = [];
+  let field = '';
+  let quoted = false;
+  for (let index = 0; index < source.length; index++) {
+    const character = source[index];
+    if (quoted) {
+      if (character === '"') {
+        if (source[index + 1] === '"') {
+          field += '"';
+          index++;
+        } else {
+          quoted = false;
+        }
+      } else {
+        field += character;
+      }
+      continue;
+    }
+    if (character === '"' && !field) {
+      quoted = true;
+    } else if (character === ',') {
+      row.push(field);
+      field = '';
+    } else if (character === '\n' || character === '\r') {
+      if (character === '\r' && source[index + 1] === '\n') index++;
+      row.push(field);
+      if (row.some(value => value !== '')) rows.push(row);
+      row = [];
+      field = '';
+    } else {
+      field += character;
+    }
+  }
+  if (quoted) throw new Error('Ratings CSV has an unfinished quoted field');
+  row.push(field);
+  if (row.some(value => value !== '')) rows.push(row);
+  return rows;
+}
+
+function movieLensTitleAndYear(value) {
+  const raw = String(value || '').trim();
+  const match = raw.match(/^(.*?)\s*\((\d{4})\)\s*$/);
+  return {
+    title: (match ? match[1] : raw).trim(),
+    year: match ? Number(match[2]) : null
+  };
+}
+
+function movieLensQueueKey(row) {
+  return `tmdb:${String(row?.tmdbId || '').trim()}`;
+}
+
+function parseMovieLensRatingsCsv(text) {
+  const [header = [], ...dataRows] = parseQuotedCsv(text);
+  if (header.length !== MOVIELENS_CSV_HEADER.length || header.some((value, index) => value !== MOVIELENS_CSV_HEADER[index])) {
+    throw new Error(`Ratings CSV header must be ${MOVIELENS_CSV_HEADER.join(',')}`);
+  }
+  const seen = new Set();
+  return dataRows.reduce((rows, values) => {
+    const tmdbId = String(values[2] || '').trim();
+    const rawRating = Number(values[3]);
+    const title = movieLensTitleAndYear(values[5]);
+    if (!tmdbId || !Number.isFinite(rawRating) || !title.title) return rows;
+    const key = movieLensQueueKey({tmdbId});
+    if (seen.has(key)) return rows;
+    seen.add(key);
+    rows.push({
+      tmdbId,
+      title: title.title,
+      year: title.year,
+      rating: Math.max(0, Math.min(5, Math.ceil(rawRating)))
+    });
+    return rows;
+  }, []);
+}
+
+function movieLensLibraryMatch(row) {
+  const records = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})];
+  const tmdbId = Number(row?.tmdbId);
+  if (Number.isFinite(tmdbId) && tmdbId > 0) {
+    const byTmdb = records.find(movie => Number(movie?.tmdbId) === tmdbId);
+    if (byTmdb) return byTmdb;
+  }
+  if (!row?.title || !Number.isFinite(Number(row.year))) return null;
+  return records.find(movie => {
+    const titleMatches = [movie?.title, movie?.wikiTitle, movie?.pageTitle]
+      .some(value => sameCanonicalTitle(value, row.title));
+    return titleMatches && Math.abs(Number(movie?.year) - Number(row.year)) <= 1;
+  }) || null;
+}
+
+function applyMovieLensRating(movie, rating, stamp=nowStamp()) {
+  if (!movie) return false;
+  const nextRating = Math.max(0, Math.min(5, Math.ceil(Number(rating) || 0)));
+  const ratingChanged = Number(movie.rating || 0) !== nextRating;
+  const importChanged = !movie.movielensImported;
+  if (!ratingChanged && !importChanged) return false;
+  movie.rating = nextRating;
+  if (ratingChanged) movie.ratedAt = stamp;
+  if (nextRating > 0) movie.watchlist = false;
+  movie.movielensImported = true;
+  touchRecord(movie, stamp);
+  return true;
+}
+
+function movieLensImportStatusText() {
+  const summary = state.meta?.movielensImportSummary;
+  if (!summary || !Number(summary.total || 0)) return '';
+  return `MovieLens import · ${Math.min(Number(summary.total), Number(summary.checkpoint || 0))}/${summary.total} · ${Number(summary.skipped || 0)} skipped`;
+}
+
+function movieLensImportQueue() {
+  state.meta = state.meta || {};
+  if (!Array.isArray(state.meta.movielensImportQueue)) state.meta.movielensImportQueue = [];
+  return state.meta.movielensImportQueue;
+}
+
+function movieLensSkipQueueItem(item, reason) {
+  const skips = Array.isArray(state.meta.movielensImportSkips) ? state.meta.movielensImportSkips : [];
+  const key = movieLensQueueKey(item);
+  const entry = {key, tmdbId:item.tmdbId, title:item.title, year:item.year, reason:String(reason || 'Wikipedia rejected title')};
+  const existing = skips.findIndex(skip => skip?.key === key);
+  if (existing >= 0) skips[existing] = entry;
+  else skips.push(entry);
+  state.meta.movielensImportSkips = skips;
+  state.meta.movielensImportSummary = {
+    ...(state.meta.movielensImportSummary || {}),
+    skipped: skips.length,
+    checkpoint: Number(state.meta.movielensImportSummary?.checkpoint || 0) + 1
+  };
+}
+
+function scheduleMovieLensImport(delay=3500) {
+  if (!libraryWritesUnlocked || movielensImportInProgress || !state.meta?.movielensImportQueue?.length) return;
+  if (movielensImportTimer) {
+    clearTimeout(movielensImportTimer);
+    movielensImportTimer = null;
+  }
+  const run = () => {
+    movielensImportTimer = null;
+    runMovieLensImport();
+  };
+  if ('requestIdleCallback' in window) {
+    movielensImportTimer = setTimeout(() => requestIdleCallback(run, {timeout:1500}), delay);
+  } else {
+    movielensImportTimer = setTimeout(run, delay);
+  }
+}
+
+async function fetchMovieLensQueueItem(item) {
+  const diagnostics = {};
+  const qualifiedTitle = item.year ? `${item.title} (${item.year} film)` : item.title;
+  let fresh = await fetchWikiMovie(qualifiedTitle, 'all', diagnostics, {ai:false});
+  if (!fresh && qualifiedTitle !== item.title && !autoFetchPaused && !fetchAbortRequested) {
+    fresh = await fetchWikiMovie(item.title, 'all', diagnostics, {ai:false});
+  }
+  return {fresh, reason:diagnostics.reason || 'Wikipedia rejected title'};
+}
+
+async function runMovieLensImport() {
+  if (
+    autoFetchPaused ||
+    !libraryWritesUnlocked ||
+    movielensImportInProgress ||
+    poolExpansionInProgress ||
+    backgroundAiTaggingInProgress ||
+    receptionBackfillInProgress ||
+    tmdbBackfillInProgress
+  ) {
+    scheduleMovieLensImport(3000);
+    return;
+  }
+  const queue = state.meta?.movielensImportQueue;
+  const item = Array.isArray(queue) ? queue[0] : null;
+  if (!item) return;
+
+  movielensImportInProgress = true;
+  try {
+    const summary = state.meta.movielensImportSummary || {};
+    showFetchProgress(
+      `MovieLens import · ${Number(summary.checkpoint || 0) + 1}/${Number(summary.total || queue.length)}`,
+      Math.round(((Number(summary.checkpoint || 0) + 1) / Math.max(1, Number(summary.total || queue.length))) * 100),
+      item.title
+    );
+    let fetched;
+    let rejectionReason = '';
+    try {
+      const result = await fetchMovieLensQueueItem(item);
+      fetched = result.fresh;
+      rejectionReason = result.reason;
+    } catch (error) {
+      if (autoFetchPaused || fetchAbortRequested || error?.name === 'AbortError') return;
+      rejectionReason = String(error?.message || 'Wikipedia request failed');
+    }
+    if (autoFetchPaused || fetchAbortRequested) return;
+
+    let changedMovieIds = [];
+    if (!fetched) {
+      queue.shift();
+      movieLensSkipQueueItem(item, rejectionReason);
+    } else if (!sameCanonicalTitle(fetched.title || fetched.pageTitle, item.title) || (item.year && (!Number.isFinite(Number(fetched.year)) || Math.abs(Number(fetched.year) - item.year) > 1))) {
+      queue.shift();
+      movieLensSkipQueueItem(item, 'Wikipedia returned a different title or year');
+    } else if (isMovieHidden(fetched)) {
+      queue.shift();
+      movieLensSkipQueueItem(item, 'Title is permanently removed from this library');
+    } else {
+      const stored = upsertMoviePreservingUserState(fetched);
+      if (!stored) {
+        queue.shift();
+        movieLensSkipQueueItem(item, 'Wikipedia record could not be stored');
+      } else {
+        applyMovieLensRating(stored, item.rating);
+        queue.shift();
+        state.meta.movielensImportSummary = {
+          ...(state.meta.movielensImportSummary || {}),
+          checkpoint: Number(state.meta.movielensImportSummary?.checkpoint || 0) + 1,
+          imported: Number(state.meta.movielensImportSummary?.imported || 0) + 1
+        };
+        changedMovieIds = [String(stored.id)];
+      }
+    }
+    invalidateTasteModel();
+    computeTagWeights();
+    scheduleReceptionCalibrationUpdate();
+    saveLocalState({preserveUpdatedAt:true, changedMovieIds});
+    queueDriveSync();
+    render();
+  } finally {
+    movielensImportInProgress = false;
+    hideFetchProgress();
+    updateLibraryHealth();
+    if (!autoFetchPaused) {
+      scheduleBackgroundAiQueue(1200);
+      scheduleMovieLensImport(1800);
+    }
+  }
+}
+
+function chooseMovieLensRatingsCsv() {
+  document.getElementById('movielensRatingsCsvInput')?.click();
+}
+
+async function importMovieLensRatingsCsv(file) {
+  const input = document.getElementById('movielensRatingsCsvInput');
+  if (!file) return;
+  try {
+    const rows = parseMovieLensRatingsCsv(await file.text());
+    if (!rows.length) throw new Error('Ratings CSV has no usable rating rows');
+    const sourceHash = String(stableHash(rows.map(row => [row.tmdbId, row.rating, row.title, row.year || ''].join('|')).join('\n')));
+    const sameSource = state.meta?.movielensImportSourceHash === sourceHash;
+    const queue = movieLensImportQueue();
+    const queued = new Set(queue.map(movieLensQueueKey));
+    const skipped = new Set((sameSource ? state.meta.movielensImportSkips || [] : []).map(skip => skip?.key));
+    const changedMovieIds = [];
+    let matched = 0;
+    let enqueued = 0;
+
+    if (!sameSource) {
+      state.meta.movielensImportSourceHash = sourceHash;
+      state.meta.movielensImportSkips = [];
+      state.meta.movielensImportSummary = {total:rows.length, checkpoint:0, imported:0, skipped:0};
+    }
+    rows.forEach(row => {
+      const existing = movieLensLibraryMatch(row);
+      if (existing) {
+        if (!sameSource) state.meta.movielensImportSummary.checkpoint++;
+        if (applyMovieLensRating(existing, row.rating)) changedMovieIds.push(String(existing.id));
+        matched++;
+        return;
+      }
+      const key = movieLensQueueKey(row);
+      if (!queued.has(key) && !skipped.has(key)) {
+        queue.push(row);
+        queued.add(key);
+        enqueued++;
+      }
+    });
+    if (changedMovieIds.length || enqueued || !sameSource) {
+      invalidateTasteModel();
+      computeTagWeights();
+      scheduleReceptionCalibrationUpdate();
+      saveLocalState({preserveUpdatedAt:true, changedMovieIds});
+      queueDriveSync();
+      render();
+    }
+    scheduleMovieLensImport(500);
+    updateLibraryHealth();
+    showToast(
+      sameSource ? 'MovieLens ratings already imported; pending titles remain queued.' : `MovieLens ratings imported: ${matched} matched, ${enqueued} queued.`,
+      'success'
+    );
+  } catch (error) {
+    showToast(`Ratings import failed: ${error.message || error}`, 'error');
+  } finally {
+    if (input) input.value = '';
   }
 }
 
@@ -5181,6 +5488,8 @@ function updateLibraryHealth() {
   const receptionSegment = receptionStatus ? ` · ${receptionStatus}` : '';
   const tmdbStatus = tmdbBackfillStatusText();
   const tmdbSegment = tmdbStatus ? ` · ${tmdbStatus}` : '';
+  const movieLensStatus = movieLensImportStatusText();
+  const movieLensSegment = movieLensStatus ? ` · ${movieLensStatus}` : '';
 
   let text;
   if (autoFetchPaused) text = 'Collection paused';
@@ -5193,7 +5502,7 @@ function updateLibraryHealth() {
 
   if (label) label.textContent = text;
   if (maintenance) {
-    maintenance.textContent = `${text} · ${health.pendingTags} pending AI tags${receptionSegment}${tmdbSegment} · ${drive}`;
+    maintenance.textContent = `${text} · ${health.pendingTags} pending AI tags${receptionSegment}${tmdbSegment}${movieLensSegment} · ${drive}`;
   }
   const tmdbBtn = document.getElementById('tmdbBackfillToggleBtn');
   if (tmdbBtn) {
@@ -5237,6 +5546,7 @@ function scheduleBackgroundAiQueue(delay = 700) {
     backgroundAiTaggingInProgress ||
     backgroundAiTimer ||
     poolExpansionInProgress ||
+    movielensImportInProgress ||
     !pendingBackgroundAiMovies().length
   ) {
     return;
@@ -5249,7 +5559,7 @@ function scheduleBackgroundAiQueue(delay = 700) {
 }
 
 async function runBackgroundAiQueue() {
-  if (backgroundAiTaggingInProgress || poolExpansionInProgress || autoFetchPaused) return;
+  if (backgroundAiTaggingInProgress || poolExpansionInProgress || movielensImportInProgress || autoFetchPaused) return;
   const batch = pendingBackgroundAiMovies().slice(0, AI_TAG_BATCH_SIZE);
   if (!batch.length) return;
 
@@ -5304,6 +5614,7 @@ function maybeAutoExpandPool() {
     autoFetchPaused ||
     poolExpansionInProgress ||
     backgroundAiTaggingInProgress ||
+    movielensImportInProgress ||
     autoExpandTimer ||
     backgroundAiTimer
   ) {
@@ -7516,6 +7827,7 @@ function syncMustWaitForForegroundWork({respectHardCap=false}={}) {
     poolExpansionInProgress ||
     receptionBackfillInProgress ||
     tmdbBackfillInProgress ||
+    movielensImportInProgress ||
     backgroundAiTaggingInProgress ||
     tagCloudNormalizationInProgress ||
     tasteStoryInProgress
