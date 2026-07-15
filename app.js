@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 45;
+const APP_VERSION = 46;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -221,7 +221,7 @@ let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const MOVIELENS_CSV_HEADER = ['movie_id','imdb_id','tmdb_id','rating','average_rating','title'];
-const MOVIELENS_IMPORT_FETCH_CONCURRENCY = 3;
+const MOVIELENS_IMPORT_FETCH_CONCURRENCY = 8;
 const CARD_REFRESH_BATCH_SIZE = 20;
 const WIKI_PARSER_VERSION = 6;
 const REC_INFINITE_PAGE_SIZE = 20;
@@ -1569,6 +1569,10 @@ function meaningfulTagCount(movie) { return rawScoringTags(movie).length; }
 
 function migrateLegacyPoolItems() {
   Object.values(state.movies || {}).forEach(m => {
+    if (m.movielensImportPending || m.movielensImportSkipped) {
+      m.source = 'movielens-import';
+      return;
+    }
     if (m.source === 'wikipedia') return;
     m.source = 'legacy';
     m.tags = [];
@@ -1587,7 +1591,13 @@ function rebuildDescriptorBrain() {
   let changed = 0;
   [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(m => {
     const before = JSON.stringify({tags:m.tags||[], coreTags:m.coreTags||[], plotTags:m.plotTags||[], descriptorTags:m.descriptorTags||[], tagged:m.tagged});
-    if (hasCurrentAiTags(m)) {
+    if (m.movielensImportPending || m.movielensImportSkipped) {
+      m.source = 'movielens-import';
+      clearGeneratedTags(m);
+      m.needsManualUrl = false;
+      m.retagStatus = 'needs-refresh';
+      m.retagMessage = m.movielensImportPending ? 'MovieLens metadata pending' : 'MovieLens metadata unavailable';
+    } else if (hasCurrentAiTags(m)) {
       m.tags = cleanTagArray(m.tags || [], m, false);
       m.coreTags = [...m.tags];
       m.plotTags = [...m.tags];
@@ -1674,6 +1684,11 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
 
   // Maintenance can rewrite stored data, so it must follow the Drive decision.
   if (libraryWritesUnlocked) {
+    const stagedMovieLensIds = ensureMovieLensQueueRecords();
+    if (stagedMovieLensIds.length) {
+      saveLocalState({preserveUpdatedAt:true, changedMovieIds:stagedMovieLensIds});
+      queueDriveSync();
+    }
     const migratedWrongPicks = migrateVisibleWrongPicks();
     const migratedAliases = migrateLegacyTagAliases();
     const purgedTags = purgeLegacyTagsForAi();
@@ -1951,6 +1966,19 @@ function normaliseReceptionRecord(reception=null) {
 
 function normaliseStoredTitleRecord(movie) {
   if (!movie) return movie;
+  if (movie.movielensImportPending || movie.movielensImportSkipped) {
+    movie.source = 'movielens-import';
+    movie.tags = [];
+    movie.coreTags = [];
+    movie.plotTags = [];
+    movie.descriptorTags = [];
+    movie.rawDescriptors = [];
+    movie.tagged = false;
+    movie.needsManualUrl = false;
+    movie.retagStatus = 'needs-refresh';
+    movie.retagMessage = movie.movielensImportPending ? 'MovieLens metadata pending' : 'MovieLens metadata unavailable';
+    return movie;
+  }
   if (!movie.wikiPageId && String(movie.id || '').startsWith('wiki_')) {
     movie.wikiPageId = String(movie.id).replace(/^wiki_/, '');
   }
@@ -4021,8 +4049,9 @@ function parseMovieLensRatingsCsv(text) {
   }, []);
 }
 
-function movieLensLibraryMatch(row) {
-  const records = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})];
+function movieLensLibraryMatch(row, {includePending=true}={}) {
+  const records = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})]
+    .filter(movie => includePending || !movie?.movielensImportPending);
   const tmdbId = Number(row?.tmdbId);
   if (Number.isFinite(tmdbId) && tmdbId > 0) {
     const byTmdb = records.find(movie => Number(movie?.tmdbId) === tmdbId);
@@ -4034,6 +4063,52 @@ function movieLensLibraryMatch(row) {
       .some(value => sameCanonicalTitle(value, row.title));
     return titleMatches && Math.abs(Number(movie?.year) - Number(row.year)) <= 1;
   }) || null;
+}
+
+function movieLensStubId(row) {
+  return `movielens_${String(row?.tmdbId || '').trim()}`;
+}
+
+function stageMovieLensRecord(row, stamp=nowStamp()) {
+  const id = String(row.recordId || movieLensStubId(row));
+  row.recordId = id;
+  const existing = state.movies?.[id];
+  if (existing) return existing;
+  const record = {
+    id,
+    title:row.title,
+    year:row.year || null,
+    tmdbId:Number(row.tmdbId) || row.tmdbId,
+    source:'movielens-import',
+    tags:[],
+    coreTags:[],
+    plotTags:[],
+    descriptorTags:[],
+    rawDescriptors:[],
+    tagged:false,
+    movielensImportPending:true,
+    movielensImported:true,
+    addedAt:stamp,
+    ratedAt:stamp,
+    _updatedAt:stamp
+  };
+  applyMovieLensRating(record, row.rating, stamp);
+  state.movies[id] = record;
+  return record;
+}
+
+function ensureMovieLensQueueRecords() {
+  const queue = state.meta?.movielensImportQueue;
+  if (!Array.isArray(queue)) return [];
+  const changedMovieIds = [];
+  queue.forEach(row => {
+    const existing = movieLensLibraryMatch(row, {includePending:false});
+    if (existing) return;
+    const before = row.recordId;
+    const record = stageMovieLensRecord(row);
+    if (!before || !state.movies?.[before]) changedMovieIds.push(String(record.id));
+  });
+  return changedMovieIds;
 }
 
 function applyMovieLensRating(movie, rating, stamp=nowStamp()) {
@@ -4077,6 +4152,16 @@ function movieLensSkipQueueItem(item, reason) {
   };
 }
 
+function markMovieLensRecordSkipped(item, reason, changedMovieIds) {
+  const record = state.movies?.[item.recordId] || movieLensLibraryMatch(item);
+  if (!record) return;
+  record.movielensImportPending = false;
+  record.movielensImportSkipped = true;
+  record.movielensImportSkipReason = String(reason || 'Wikipedia metadata unavailable');
+  touchRecord(record);
+  changedMovieIds.add(String(record.id));
+}
+
 function scheduleMovieLensImport(delay=3500) {
   if (!libraryWritesUnlocked || movielensImportInProgress || !state.meta?.movielensImportQueue?.length) return;
   if (movielensImportTimer) {
@@ -4113,26 +4198,37 @@ function reconcileMovieLensQueueItem(queue, item, result, changedMovieIds) {
   const fetched = result?.fresh;
   if (!fetched) {
     removeMovieLensQueueItem(queue, item);
-    movieLensSkipQueueItem(item, result?.reason || 'Wikipedia request failed');
+    const reason = result?.reason || 'Wikipedia request failed';
+    movieLensSkipQueueItem(item, reason);
+    markMovieLensRecordSkipped(item, reason, changedMovieIds);
     return;
   }
   if (!sameCanonicalTitle(fetched.title || fetched.pageTitle, item.title) || (item.year && (!Number.isFinite(Number(fetched.year)) || Math.abs(Number(fetched.year) - item.year) > 1))) {
     removeMovieLensQueueItem(queue, item);
-    movieLensSkipQueueItem(item, 'Wikipedia returned a different title or year');
+    const reason = 'Wikipedia returned a different title or year';
+    movieLensSkipQueueItem(item, reason);
+    markMovieLensRecordSkipped(item, reason, changedMovieIds);
     return;
   }
   if (isMovieHidden(fetched)) {
     removeMovieLensQueueItem(queue, item);
-    movieLensSkipQueueItem(item, 'Title is permanently removed from this library');
+    const reason = 'Title is permanently removed from this library';
+    movieLensSkipQueueItem(item, reason);
+    markMovieLensRecordSkipped(item, reason, changedMovieIds);
     return;
   }
-  const stored = upsertMoviePreservingUserState(fetched);
+  const stored = upsertMoviePreservingUserState(fetched, state.movies?.[item.recordId] || null);
   if (!stored) {
     removeMovieLensQueueItem(queue, item);
-    movieLensSkipQueueItem(item, 'Wikipedia record could not be stored');
+    const reason = 'Wikipedia record could not be stored';
+    movieLensSkipQueueItem(item, reason);
+    markMovieLensRecordSkipped(item, reason, changedMovieIds);
     return;
   }
   applyMovieLensRating(stored, item.rating);
+  delete stored.movielensImportPending;
+  delete stored.movielensImportSkipped;
+  delete stored.movielensImportSkipReason;
   removeMovieLensQueueItem(queue, item);
   state.meta.movielensImportSummary = {
     ...(state.meta.movielensImportSummary || {}),
@@ -4194,7 +4290,7 @@ async function runMovieLensImport() {
     hideFetchProgress();
     updateLibraryHealth();
     if (!autoFetchPaused) {
-      if (state.meta?.movielensImportQueue?.length) scheduleMovieLensImport(600);
+      if (state.meta?.movielensImportQueue?.length) scheduleMovieLensImport(150);
       else scheduleBackgroundAiQueue(1200);
     }
   }
@@ -4225,7 +4321,7 @@ async function importMovieLensRatingsCsv(file) {
       state.meta.movielensImportSummary = {total:rows.length, checkpoint:0, imported:0, skipped:0};
     }
     rows.forEach(row => {
-      const existing = movieLensLibraryMatch(row);
+      const existing = movieLensLibraryMatch(row, {includePending:false});
       if (existing) {
         if (!sameSource) state.meta.movielensImportSummary.checkpoint++;
         if (applyMovieLensRating(existing, row.rating)) changedMovieIds.push(String(existing.id));
@@ -4234,6 +4330,8 @@ async function importMovieLensRatingsCsv(file) {
       }
       const key = movieLensQueueKey(row);
       if (!queued.has(key) && !skipped.has(key)) {
+        const staged = stageMovieLensRecord(row);
+        changedMovieIds.push(String(staged.id));
         queue.push(row);
         queued.add(key);
         enqueued++;
@@ -5119,6 +5217,7 @@ function setTab(tab, btn) {
   render();
 }
 function isShow(m) { return !!m.format; }
+function isMovieLensMetadataPending(movie) { return !!movie?.movielensImportPending; }
 function matchesTab(m) {
   if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'rated' || activeTab === 'recent' || activeTab === 'tags') return true;
   if (activeTab === 'show') return isShow(m);
@@ -5858,6 +5957,7 @@ function renderRatedGrid() {
   const grid = document.getElementById('ratedGrid');
   if (!grid) return;
   const filtered = Object.values(state.movies || {})
+    .filter(m => !isMovieLensMetadataPending(m))
     .filter(m => Number(m.rating || 0) > 0)
     .filter(matchesGlobalFilters);
   // "Newest rated first" is only this tab's *default* view (sortMode
@@ -5879,7 +5979,9 @@ function renderRatedGrid() {
 function renderRecentlyAdded() {
   const grid = document.getElementById('recentGrid');
   if (!grid) return;
-  const filtered = Object.values(state.movies || {}).filter(m => matchesGlobalFilters(m));
+  const filtered = Object.values(state.movies || {})
+    .filter(m => !isMovieLensMetadataPending(m))
+    .filter(m => matchesGlobalFilters(m));
   // "Newest added first" is only this tab's *default* view (sortMode
   // 'recommended', i.e. no explicit choice made) — any other sort picked
   // from the control deck still applies here same as everywhere else.
