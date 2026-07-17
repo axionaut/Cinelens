@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 48;
+const APP_VERSION = 49;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -41,6 +41,32 @@ const AI_TAG_CLOUD_NORMALIZE_EVERY = 100;
 const AI_TAG_CLOUD_NORMALIZE_VERSION = 'cinelens-tag-cloud-v2';
 const AI_REQUEST_DELAY_MS = 12000;
 const AI_TAGGER_TIMEOUT_MS = 45 * 1000;
+// Every network call must be able to fail. A mobile browser routinely
+// suspends an in-flight fetch when the app is backgrounded or the phone
+// locks, and the promise then never settles — whichever background loop
+// awaited it keeps its *InProgress flag raised forever, which wedges every
+// other loop that yields to it (one hung TMDB fetch froze the entire
+// pipeline at "TMDB refresh running"). v36 fixed this for the AI tagger
+// only; these give the remaining paths the same discipline.
+const TMDB_FETCH_TIMEOUT_MS = 15 * 1000;
+const WIKI_FETCH_TIMEOUT_MS = 30 * 1000;
+const DRIVE_FETCH_TIMEOUT_MS = 60 * 1000;
+const SEED_FETCH_TIMEOUT_MS = 20 * 1000;
+
+// Wraps fetch with an AbortController armed on a timer, so a suspended
+// mobile request rejects (AbortError) instead of hanging its caller's
+// background loop forever. onController exposes the controller so
+// stopFetching can also abort the call manually before the timer fires.
+async function fetchWithTimeout(url, opts={}, timeoutMs=WIKI_FETCH_TIMEOUT_MS, onController=null) {
+  const controller = new AbortController();
+  if (onController) onController(controller);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {...opts, signal: controller.signal});
+  } finally {
+    clearTimeout(timer);
+  }
+}
 const WIKI_LIST_SOURCES = {
   showsIndex: 'Lists of television programs',
   englishShows: ['List of television programs: A','List of television programs: B','List of television programs: C','List of British television programmes','List of Netflix original programming','List of Amazon Prime Video original programming']
@@ -359,6 +385,7 @@ const TASTE_STORY_TITLE_HISTORY_LIMIT = 3;
 let recVisibleLimit = 10;
 let currentWikiAbortController = null;
 let currentAiTagAbortController = null;
+let currentTmdbAbortController = null;
 let currentSleepCancel = null;
 let lastAiRequestAt = 0;
 let autoFetchPaused = false;
@@ -1132,7 +1159,7 @@ async function normalizeTagCloudWithAi(opts={}) {
   if (wait) await abortableSleep(wait);
   lastAiRequestAt = Date.now();
   try {
-    const response = await fetch(AI_TAGGER_URL, {
+    const response = await fetchWithTimeout(AI_TAGGER_URL, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify({
@@ -1152,7 +1179,7 @@ async function normalizeTagCloudWithAi(opts={}) {
           'Be conservative: uncertain pairs must remain separate.'
         ].join(' ')
       })
-    });
+    }, AI_TAGGER_TIMEOUT_MS);
     if (!response.ok) throw new Error(`AI tag normalization HTTP ${response.status}`);
     const payload = await response.json();
     if (payload.ok === false) throw new Error(payload.error || 'AI tag normalization failed');
@@ -1786,7 +1813,9 @@ const SEED_CATALOGUE_URL = 'seed-catalogue.json';
 async function loadSeedCatalogueIfEmpty() {
   if (libraryRecordCount() > 0) return false;
   try {
-    const response = await fetch(SEED_CATALOGUE_URL, {cache:'no-store'});
+    // Awaited during startup: a hung fetch here would freeze a fresh
+    // install's boot on mobile, so it gets a timeout like every other call.
+    const response = await fetchWithTimeout(SEED_CATALOGUE_URL, {cache:'no-store'}, SEED_FETCH_TIMEOUT_MS);
     if (!response.ok) return false;
     const data = await response.json();
     const movies = data?.movies || {};
@@ -2339,11 +2368,17 @@ async function wikiApiJson(url) {
   lastWikiRequestAt = Date.now();
   const controller = new AbortController();
   currentWikiAbortController = controller;
+  // The controller predates fetchWithTimeout (stopFetching aborts it
+  // manually), but a suspended mobile fetch needs the timer too — without
+  // it a backgrounded request hangs the reception/collection loop that
+  // awaited it until the user happens to tap Pause.
+  const timer = setTimeout(() => controller.abort(), WIKI_FETCH_TIMEOUT_MS);
   try {
     const resp = await fetch(url, { signal: controller.signal });
     if (!resp.ok) throw new Error('Wikipedia request failed: ' + resp.status);
     return await resp.json();
   } finally {
+    clearTimeout(timer);
     if (currentWikiAbortController === controller) currentWikiAbortController = null;
   }
 }
@@ -2491,6 +2526,7 @@ function stopFetching(opts={}) {
   }
   if (currentWikiAbortController) currentWikiAbortController.abort();
   if (currentAiTagAbortController) currentAiTagAbortController.abort();
+  if (currentTmdbAbortController) currentTmdbAbortController.abort();
   if (currentSleepCancel) currentSleepCancel();
   hideFetchProgress();
   const btn = document.getElementById('expandBtn');
@@ -3535,12 +3571,15 @@ async function tmdbApiJson(url) {
   if (wait) await abortableSleep(wait);
   if (fetchAbortRequested) return null;
   lastTmdbRequestAt = Date.now();
+  let controller = null;
   try {
-    const resp = await fetch(url);
+    const resp = await fetchWithTimeout(url, {}, TMDB_FETCH_TIMEOUT_MS, c => { controller = c; currentTmdbAbortController = c; });
     if (!resp.ok) return null;
     return await resp.json();
   } catch(_) {
     return null;
+  } finally {
+    if (currentTmdbAbortController === controller) currentTmdbAbortController = null;
   }
 }
 
@@ -7482,7 +7521,7 @@ async function generateTasteStory({force=false, rng=Math.random, variationSeed='
   if (wait) await abortableSleep(wait);
   lastAiRequestAt=Date.now();
   try {
-    const response=await fetch(AI_TAGGER_URL, {
+    const response=await fetchWithTimeout(AI_TAGGER_URL, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify({task:'generate-taste-story', profile:{
@@ -7490,7 +7529,7 @@ async function generateTasteStory({force=false, rng=Math.random, variationSeed='
         previousStoryTitle:tasteStoryTitleHistory(existing)[0] || '',
         previousStoryTitles:tasteStoryTitleHistory(existing)
       }})
-    });
+    }, AI_TAGGER_TIMEOUT_MS);
     if (!response.ok) throw new Error(`Taste story HTTP ${response.status}`);
     const payload=await response.json();
     if (!payload.ok) throw new Error(payload.error || 'Taste story generation failed');
@@ -8832,11 +8871,11 @@ function clearDriveToken() {
 function driveHeaders(extra={}) { return {...extra, Authorization:`Bearer ${state.drive.accessToken}`}; }
 async function driveFetch(url, opts={}) {
   if (!state.drive.accessToken) await requestDriveTokenSilent({allowPromptlessRequest:true});
-  let resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
+  let resp=await fetchWithTimeout(url,{...opts,headers:driveHeaders(opts.headers||{})},DRIVE_FETCH_TIMEOUT_MS);
   if (resp.status===401) {
     clearDriveToken();
     await requestDriveTokenSilent({allowPromptlessRequest:true});
-    resp=await fetch(url,{...opts,headers:driveHeaders(opts.headers||{})});
+    resp=await fetchWithTimeout(url,{...opts,headers:driveHeaders(opts.headers||{})},DRIVE_FETCH_TIMEOUT_MS);
   }
   return resp;
 }
