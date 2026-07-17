@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 49;
+const APP_VERSION = 50;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -8504,6 +8504,11 @@ const DRIVE_SILENT_BLOCK_KEY='cinelens_drive_silent_block_until_v1';
 const DRIVE_SILENT_TOKEN_TIMEOUT_MS=8000;
 const DRIVE_SILENT_RENEW_DEBOUNCE_MS=30000;
 const DRIVE_SILENT_RENEW_BLOCK_MS=10 * 60 * 1000;
+// Transient failures (our own 8s timeout, network hiccup) suppress retries
+// only briefly — long enough to avoid popup-flash storms on repeated
+// visibility flaps, short enough that the next real app open retries
+// silently instead of demanding a tap.
+const DRIVE_SILENT_RENEW_TRANSIENT_BLOCK_MS=2 * 60 * 1000;
 let driveSilentRenewInFlight=null;
 let driveSilentRenewBlockedUntil=0;
 let driveSilentRenewLastAttemptAt=0;
@@ -8857,7 +8862,16 @@ async function requestDriveTokenSilent(opts={}) {
     setSilentDriveRenewalBlockUntil(0);
     return token;
   } catch(e) {
-    setSilentDriveRenewalBlockUntil(Date.now()+DRIVE_SILENT_RENEW_BLOCK_MS);
+    // Only a definitive "Google requires a user gesture" verdict earns the
+    // long persisted block — that state is stable until the user acts, so
+    // retrying would just spam the sign-in surface. A timeout or transient
+    // network/script failure is NOT stable: the very next open may succeed
+    // silently, and giving those the same 10-minute persisted block was
+    // converting every slow-network moment on mobile into a guaranteed
+    // manual "Tap Drive to reconnect".
+    const code=String(e?.error || e?.message || '');
+    const needsGesture=/interaction_required|consent_required|login_required|access_denied/i.test(code);
+    setSilentDriveRenewalBlockUntil(Date.now() + (needsGesture ? DRIVE_SILENT_RENEW_BLOCK_MS : DRIVE_SILENT_RENEW_TRANSIENT_BLOCK_MS));
     throw e;
   }
 }
