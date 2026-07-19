@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 50;
+const APP_VERSION = 52;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -395,6 +395,9 @@ let receptionBackfillInProgress = false;
 let receptionCalibrationTimer = null;
 let backgroundAiTaggingInProgress = false;
 let backgroundAiTimer = null;
+let highMatchReverifyTimer = null;
+let highMatchReverifyInProgress = false;
+const HIGH_MATCH_REVERIFY_THRESHOLD = 0.9;
 let movielensImportTimer = null;
 let movielensImportInProgress = false;
 let startupDriveRestoreDone = false;
@@ -1309,6 +1312,18 @@ function reconcileAiTagSet(movie, cleaned) {
     const stored = existingEvidence[normalised] || existingEvidence[tag];
     return normalised && !suppressedTags.has(normalised) && !suppressedRawTags.has(normalised) && evidenceSupportedByStory(stored?.evidence || '', movie.storyText || '');
   });
+  // Stability guarantee: once the existing grounded set is already complete
+  // (enough tags, all still supported by the unchanged story), a retag must
+  // NOT fold in Gemini's fresh, stochastically-different tags — doing so
+  // changed the tag set and therefore the predicted match% on every retag
+  // (a 92% match sliding to 88% for no real reason). Return the existing set
+  // untouched so the match% is reproducible. Only an incomplete set (below
+  // the minimum) falls through to a merge that genuinely completes it.
+  if (keepers.length >= aiTagMinimumForStory(movie?.storyText)) {
+    const keeperEvidence = {};
+    keepers.forEach(tag => { if (existingEvidence[tag]) keeperEvidence[tag] = existingEvidence[tag]; });
+    return {tags:keepers, evidence:keeperEvidence};
+  }
   const mergedTags = [...new Set([...keepers, ...incomingTags])].slice(0, AI_TAG_MAX_COUNT);
   const mergedEvidence = {};
   mergedTags.forEach(tag => {
@@ -1319,12 +1334,79 @@ function reconcileAiTagSet(movie, cleaned) {
   return {tags:mergedTags, evidence:mergedEvidence};
 }
 
+// True when a movie's committed AI tag set is already complete and fully
+// grounded in its CURRENT story text: verified status, matching story hash,
+// and at least the required number of tags each still supported by stored
+// evidence with none suppressed. A forced retag in this state has nothing to
+// re-derive — re-running Gemini would only swap in different tags and move
+// the match%, so applyAiTags skips the call entirely and keeps the set.
+function aiTagSetAlreadyStable(movie) {
+  if (!movie?.storyText) return false;
+  if (movie?.aiTagging?.status !== 'verified') return false;
+  if (movie.aiTagging.promptVersion !== AI_TAG_PROMPT_VERSION) return false;
+  if (movie.aiTagging.storyHash !== aiStoryHash(movie.storyText)) return false;
+  const tags = cleanTagArray(movie.tags || [], movie, false);
+  if (!tags.length) return false;
+  const evidence = movie.aiTagEvidence || {};
+  const suppressed = suppressedTagSet(movie);
+  const suppressedRaw = suppressedRawTagSet(movie);
+  const grounded = tags.filter(tag => {
+    const normalised = normaliseTagName(tag);
+    const stored = evidence[normalised] || evidence[tag];
+    return normalised && !suppressed.has(normalised) && !suppressedRaw.has(normalised) && evidenceSupportedByStory(stored?.evidence || '', movie.storyText || '');
+  });
+  return grounded.length === tags.length && grounded.length >= aiTagMinimumForStory(movie.storyText);
+}
+
 function aiTagMinimumForStory(storyText='') {
   const length=String(storyText || '').trim().length;
   if (length >= 1500) return 10;
   if (length >= 800) return 8;
   if (length >= 400) return 6;
   return 5;
+}
+
+function aiTagWordTokens(tag) {
+  return new Set(String(tag || '')
+    .split(/[^a-z0-9]+/i)
+    .map(token => token.toLowerCase())
+    // A shared GENERIC token ("family", "crime", "relationship") is too weak
+    // to imply two tags describe the same beat, so it never counts as
+    // agreement — only distinctive 4+ char words do.
+    .filter(token => token.length >= 4 && !GENERIC_TAG_TOKENS.has(token)));
+}
+
+// Two tags "agree" for consensus/merge purposes when they are SIMILAR, not
+// only identical (Nitin's explicit refinement): a retag that returns
+// "coded-letter-trail" where the previous pass had "letter-mystery" is the
+// model describing the same beat, and should count as agreement. Similar =
+// identical after normalisation, one containing the other, or sharing a
+// significant (4+ char) word token.
+function tagsAreSimilar(a, b) {
+  const na = normaliseTagName(a);
+  const nb = normaliseTagName(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  if (na.includes(nb) || nb.includes(na)) return true;
+  const ta = aiTagWordTokens(na);
+  const tb = aiTagWordTokens(nb);
+  if (!ta.size || !tb.size) return false;
+  for (const token of ta) if (tb.has(token)) return true;
+  return false;
+}
+
+// Confidence gate across two independent Gemini passes: keep a first-pass tag
+// only when the second pass produced a SIMILAR tag. A tag that appears in one
+// pass but not the other is stochastic noise and is dropped — this is what
+// makes a committed set (and therefore a title's match%) reproducible. A
+// missing/failed second pass returns the first result unchanged rather than
+// discarding everything.
+function consensusTagResult(resultA, resultB) {
+  if (!resultA || !Array.isArray(resultA.tags)) return resultA;
+  if (!resultB || !Array.isArray(resultB.tags)) return resultA;
+  const bTags = resultB.tags.map(item => item?.tag).filter(Boolean);
+  const agreed = resultA.tags.filter(item => bTags.some(other => tagsAreSimilar(item?.tag, other)));
+  return {...resultA, tags:agreed};
 }
 
 function commitAiTagSet(movie, cleaned, model='') {
@@ -1430,13 +1512,7 @@ function purgeAiSensitiveContentExclusions() {
   return removed;
 }
 
-async function requestAiTags(movies, opts={}) {
-  const items = (movies || []).filter(movie => movie?.storyText).slice(0, AI_TAG_BATCH_SIZE);
-  if (!items.length) return {tagged:0, failed:0};
-  const savedPartials = Object.fromEntries(items
-    .filter(movie => movie.aiTagPartial?.tags?.length)
-    .map(movie => [String(movie.id), movie.aiTagPartial]));
-  const partials = opts.partials || savedPartials;
+async function postAiTaggerBatch(items, partials, opts={}) {
   const wait = Math.max(0, AI_REQUEST_DELAY_MS - (Date.now() - lastAiRequestAt));
   if (wait) await abortableSleep(wait);
   if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
@@ -1495,7 +1571,31 @@ async function requestAiTags(movies, opts={}) {
     if (currentAiTagAbortController === controller) currentAiTagAbortController = null;
   }
   if (!response.ok) throw new Error(`AI tagger HTTP ${response.status}`);
-  const payload = await response.json();
+  return response.json();
+}
+
+async function requestAiTags(movies, opts={}) {
+  const items = (movies || []).filter(movie => movie?.storyText).slice(0, AI_TAG_BATCH_SIZE);
+  if (!items.length) return {tagged:0, failed:0};
+  const savedPartials = Object.fromEntries(items
+    .filter(movie => movie.aiTagPartial?.tags?.length)
+    .map(movie => [String(movie.id), movie.aiTagPartial]));
+  const partials = opts.partials || savedPartials;
+  // Consensus (Targeted scope): only the top-level manual/retag call sets
+  // consensusPasses=2. Retries and continuations (which carry partials) stay
+  // single-pass to bound daily quota — they complete a set, they don't
+  // re-establish confidence.
+  const consensusPasses = Object.keys(partials).length ? 1 : Math.max(1, Number(opts.consensusPasses || 1));
+  const payload = await postAiTaggerBatch(items, partials, opts);
+  if (payload.ok && consensusPasses >= 2 && !fetchAbortRequested) {
+    let second = null;
+    try { second = await postAiTaggerBatch(items, partials, opts); } catch(_) { second = null; }
+    if (second?.ok) {
+      const secondById = new Map((second.results || []).map(result => [String(result.id), result]));
+      payload.results = (payload.results || []).map(result => consensusTagResult(result, secondById.get(String(result.id))));
+      payload.consensusApplied = true;
+    }
+  }
   if (!payload.ok) {
     const error = new Error(payload.error || 'AI tagging failed');
     if (String(payload.code || '').toUpperCase() === 'PROHIBITED_CONTENT' || isAiSensitiveContentBlock(error)) {
@@ -1533,7 +1633,11 @@ async function requestAiTags(movies, opts={}) {
       const previous = partials[String(movie.id)] || {tags:[], evidence:{}};
       const merged = mergeAiTagPartials(previous, cleanAiTagResults(result, movie));
       const minimumTags=aiTagMinimumForStory(movie.storyText);
-      if (merged.tags.length >= minimumTags) {
+      // A retag of an already-complete grounded set commits even when this
+      // pass agreed on few fresh tags: reconcileAiTagSet keeps the existing
+      // set, so the match% stays put and the title never falsely degrades to
+      // "building N/10" just because a stochastic pass was sparse.
+      if (merged.tags.length >= minimumTags || aiTagSetAlreadyStable(movie)) {
         commitAiTagSet(movie, merged, payload.model);
         tagged++;
       } else {
@@ -1577,7 +1681,11 @@ async function applyAiTags(movie, opts={}) {
   if (!movie?.storyText) return movie;
   if (!opts.force && hasCurrentAiTags(movie)) return movie;
   if (opts.force) delete movie.aiTagPartial;
-  await requestAiTags([movie]);
+  // A confidence retag runs two Gemini passes and keeps only what both agree
+  // on; reconcileAiTagSet then holds an already-complete set steady so the
+  // match% doesn't move. Background/import tagging passes no flag (single
+  // pass) to preserve throughput.
+  await requestAiTags([movie], {consensusPasses: opts.consensus ? 2 : 1});
   if (movie._aiSensitiveContentExcluded) throw makeAiSensitiveContentError();
   if (!hasCurrentAiTags(movie)) throw new Error(movie.aiTagging?.error || 'AI returned no usable tags');
   return movie;
@@ -3424,7 +3532,7 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
     showFetchProgress('Fetching poster & tags...', 55, stored.title || title);
     if (!hasCurrentAiTags(stored)) {
       try {
-        await applyAiTags(stored, {force:true});
+        await applyAiTags(stored, {force:true, consensus:true});
       } catch(e) {
         stored.retagStatus = 'needs-ai-tags';
         stored.retagMessage = aiTagFailureMessage(e, stored);
@@ -5864,6 +5972,9 @@ async function runBackgroundAiQueue() {
 }
 
 function maybeAutoExpandPool() {
+  // Lowest-priority confirmation loop; self-gates against every other
+  // background loop, so arming it here is safe regardless of collection state.
+  scheduleHighMatchReverify();
   if (
     !startupDriveRestoreDone ||
     !libraryWritesUnlocked ||
@@ -6973,6 +7084,74 @@ function scoreMovies() {
   scoredMovieCache = ranked;
   return scoredMovieCache;
 }
+
+// A title that has climbed past the >90% match band earns one extra
+// verification pass (Nitin: "run a pass again whenever something hits >90%
+// match"), so a strong recommendation is never resting on an unconfirmed or
+// partially-grounded tag set. At most once per story version per title
+// (highMatchVerifiedHash), and single-pass (the manual retag owns the
+// two-pass consensus) to keep the daily quota in check.
+function highMatchReverifyCandidates() {
+  const currentHashes = new Map();
+  return scoreMovies()
+    .filter(item => Number(item.matchScore || 0) >= HIGH_MATCH_REVERIFY_THRESHOLD)
+    .map(item => item.movie)
+    .filter(movie => {
+      if (!movie || movie.rating > 0 || !movie.storyText) return false;
+      if (movie.aiTagging?.status !== 'verified') return false;
+      const hash = currentHashes.get(movie.id) || aiStoryHash(movie.storyText);
+      currentHashes.set(movie.id, hash);
+      if (movie.aiTagging.storyHash !== hash) return false;
+      return movie.highMatchVerifiedHash !== hash;
+    });
+}
+
+function scheduleHighMatchReverify(delay = 6000) {
+  if (!libraryWritesUnlocked || autoFetchPaused || highMatchReverifyInProgress) return;
+  // Already armed — don't let a render storm keep pushing the delay out.
+  if (highMatchReverifyTimer) return;
+  if (!highMatchReverifyCandidates().length) return;
+  const run = () => { highMatchReverifyTimer = null; runHighMatchReverify(); };
+  if ('requestIdleCallback' in window) {
+    highMatchReverifyTimer = setTimeout(() => requestIdleCallback(run, {timeout: 1500}), delay);
+  } else {
+    highMatchReverifyTimer = setTimeout(run, delay);
+  }
+}
+
+async function runHighMatchReverify() {
+  // Lowest-priority background loop: never contend with collection, tagging,
+  // reception/TMDB backfill, or the MovieLens import for the shared fetch
+  // slot or progress bar.
+  if (autoFetchPaused || !libraryWritesUnlocked || highMatchReverifyInProgress
+      || poolExpansionInProgress || backgroundAiTaggingInProgress
+      || receptionBackfillInProgress || tmdbBackfillInProgress || movielensImportInProgress) {
+    scheduleHighMatchReverify(4000);
+    return;
+  }
+  const movie = highMatchReverifyCandidates()[0];
+  if (!movie) return;
+  const hash = aiStoryHash(movie.storyText);
+  highMatchReverifyInProgress = true;
+  try {
+    await retagFromStoredData(movie.id, {consensus:false, successToast:false, errorToast:false, progressLabel:'Verifying strong match…'});
+    // Stamp regardless of whether tags changed: the point is that this title's
+    // strong match has now been confirmed against a fresh pass exactly once.
+    const current = state.movies[movie.id];
+    if (current) {
+      current.highMatchVerifiedHash = hash;
+      touchRecord(current);
+      saveLocalState({preserveUpdatedAt:true, changedMovieIds:[String(movie.id)]});
+      queueDriveSync();
+    }
+  } catch(_) {
+    // A failed verification does not stamp — it will be retried on a later
+    // pass rather than silently marked confirmed.
+  } finally {
+    highMatchReverifyInProgress = false;
+    scheduleHighMatchReverify(9000);
+  }
+}
 // ─────────────────────────────────────────────
 // RATING
 // ─────────────────────────────────────────────
@@ -7228,21 +7407,24 @@ async function retagFromStoredData(id, opts={}) {
       const fresh = await refreshTitleFromWikipedia(movie, {ai:false});
       if (fresh?.thumbnailUrl) updated = applyFreshWikiMovie(id, fresh, movie);
     }
+    // A manual retag runs the two-pass consensus (confidence); an automatic
+    // >90% re-verify passes consensus:false to stay single-pass.
+    const consensus = opts.consensus !== false;
     if (updated.storyText && Number(updated.wikiParserVersion || 0) >= WIKI_PARSER_VERSION) {
       try {
-        await applyAiTags(updated, {force:true});
+        await applyAiTags(updated, {force:true, consensus});
       } catch(firstError) {
         if (/daily cinelens tagging limit reached/i.test(String(firstError?.message || firstError))) throw firstError;
         const fresh = await refreshTitleFromWikipedia(updated, {ai:false});
         if (!fresh) throw firstError;
         updated = applyFreshWikiMovie(id, fresh, updated);
-        await applyAiTags(updated, {force:true});
+        await applyAiTags(updated, {force:true, consensus});
       }
     } else {
       const fresh = await refreshTitleFromWikipedia(movie, {ai:false});
       if (!fresh) throw new Error('Stored Wikipedia page could not be refreshed');
       updated = applyFreshWikiMovie(id, fresh, movie);
-      await applyAiTags(updated, {force:true});
+      await applyAiTags(updated, {force:true, consensus});
     }
     updated.needsManualUrl = false;
     updated.retagStatus = 'verified';
