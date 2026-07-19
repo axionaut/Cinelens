@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 52;
+const APP_VERSION = 53;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -8774,8 +8774,26 @@ function scheduleDriveTokenRefresh(expiry=0) {
 // Checking again the moment the tab becomes visible catches the case the
 // timer missed, so "reconnect" only shows up when a silent renewal
 // genuinely fails (e.g. third-party cookies blocked) rather than routinely.
+// A mobile browser freezes setTimeout while the app is backgrounded, so a
+// background loop that rescheduled itself right before suspension won't fire
+// its next tick for a while after return — the progress bar sits idle and work
+// appears stalled. Re-arming the loops on foreground makes them resume at once.
+// (We deliberately do NOT abort an in-flight fetch here: a TMDB abort is
+// indistinguishable from a real no-match and would wrongly stamp the title as
+// permanently "no poster" — the fetch's own timeout already bounds the
+// mid-fetch case once the tab resumes.)
+function kickBackgroundLoopsOnForeground() {
+  if (!libraryWritesUnlocked || autoFetchPaused) return;
+  scheduleTmdbBackfill(400);
+  scheduleReceptionBackfill(600);
+  if (typeof scheduleMovieLensImport === 'function') scheduleMovieLensImport(800);
+  scheduleHighMatchReverify(1200);
+  maybeAutoExpandPool();
+}
+
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
+  kickBackgroundLoopsOnForeground();
   if (!state.drive.enabled) return;
   const expiry = Number(localStorage.getItem(DRIVE_TOKEN_EXPIRY_KEY) || 0);
   const now=Date.now();
