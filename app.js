@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 54;
+const APP_VERSION = 55;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -8804,6 +8804,21 @@ let driveSilentRenewBlockedUntil=0;
 let driveSilentRenewLastAttemptAt=0;
 let driveTokenRequestInFlight=null;
 let driveTokenRequestPrompt='';
+// True while the in-flight GIS token request is an AUTOMATIC one (startup
+// restore / renewal) rather than one the user asked for by tapping Drive.
+// Tracked separately from the prompt string because both paths now send the
+// same prompt value — see DRIVE_AUTO_PROMPT.
+let driveTokenRequestIsAuto=false;
+// Google's token client treats prompt:'none' as *strictly* non-interactive: if
+// it cannot mint a token purely from an already-visible Google session it fails
+// immediately with interaction_required. On mobile, where third-party cookies
+// to accounts.google.com are blocked by default, that is essentially always —
+// which is why automatic reconnect kept dead-ending in "Tap Drive to reconnect".
+// The empty/default prompt lets Google complete the flow for a user who has
+// already granted consent, without surfacing an account picker. This mirrors
+// the Rocket Scanner app on these same devices, which reconnects unattended
+// using exactly this value and never uses 'none'.
+const DRIVE_AUTO_PROMPT='';
 
 
 function rememberDriveToken(token, expiresInSeconds=3300) {
@@ -9116,6 +9131,7 @@ function tokenRequest(prompt, opts={}) {
   initDriveTokenClient();
   const timeoutMs = Number(opts.timeoutMs || 0);
   driveTokenRequestPrompt=prompt;
+  driveTokenRequestIsAuto=!!opts.auto;
   const request=new Promise((resolve,reject) => {
     let settled = false;
     let timer = null;
@@ -9142,6 +9158,7 @@ function tokenRequest(prompt, opts={}) {
     if (driveTokenRequestInFlight === request) {
       driveTokenRequestInFlight=null;
       driveTokenRequestPrompt='';
+      driveTokenRequestIsAuto=false;
     }
   }).catch(() => {});
   return request;
@@ -9150,10 +9167,10 @@ async function requestDriveTokenInteractive(opts={}) {
   const stored=opts.forcePrompt ? '' : getStoredDriveToken();
   if (stored) { state.drive.accessToken=stored; return stored; }
   await waitForGoogleIdentity();
-  // A user tap must not inherit a failing background prompt:none request.
-  // Let that request settle so the shared GIS callback stays serialized, then
-  // continue with the one interactive request the user explicitly asked for.
-  if (driveTokenRequestInFlight && driveTokenRequestPrompt === 'none') {
+  // A user tap must not inherit a failing background request. Let that request
+  // settle so the shared GIS callback stays serialized, then continue with the
+  // one interactive request the user explicitly asked for.
+  if (driveTokenRequestInFlight && driveTokenRequestIsAuto) {
     try { return await driveTokenRequestInFlight; } catch(e) {}
   }
   return tokenRequest('');
@@ -9172,7 +9189,7 @@ async function requestDriveTokenSilent(opts={}) {
   if (silentDriveRenewalBlocked(now) || now - driveSilentRenewLastAttemptAt < DRIVE_SILENT_RENEW_DEBOUNCE_MS) throw blockedError();
   driveSilentRenewLastAttemptAt=now;
   try {
-    const token=await tokenRequest('none', {timeoutMs:DRIVE_SILENT_TOKEN_TIMEOUT_MS});
+    const token=await tokenRequest(DRIVE_AUTO_PROMPT, {timeoutMs:DRIVE_SILENT_TOKEN_TIMEOUT_MS, auto:true});
     setSilentDriveRenewalBlockUntil(0);
     return token;
   } catch(e) {
