@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 53;
+const APP_VERSION = 54;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -248,6 +248,14 @@ const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const MOVIELENS_CSV_HEADER = ['movie_id','imdb_id','tmdb_id','rating','average_rating','title'];
 const MOVIELENS_IMPORT_FETCH_CONCURRENCY = 16;
+// The import used to drain the WHOLE queue in one invocation. With 1000+
+// staged titles that held movielensImportInProgress for hours, which every
+// other background loop yields to — so reception/TMDB/AI backfill were starved
+// the entire time and the UI got a constant stream of progress writes. It now
+// works in bounded batches and releases the pipeline between them.
+const MOVIELENS_IMPORT_BATCH_SIZE = 48;
+const MOVIELENS_IMPORT_BATCH_GAP_MS = 1500;
+const IMPORT_PROGRESS_THROTTLE_MS = 150;
 const CARD_REFRESH_BATCH_SIZE = 20;
 const WIKI_PARSER_VERSION = 6;
 const REC_INFINITE_PAGE_SIZE = 20;
@@ -891,8 +899,24 @@ function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats(), opt
   };
 }
 
+// Memoised: hasCurrentAiTags() calls this for every title in several
+// whole-library scans (taggedUnseenPoolCount, pendingBackgroundAiMovies,
+// aiTagCandidates), and each miss hashes the movie's entire story text — up to
+// SHOW_STORY_MAX_CHARS. Across a large library that was tens of MB of string
+// hashing on the UI thread per health check, which is what made the app lag
+// whenever background work was running. The cache is keyed by the story string
+// itself (V8 caches a string's hash code, so repeat lookups are cheap) and
+// holds only references to strings the records already own.
+const storyHashMemo = new Map();
+const STORY_HASH_MEMO_CAP = 4000;
 function aiStoryHash(storyText='') {
-  return String(stableHash(`${AI_TAG_PROMPT_VERSION}:${String(storyText || '').trim()}`));
+  const text = String(storyText || '').trim();
+  const cached = storyHashMemo.get(text);
+  if (cached !== undefined) return cached;
+  const hash = String(stableHash(`${AI_TAG_PROMPT_VERSION}:${text}`));
+  if (storyHashMemo.size >= STORY_HASH_MEMO_CAP) storyHashMemo.clear();
+  storyHashMemo.set(text, hash);
+  return hash;
 }
 
 function hasCurrentAiTags(movie) {
@@ -3908,8 +3932,20 @@ function receptionBackfillCandidates() {
   return sortByBackfillPriority(candidates);
 }
 
+// Status text only needs a COUNT. Going through receptionBackfillCandidates()
+// for that dragged in sortByBackfillPriority() -> scoreMovies() (whole-library
+// taste scoring) on every render — pure waste for a number.
+function receptionBackfillPendingCount() {
+  const now = Date.now();
+  let count = 0;
+  for (const movie of Object.values(state.movies || {})) {
+    if (needsReceptionBackfill(movie) && !receptionBackfillRecentlyAttempted(movie, now)) count++;
+  }
+  return count;
+}
+
 function receptionBackfillStatusText() {
-  const remaining = receptionBackfillCandidates().length;
+  const remaining = receptionBackfillPendingCount();
   if (!remaining) return '';
   if (receptionBackfillInProgress) return `reception refresh running · ${remaining} pending`;
   if (poolExpansionInProgress || backgroundAiTaggingInProgress) return `reception refresh waiting · ${remaining} pending (behind other background work)`;
@@ -4037,10 +4073,20 @@ function tmdbBackfillCandidates() {
   return sortByBackfillPriority(candidates);
 }
 
+// Cheap count for status text — see receptionBackfillPendingCount().
+function tmdbBackfillPendingCount() {
+  const now = Date.now();
+  let count = 0;
+  for (const movie of Object.values(state.movies || {})) {
+    if (needsTmdbBackfill(movie) && !tmdbBackfillRecentlyAttempted(movie, now)) count++;
+  }
+  return count;
+}
+
 function tmdbBackfillStatusText() {
   if (!TMDB_API_KEY) return '';
   const paused = !!state.settings.tmdbBackfillPaused;
-  const remaining = tmdbBackfillCandidates().length;
+  const remaining = tmdbBackfillPendingCount();
   if (paused) return remaining ? `TMDB refresh paused · ${remaining} pending (posters/genres/availability)` : 'TMDB refresh paused';
   if (!remaining) return '';
   if (tmdbBackfillInProgress) return `TMDB refresh running · ${remaining} pending`;
@@ -4416,21 +4462,26 @@ async function runMovieLensImport() {
     return;
   }
   const queue = state.meta?.movielensImportQueue;
-  const pending = Array.isArray(queue) ? [...queue] : [];
-  if (!pending.length) return;
+  const queued = Array.isArray(queue) ? queue : [];
+  if (!queued.length) return;
+  // One bounded batch per invocation, so the shared background pipeline is
+  // handed back to the other loops between batches instead of being held for
+  // the entire import.
+  const pending = queued.slice(0, MOVIELENS_IMPORT_BATCH_SIZE);
 
   movielensImportInProgress = true;
   try {
     const summary = state.meta.movielensImportSummary || {};
     const startingCheckpoint = Number(summary.checkpoint || 0);
-    const total = Number(summary.total || startingCheckpoint + pending.length);
+    const total = Number(summary.total || startingCheckpoint + queued.length);
     let nextIndex = 0;
     let completed = 0;
+    let lastProgressAt = 0;
     const changedMovieIds = new Set();
     showFetchProgress(
       `MovieLens metadata · ${startingCheckpoint}/${total}`,
       Math.round((startingCheckpoint / Math.max(1, total)) * 100),
-      `${pending.length} titles pending`
+      `${queued.length} titles pending`
     );
 
     const worker = async () => {
@@ -4446,12 +4497,18 @@ async function runMovieLensImport() {
         if (autoFetchPaused || fetchAbortRequested) return;
         reconcileMovieLensQueueItem(queue, item, result, changedMovieIds);
         completed++;
-        const checkpoint = startingCheckpoint + completed;
-        showFetchProgress(
-          `MovieLens metadata · ${checkpoint}/${total}`,
-          Math.round((checkpoint / Math.max(1, total)) * 100),
-          item.title
-        );
+        // Up to 16 workers finish concurrently; without throttling each one
+        // wrote the progress bar, thrashing layout for no visible benefit.
+        const now = Date.now();
+        if (now - lastProgressAt >= IMPORT_PROGRESS_THROTTLE_MS) {
+          lastProgressAt = now;
+          const checkpoint = startingCheckpoint + completed;
+          showFetchProgress(
+            `MovieLens metadata · ${checkpoint}/${total}`,
+            Math.round((checkpoint / Math.max(1, total)) * 100),
+            item.title
+          );
+        }
       }
     };
 
@@ -4470,7 +4527,9 @@ async function runMovieLensImport() {
     hideFetchProgress();
     updateLibraryHealth();
     if (!autoFetchPaused) {
-      if (state.meta?.movielensImportQueue?.length) scheduleMovieLensImport(0);
+      // Gap between batches so reception/TMDB/AI backfill (which all yield to
+      // this loop) get a turn, and the UI gets breathing room.
+      if (state.meta?.movielensImportQueue?.length) scheduleMovieLensImport(MOVIELENS_IMPORT_BATCH_GAP_MS);
       else scheduleBackgroundAiQueue(1200);
     }
   }
@@ -5803,19 +5862,35 @@ function pendingBackgroundAiMovies() {
     });
 }
 
+// Short-lived cache: collectionHealth is a read-only status roll-up but each
+// build walks the whole library several times (scoring, tag scans, pending-AI
+// scan). It gets called repeatedly within a single render and on every
+// collection progress tick. A brief TTL collapses those into one computation
+// without risking staleness that matters — this only drives status text and
+// the collection on/off hysteresis. Time-based (rather than invalidation-
+// based) deliberately: a missed invalidation could otherwise freeze the
+// collection decision, whereas a <=400ms stale status line is harmless.
+let collectionHealthCache = null;
+let collectionHealthCacheAt = 0;
+const COLLECTION_HEALTH_TTL_MS = 400;
+
 function collectionHealth() {
+  const now = Date.now();
+  if (collectionHealthCache && now - collectionHealthCacheAt < COLLECTION_HEALTH_TTL_MS) return collectionHealthCache;
   const status = recommendationFetchStatus();
   const taggedUnseen = taggedUnseenPoolCount();
   const pendingTags = pendingBackgroundAiMovies().length;
   const personalized = personalizedEnough();
 
-  return {
+  collectionHealthCache = {
     ...status,
     personalized,
     taggedUnseen,
     pendingTags,
     collectionActive: !!state.meta?.collectionActive
   };
+  collectionHealthCacheAt = now;
+  return collectionHealthCache;
 }
 
 function shouldRunBackgroundCollection() {
@@ -7106,10 +7181,19 @@ function highMatchReverifyCandidates() {
     });
 }
 
+let lastHighMatchScanAt = 0;
+const HIGH_MATCH_SCAN_THROTTLE_MS = 8000;
+
 function scheduleHighMatchReverify(delay = 6000) {
   if (!libraryWritesUnlocked || autoFetchPaused || highMatchReverifyInProgress) return;
   // Already armed — don't let a render storm keep pushing the delay out.
   if (highMatchReverifyTimer) return;
+  // This is called from maybeAutoExpandPool on EVERY render. In the steady
+  // state (no candidates) the scan below would otherwise walk the scored
+  // library on every single render, so throttle how often we even look.
+  const now = Date.now();
+  if (now - lastHighMatchScanAt < HIGH_MATCH_SCAN_THROTTLE_MS) return;
+  lastHighMatchScanAt = now;
   if (!highMatchReverifyCandidates().length) return;
   const run = () => { highMatchReverifyTimer = null; runHighMatchReverify(); };
   if ('requestIdleCallback' in window) {
@@ -7945,6 +8029,15 @@ function renderTagDetail() {
 // ─────────────────────────────────────────────
 // STATS
 // ─────────────────────────────────────────────
+// The tag counts come from buildTagVocabularyCache(), which walks every movie
+// AND hidden title building a tag frequency map. That cache is invalidated on
+// every tag write, so during collection/tagging it was being rebuilt from
+// scratch twice per batch (saveLocalState + render both call updateStats) —
+// a whole-library walk purely to refresh two header numbers. The counts now
+// refresh on a short interval instead; the cheap per-movie tallies stay exact.
+let tagCountDisplayCache = {tags:0, status:'', at:0};
+const TAG_COUNT_DISPLAY_TTL_MS = 1500;
+
 function updateStats() {
   const movies=Object.values(state.movies);
   const rated=movies.filter(m=>m.rating>0);
@@ -7952,10 +8045,14 @@ function updateStats() {
   const avg=rated.length?(rated.reduce((s,m)=>s+m.rating,0)/rated.length).toFixed(1):'—';
   document.getElementById('statRated').textContent=rated.length;
   document.getElementById('statTagged').textContent=tagged.length;
-  document.getElementById('statTags').textContent=countUniqueTags();
+  const now=Date.now();
+  if (!tagCountDisplayCache.at || now - tagCountDisplayCache.at >= TAG_COUNT_DISPLAY_TTL_MS) {
+    tagCountDisplayCache = {tags:countUniqueTags(), status:tagStatusText(), at:now};
+  }
+  document.getElementById('statTags').textContent=tagCountDisplayCache.tags;
   document.getElementById('statPool').textContent=movies.length;
   document.getElementById('statAvg').textContent=avg;
-  updateHKStatus(tagStatusText());
+  updateHKStatus(tagCountDisplayCache.status);
 }
 function updateTopN(val) { document.getElementById('topNVal').textContent=val; state.settings.topN=parseInt(val); recVisibleLimit=Math.max(parseInt(val), REC_INFINITE_PAGE_SIZE); saveViewState(); renderRecs(); }
 function updateMinYear(val) {
@@ -8277,6 +8374,7 @@ function syncMustWaitForForegroundWork({respectHardCap=false}={}) {
 
 function queueDriveSync(delay=DRIVE_SYNC_DEBOUNCE_MS) {
   if (!state.drive?.enabled && !state.drive?.connected && !state.drive?.accessToken) return;
+  driveSyncPending=true;
   if (!driveSyncDeferredSince) driveSyncDeferredSince = Date.now();
   driveSyncDeferred=true;
   clearTimeout(driveSyncTimer);
@@ -8675,6 +8773,16 @@ let driveSyncQueued=false;
 let driveSyncTimer=null;
 let driveSyncDeferred=false;
 let driveSyncDeferredSince=0;
+// True whenever there are local changes not yet confirmed written to Drive.
+// Set on every queueDriveSync, cleared ONLY after a sync succeeds — so a
+// background sync that fails (an expired token after mobile suspension, a
+// dropped connection) is never silently forgotten. Recovery is driven by a
+// bounded backoff retry plus flushes on foreground and on token renewal.
+let driveSyncPending=false;
+let driveSyncRetryTimer=null;
+let driveSyncRetryBackoffMs=0;
+const DRIVE_SYNC_RETRY_MIN_MS=15000;
+const DRIVE_SYNC_RETRY_MAX_MS=5*60*1000;
 const DRIVE_SYNC_DEBOUNCE_MS=1200;
 // let, not const: production code never reassigns this, but the test
 // harness temporarily shrinks it to avoid a real 10s+ wall-clock wait when
@@ -8746,6 +8854,9 @@ function silentlyRenewDriveToken() {
           finalizeStartupAfterDrive({allowCollection:true});
         }
       }
+      // Drive is reachable again — push anything a previous failed sync left
+      // behind rather than waiting for the user's next edit.
+      flushPendingDriveSync();
       return true;
     } catch(e) {
       state.drive.connected = false;
@@ -8783,6 +8894,9 @@ function scheduleDriveTokenRefresh(expiry=0) {
 // permanently "no poster" — the fetch's own timeout already bounds the
 // mid-fetch case once the tab resumes.)
 function kickBackgroundLoopsOnForeground() {
+  // Unsynced local changes are flushed even when collection is paused or the
+  // library is still locked — losing a rating is worse than any pause.
+  flushPendingDriveSync();
   if (!libraryWritesUnlocked || autoFetchPaused) return;
   scheduleTmdbBackfill(400);
   scheduleReceptionBackfill(600);
@@ -9554,6 +9668,12 @@ async function syncDrive(manual=false) {
     await syncChunkedDrive(manual);
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
+    // Local changes are now confirmed on Drive — clear the pending flag and
+    // the failure backoff.
+    driveSyncPending=false;
+    driveSyncRetryBackoffMs=0;
+    clearTimeout(driveSyncRetryTimer);
+    driveSyncRetryTimer=null;
     saveLocalState({preserveUpdatedAt:true});
     render();
     setDriveStatus('connected');
@@ -9561,10 +9681,40 @@ async function syncDrive(manual=false) {
     console.error('Drive sync failed', error);
     state.drive.connected=false;
     setDriveStatus('');
+    // The changes are still unsynced. Don't drop them: schedule a bounded
+    // backoff retry so a transient failure (expired token, dropped mobile
+    // connection) recovers on its own instead of waiting for the next
+    // unrelated edit. driveSyncPending stays true; foreground/renewal flushes
+    // also retry.
+    if (!manual) scheduleDriveSyncRetry();
     if (manual) showToast(driveErrorMessage(error) || 'Drive sync failed', 'error');
   } finally {
     finishSync();
   }
+}
+
+function scheduleDriveSyncRetry() {
+  if (!driveSyncPending) return;
+  if (!state.drive?.enabled && !state.drive?.connected && !state.drive?.accessToken) return;
+  if (driveSyncRetryTimer) return;
+  driveSyncRetryBackoffMs = driveSyncRetryBackoffMs
+    ? Math.min(DRIVE_SYNC_RETRY_MAX_MS, driveSyncRetryBackoffMs * 2)
+    : DRIVE_SYNC_RETRY_MIN_MS;
+  driveSyncRetryTimer = setTimeout(() => {
+    driveSyncRetryTimer = null;
+    if (driveSyncPending) queueDriveSync(0);
+  }, driveSyncRetryBackoffMs);
+}
+
+// Flush unsynced local changes at moments Drive is likely reachable again —
+// the app returning to the foreground, or a silent token renewal succeeding.
+function flushPendingDriveSync() {
+  if (!driveSyncPending) return;
+  if (!state.drive?.enabled) return;
+  clearTimeout(driveSyncRetryTimer);
+  driveSyncRetryTimer=null;
+  driveSyncRetryBackoffMs=0;
+  queueDriveSync(500);
 }
 
 // ─────────────────────────────────────────────
