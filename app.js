@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 56;
+const APP_VERSION = 57;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -628,6 +628,42 @@ function probableEntityTokens(movie) {
 }
 
 function invalidateTagCaches() {
+  scheduleRecommendationRefresh();
+}
+
+// The expensive derived caches — tag vocabulary/corpus stats, the trained
+// taste model, per-card match data, and the scored library — are all rebuilt
+// lazily on first access after being cleared. Clearing them inline meant the
+// very next render (a tab click, a background batch) had to rebuild ALL of
+// them synchronously on the main thread: the freeze. Instead a data change
+// keeps the last-good caches visible and schedules the clear+rebuild in a
+// macrotask, so it happens OFF the interaction that triggered it. The end
+// state is identical to an inline invalidate — only the timing moves — so
+// nothing ever observes a permanently stale value.
+let recRefreshScheduled = false;
+let recRefreshDirty = false;
+function scheduleRecommendationRefresh() {
+  recRefreshDirty = true;
+  if (recRefreshScheduled) return;
+  recRefreshScheduled = true;
+  setTimeout(runRecommendationRefresh, 0);
+}
+function runRecommendationRefresh() {
+  recRefreshScheduled = false;
+  if (!recRefreshDirty) return;
+  recRefreshDirty = false;
+  tagCorpusStatsCache = null;
+  tagVocabularyCache = null;
+  cardMatchCache = null;
+  scoredMovieCache = null;
+  tasteModelCache = new Map();
+  render();
+}
+// For tests and any caller that genuinely needs the caches fresh right now.
+function flushRecommendationRefresh() {
+  if (!recRefreshDirty && !recRefreshScheduled) return;
+  recRefreshScheduled = false;
+  recRefreshDirty = false;
   tagCorpusStatsCache = null;
   tagVocabularyCache = null;
   cardMatchCache = null;
@@ -2784,6 +2820,16 @@ function collectionMaxYear() {
   return new Date().getFullYear();
 }
 
+// How far back through the year-by-year discovery journey collection has
+// reached. Lanes walk newest→oldest independently; the furthest-back (min)
+// year is the honest "where are we now" for the whole sweep.
+function discoveryJourneyYear() {
+  const cursors = state.discoveryCursor;
+  if (!cursors || typeof cursors !== 'object') return null;
+  const years = Object.values(cursors).map(cursor => Number(cursor?.year)).filter(Number.isFinite);
+  return years.length ? Math.min(...years) : null;
+}
+
 function discoverySourcesForYear(laneKey, year) {
   return (DISCOVERY_SOURCE_TEMPLATES[laneKey] || []).map((source, sourceIndex) => ({
     key:`${laneKey}:${sourceIndex}:${year}`,
@@ -3178,10 +3224,11 @@ async function expandPool(manual=true) {
   const progress = (label, title='') => {
     const health = collectionHealth();
     const pct = Math.min(98, Math.round((attempts / Math.max(1, attemptBudget)) * 100));
+    const jy = discoveryJourneyYear();
     showFetchProgress(
       label,
       pct,
-      `${attempts}/${attemptBudget} checked · ${added} fetched · ${added} kept · ${formatStrongMatchCount(health.strongCount, health.target)}${title ? ` · ${title}` : ''}`
+      `${attempts}/${attemptBudget} checked · ${added} fetched · ${added} kept · ${formatStrongMatchCount(health.strongCount, health.target)}${jy ? ` · fetching ${jy}` : ''}${title ? ` · ${title}` : ''}`
     );
   };
 
@@ -4342,7 +4389,14 @@ function applyMovieLensRating(movie, rating, stamp=nowStamp()) {
 function movieLensImportStatusText() {
   const summary = state.meta?.movielensImportSummary;
   if (!summary || !Number(summary.total || 0)) return '';
-  return `MovieLens import · ${Math.min(Number(summary.total), Number(summary.checkpoint || 0))}/${summary.total} · ${Number(summary.skipped || 0)} skipped`;
+  const done = Math.min(Number(summary.total), Number(summary.checkpoint || 0));
+  const skipped = Number(summary.skipped || 0);
+  // "skipped" = a MovieLens title CineLens couldn't turn into a library entry:
+  // no usable English/Hindi Wikipedia page (MovieLens is full of foreign-
+  // language films CineLens doesn't cover), or the page didn't match the
+  // title/year. Spell that out so the count isn't a mystery.
+  const skipText = skipped ? ` · ${skipped} not added (foreign-language or no Wikipedia match)` : '';
+  return `MovieLens import · ${done}/${summary.total}${skipText}`;
 }
 
 function movieLensImportQueue() {
@@ -5947,7 +6001,7 @@ function updateLibraryHealth() {
 
   let text;
   if (autoFetchPaused) text = 'Collection paused';
-  else if (poolExpansionInProgress) text = `Collecting ${formatStrongMatchCount(health.strongCount, health.target)}`;
+  else if (poolExpansionInProgress) { const jy = discoveryJourneyYear(); text = `Collecting ${formatStrongMatchCount(health.strongCount, health.target)}${jy ? ` · fetching ${jy}` : ''}`; }
   else if (backgroundAiTaggingInProgress) text = `Tagging ${health.pendingTags} pending titles`;
   else if (!libraryWritesUnlocked && state.drive?.enabled) text = 'Collection waiting for Drive reconnect';
   else if (health.personalized && health.strongCount >= STRONG_REC_TARGET) text = `Collection paused at ${health.strongCount} strong matches · refills below ${STRONG_REC_REFILL_THRESHOLD}`;
@@ -6378,9 +6432,7 @@ function setSectionVisibility(selector, visible) {
 }
 
 function invalidateTasteModel() {
-  tasteModelCache = new Map();
-  cardMatchCache = null;
-  scoredMovieCache = null;
+  scheduleRecommendationRefresh();
 }
 
 // Invalidating the taste model forces the next render to retrain the model and
