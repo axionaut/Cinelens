@@ -101,32 +101,21 @@
       <option value="English">English</option>
     </select>
     <label>Genre</label>
-    <select class="platform-select genre-filter-select" id="genreFilter" multiple onchange="updateGenreFilter()" aria-label="Genres" title="Choose one or more genres">
-      <option value="action">Action</option>
-      <option value="adventure">Adventure</option>
-      <option value="animation">Animation</option>
-      <option value="comedy">Comedy</option>
-      <option value="crime">Crime</option>
-      <option value="documentary">Documentary</option>
-      <option value="drama">Drama</option>
-      <option value="family">Family</option>
-      <option value="fantasy">Fantasy</option>
-      <option value="historical">Historical</option>
-      <option value="horror">Horror</option>
-      <option value="kids">Kids</option>
-      <option value="musical">Musical</option>
-      <option value="mystery">Mystery</option>
-      <option value="romance">Romance</option>
-      <option value="science-fiction">Science fiction</option>
-      <option value="sports">Sports</option>
-      <option value="thriller">Thriller</option>
-      <option value="war">War</option>
-      <option value="western">Western</option>
-    </select>
-    <select class="platform-select genre-match-select" id="genreMatchMode" onchange="updateGenreMatchMode(this.value)" aria-label="Genre match mode" title="Match any or every selected genre">
-      <option value="or">Any selected</option>
-      <option value="and">All selected</option>
-    </select>
+    <div class="genre-ms" id="genreMultiselect">
+      <button type="button" class="platform-select genre-ms-toggle" id="genreMsToggle" onclick="toggleGenreMenu(event)" aria-haspopup="true" aria-expanded="false" title="Filter by genre">
+        <span id="genreMsLabel">All genres</span><span class="genre-ms-caret">▾</span>
+      </button>
+      <div class="genre-ms-panel" id="genreMsPanel" hidden>
+        <div class="genre-ms-mode" role="group" aria-label="Match mode">
+          <button type="button" class="genre-ms-mode-btn" data-mode="or" onclick="updateGenreMatchMode('or')">Match any</button>
+          <button type="button" class="genre-ms-mode-btn" data-mode="and" onclick="updateGenreMatchMode('and')">Match all</button>
+        </div>
+        <div class="genre-ms-options" id="genreMsOptions"></div>
+        <div class="genre-ms-foot">
+          <button type="button" class="genre-ms-clear" onclick="clearGenreFilters()">Clear</button>
+        </div>
+      </div>
+    </div>
     <label>Rating</label>
     <select class="platform-select" id="ratingFilter" onchange="updateRatingFilter(this.value)">
       <option value="all">All ratings</option>

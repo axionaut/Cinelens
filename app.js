@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 57;
+const APP_VERSION = 58;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -5647,13 +5647,13 @@ function updateControlDeck() {
     modeBtn.classList.toggle('active', !!state.settings.tagDeleteMode);
     modeBtn.textContent=state.settings.tagDeleteMode ? 'Tag clicks: remove' : 'Tag clicks: explore';
   }
-  const genreFilter=document.getElementById('genreFilter');
-  if (genreFilter) {
-    const selected = new Set(selectedGenreFilters());
-    [...genreFilter.options].forEach(option => { option.selected = selected.has(option.value); });
-  }
-  const genreMatchMode=document.getElementById('genreMatchMode');
-  if (genreMatchMode && genreMatchMode.value !== state.settings.genreMatchMode) genreMatchMode.value=state.settings.genreMatchMode;
+  const genreMsLabel=document.getElementById('genreMsLabel');
+  if (genreMsLabel) genreMsLabel.textContent=genreFilterSummary();
+  const genreMsToggle=document.getElementById('genreMsToggle');
+  if (genreMsToggle) genreMsToggle.classList.toggle('has-filter', selectedGenreFilters().length > 0);
+  // If the panel is open, keep its checkboxes/mode in sync.
+  const genrePanel=document.getElementById('genreMsPanel');
+  if (genrePanel && !genrePanel.hidden) renderGenreMenu();
   const languageFilter=document.getElementById('languageFilter');
   if (languageFilter && languageFilter.value !== (state.settings.languageFilter || 'all')) languageFilter.value=state.settings.languageFilter || 'all';
   const ratingFilter=document.getElementById('ratingFilter');
@@ -5711,23 +5711,99 @@ function normaliseFilterAndSortSettings() {
   state.settings.sortDirection = state.settings.sortDirection === 'asc' ? 'asc' : 'desc';
 }
 
-function updateGenreFilter(genre) {
-  const control = document.getElementById('genreFilter');
-  const suppliedGenre = typeof genre === 'string' ? genre.trim() : '';
-  const genres = suppliedGenre && suppliedGenre !== 'all'
-    ? [suppliedGenre.toLowerCase()]
-    : (control ? [...control.selectedOptions].map(option => option.value) : []);
-  state.settings.genreFilters = genres;
+const GENRE_FILTER_OPTIONS = [
+  ['action','Action'],['adventure','Adventure'],['animation','Animation'],['comedy','Comedy'],
+  ['crime','Crime'],['documentary','Documentary'],['drama','Drama'],['family','Family'],
+  ['fantasy','Fantasy'],['historical','Historical'],['horror','Horror'],['kids','Kids'],
+  ['musical','Musical'],['mystery','Mystery'],['romance','Romance'],['science-fiction','Science fiction'],
+  ['sports','Sports'],['thriller','Thriller'],['war','War'],['western','Western']
+];
+const GENRE_FILTER_LABELS = Object.fromEntries(GENRE_FILTER_OPTIONS);
+
+// A single genre reads as its name; a couple fit; more collapse to a count so
+// the toggle never widens the settings bar.
+function genreFilterSummary() {
+  const selected = selectedGenreFilters();
+  if (!selected.length) return 'All genres';
+  if (selected.length === 1) return GENRE_FILTER_LABELS[selected[0]] || selected[0];
+  if (selected.length === 2) return selected.map(g => GENRE_FILTER_LABELS[g] || g).join(', ');
+  return `${selected.length} genres`;
+}
+
+function setGenreFilters(genres) {
+  const clean = [...new Set((genres || []).map(v => String(v || '').trim().toLowerCase()).filter(Boolean))];
+  state.settings.genreFilters = clean;
   // Keep the former single-value field for older local and Drive profiles.
-  state.settings.genreFilter = suppliedGenre || genres[0] || 'all';
+  state.settings.genreFilter = clean[0] || 'all';
   saveViewState();
   renderActiveCards();
+  updateControlDeck();
+}
+
+// Called from the checkbox onchange. `genre` toggles; a plain string value from
+// a legacy caller (or the old single-select) sets that one genre.
+function updateGenreFilter(genre, checked) {
+  const value = typeof genre === 'string' ? genre.trim().toLowerCase() : '';
+  if (!value || value === 'all') { setGenreFilters([]); return; }
+  const current = new Set(selectedGenreFilters());
+  const nowChecked = checked === undefined ? !current.has(value) : !!checked;
+  if (nowChecked) current.add(value); else current.delete(value);
+  setGenreFilters([...current]);
+}
+
+function clearGenreFilters() {
+  setGenreFilters([]);
 }
 
 function updateGenreMatchMode(mode) {
   state.settings.genreMatchMode = mode === 'and' ? 'and' : 'or';
   saveViewState();
   renderActiveCards();
+  updateControlDeck();
+}
+
+function renderGenreMenu() {
+  const options = document.getElementById('genreMsOptions');
+  if (!options) return;
+  const selected = new Set(selectedGenreFilters());
+  options.innerHTML = GENRE_FILTER_OPTIONS.map(([value, label]) => `
+    <label class="genre-ms-option${selected.has(value) ? ' checked' : ''}">
+      <input type="checkbox" value="${value}"${selected.has(value) ? ' checked' : ''} onchange="updateGenreFilter('${value}', this.checked)">
+      <span>${label}</span>
+    </label>`).join('');
+  document.querySelectorAll('#genreMsPanel .genre-ms-mode-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === (state.settings.genreMatchMode || 'or'));
+  });
+}
+
+function closeGenreMenu() {
+  const panel = document.getElementById('genreMsPanel');
+  const toggle = document.getElementById('genreMsToggle');
+  if (panel) panel.hidden = true;
+  if (toggle) toggle.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('click', handleGenreMenuOutsideClick, true);
+}
+
+function handleGenreMenuOutsideClick(event) {
+  const root = document.getElementById('genreMultiselect');
+  if (root && !root.contains(event.target)) closeGenreMenu();
+}
+
+function toggleGenreMenu(event) {
+  if (event) event.stopPropagation();
+  const panel = document.getElementById('genreMsPanel');
+  const toggle = document.getElementById('genreMsToggle');
+  if (!panel) return;
+  const open = panel.hidden;
+  if (open) {
+    renderGenreMenu();
+    panel.hidden = false;
+    if (toggle) toggle.setAttribute('aria-expanded', 'true');
+    // Capture-phase so a click anywhere else (including other controls) closes it.
+    setTimeout(() => document.addEventListener('click', handleGenreMenuOutsideClick, true), 0);
+  } else {
+    closeGenreMenu();
+  }
 }
 
 // Card width is fixed (compact only, per Nitin's request — no size picker).
@@ -8841,10 +8917,8 @@ function loadLocalState() {
       state.drive.accessToken=getStoredDriveToken()||'';
       document.getElementById('minYear').value=state.settings.minYear;
       document.getElementById('languageFilter').value=state.settings.languageFilter||'all';
-      const genreFilter=document.getElementById('genreFilter');
-      if (genreFilter) [...genreFilter.options].forEach(option => { option.selected = selectedGenreFilters().includes(option.value); });
-      const genreMatchMode=document.getElementById('genreMatchMode');
-      if (genreMatchMode) genreMatchMode.value=state.settings.genreMatchMode||'or';
+      // The genre multiselect toggle/label is synced by updateControlDeck() on
+      // the next render — nothing to set on a plain <select> here anymore.
       const ratingFilter=document.getElementById('ratingFilter');
       if (ratingFilter) ratingFilter.value=state.settings.ratingFilter||'all';
       const sortMode=document.getElementById('sortMode');
