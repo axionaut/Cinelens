@@ -433,7 +433,7 @@ let state = {
   movies: {},
   tagWeights: {},
   genreWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', ratingFilter:'all', sortMode:'recommended', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, tmdbBackfillPaused:false },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', genreFilters:[], genreMatchMode:'or', ratingFilter:'all', sortMode:'recommended', sortDirection:'desc', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, tmdbBackfillPaused:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', manifestFileId:'', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   wrongPicks: {},
@@ -2725,19 +2725,33 @@ function movieTime(movie) {
   return Date.parse(movie?._updatedAt || movie?.hiddenAt || movie?.updatedAt || movie?.at || '') || 0;
 }
 
-function sortMovies(rows, fallback='title-asc') {
-  const mode = state.settings.sortMode || fallback;
-  const effective = mode === 'recommended' ? fallback : mode;
+function sortMovies(rows, fallback='title') {
+  const legacySortModes = {
+    'rating-desc':['rating','desc'], 'year-desc':['year','desc'], 'year-asc':['year','asc'],
+    'updated-desc':['addedAt','desc'], 'title-asc':['title','asc']
+  };
+  const configured = state.settings.sortMode || 'recommended';
+  const legacy = legacySortModes[configured];
+  const mode = legacy ? legacy[0] : configured;
+  let effective = mode === 'recommended' ? fallback : mode;
+  let direction = legacy ? legacy[1] : (state.settings.sortDirection === 'asc' ? 'asc' : 'desc');
+  const fallbackDirection = /-(asc|desc)$/.exec(effective);
+  if (mode === 'recommended' && fallbackDirection) {
+    direction = fallbackDirection[1];
+    effective = effective.replace(/-(asc|desc)$/, '');
+  }
+  direction = direction === 'asc' ? 1 : -1;
+  const compare = (a, b) => (a - b) * direction;
   const sorted = [...rows];
   if (effective === 'random') {
     const seed = String(state.settings.shuffleSeed || 1);
     return sorted.sort((a,b)=>stableHash(`${seed}:${a.id || a.key || a.title}`)-stableHash(`${seed}:${b.id || b.key || b.title}`));
   }
-  if (effective === 'rating-desc') return sorted.sort((a,b)=>Number(b.rating||0)-Number(a.rating||0)||titleSortKey(a).localeCompare(titleSortKey(b)));
-  if (effective === 'year-desc') return sorted.sort((a,b)=>Number(b.year||0)-Number(a.year||0)||titleSortKey(a).localeCompare(titleSortKey(b)));
-  if (effective === 'year-asc') return sorted.sort((a,b)=>Number(a.year||9999)-Number(b.year||9999)||titleSortKey(a).localeCompare(titleSortKey(b)));
-  if (effective === 'updated-desc') return sorted.sort((a,b)=>movieTime(b)-movieTime(a)||titleSortKey(a).localeCompare(titleSortKey(b)));
-  return sorted.sort((a,b)=>titleSortKey(a).localeCompare(titleSortKey(b)));
+  if (effective === 'rating') return sorted.sort((a,b)=>compare(Number(a.rating||0),Number(b.rating||0))||titleSortKey(a).localeCompare(titleSortKey(b)));
+  if (effective === 'year') return sorted.sort((a,b)=>compare(Number(a.year||0),Number(b.year||0))||titleSortKey(a).localeCompare(titleSortKey(b)));
+  if (effective === 'ratedAt') return sorted.sort((a,b)=>compare(ratingTimestamp(a) || 0,ratingTimestamp(b) || 0)||titleSortKey(a).localeCompare(titleSortKey(b)));
+  if (effective === 'addedAt') return sorted.sort((a,b)=>compare(movieAddedTime(a),movieAddedTime(b))||titleSortKey(a).localeCompare(titleSortKey(b)));
+  return sorted.sort((a,b)=>titleSortKey(a).localeCompare(titleSortKey(b)) * direction);
 }
 
 async function fetchWikiPageLinks(title, limit=500) {
@@ -5626,6 +5640,7 @@ function renderAppVersion() {
 }
 
 function updateControlDeck() {
+  normaliseFilterAndSortSettings();
   applyCardSize();
   const modeBtn=document.getElementById('tagDeleteModeBtn');
   if (modeBtn) {
@@ -5633,13 +5648,25 @@ function updateControlDeck() {
     modeBtn.textContent=state.settings.tagDeleteMode ? 'Tag clicks: remove' : 'Tag clicks: explore';
   }
   const genreFilter=document.getElementById('genreFilter');
-  if (genreFilter && genreFilter.value !== (state.settings.genreFilter || 'all')) genreFilter.value=state.settings.genreFilter || 'all';
+  if (genreFilter) {
+    const selected = new Set(selectedGenreFilters());
+    [...genreFilter.options].forEach(option => { option.selected = selected.has(option.value); });
+  }
+  const genreMatchMode=document.getElementById('genreMatchMode');
+  if (genreMatchMode && genreMatchMode.value !== state.settings.genreMatchMode) genreMatchMode.value=state.settings.genreMatchMode;
   const languageFilter=document.getElementById('languageFilter');
   if (languageFilter && languageFilter.value !== (state.settings.languageFilter || 'all')) languageFilter.value=state.settings.languageFilter || 'all';
   const ratingFilter=document.getElementById('ratingFilter');
   if (ratingFilter && ratingFilter.value !== (state.settings.ratingFilter || 'all')) ratingFilter.value=state.settings.ratingFilter || 'all';
   const sortMode=document.getElementById('sortMode');
   if (sortMode && sortMode.value !== (state.settings.sortMode || 'recommended')) sortMode.value=state.settings.sortMode || 'recommended';
+  const sortDirectionBtn=document.getElementById('sortDirectionBtn');
+  if (sortDirectionBtn) {
+    const ascending = state.settings.sortDirection === 'asc';
+    sortDirectionBtn.textContent = ascending ? '↑' : '↓';
+    sortDirectionBtn.title = ascending ? 'Sort ascending' : 'Sort descending';
+    sortDirectionBtn.setAttribute('aria-label', sortDirectionBtn.title);
+  }
   const shuffleBtn=document.getElementById('shuffleAgainBtn');
   if (shuffleBtn) shuffleBtn.hidden = (state.settings.sortMode || 'recommended') !== 'random';
   const titleSearch=document.getElementById('titleSearch');
@@ -5662,8 +5689,43 @@ function updateLanguageFilter(language) {
   renderActiveCards();
 }
 
+function selectedGenreFilters() {
+  const filters = Array.isArray(state.settings?.genreFilters)
+    ? state.settings.genreFilters
+    : (state.settings?.genreFilter && state.settings.genreFilter !== 'all' ? [state.settings.genreFilter] : []);
+  return [...new Set(filters.map(value => String(value || '').trim()).filter(Boolean))];
+}
+
+function normaliseFilterAndSortSettings() {
+  if (!Array.isArray(state.settings.genreFilters)) {
+    const legacyGenre = String(state.settings.genreFilter || '');
+    state.settings.genreFilters = legacyGenre && legacyGenre !== 'all' ? [legacyGenre] : [];
+  }
+  state.settings.genreMatchMode = state.settings.genreMatchMode === 'and' ? 'and' : 'or';
+  const legacySortModes = {
+    'rating-desc':['rating','desc'], 'year-desc':['year','desc'], 'year-asc':['year','asc'],
+    'updated-desc':['addedAt','desc'], 'title-asc':['title','asc']
+  };
+  const legacySort = legacySortModes[state.settings.sortMode];
+  if (legacySort) [state.settings.sortMode, state.settings.sortDirection] = legacySort;
+  state.settings.sortDirection = state.settings.sortDirection === 'asc' ? 'asc' : 'desc';
+}
+
 function updateGenreFilter(genre) {
-  state.settings.genreFilter = genre || 'all';
+  const control = document.getElementById('genreFilter');
+  const suppliedGenre = typeof genre === 'string' ? genre.trim() : '';
+  const genres = suppliedGenre && suppliedGenre !== 'all'
+    ? [suppliedGenre.toLowerCase()]
+    : (control ? [...control.selectedOptions].map(option => option.value) : []);
+  state.settings.genreFilters = genres;
+  // Keep the former single-value field for older local and Drive profiles.
+  state.settings.genreFilter = suppliedGenre || genres[0] || 'all';
+  saveViewState();
+  renderActiveCards();
+}
+
+function updateGenreMatchMode(mode) {
+  state.settings.genreMatchMode = mode === 'and' ? 'and' : 'or';
   saveViewState();
   renderActiveCards();
 }
@@ -5701,13 +5763,23 @@ function updateRatingFilter(rating) {
 
 function filterByGenreFromCard(genre, event) {
   if (event) event.stopPropagation();
-  updateGenreFilter(genre);
+  state.settings.genreFilters = [genre];
+  state.settings.genreFilter = genre;
+  saveViewState();
+  renderActiveCards();
   updateControlDeck();
 }
 
 function updateSortMode(mode) {
   state.settings.sortMode = mode || 'recommended';
   if (state.settings.sortMode === 'random' && !state.settings.shuffleSeed) state.settings.shuffleSeed = Date.now();
+  saveViewState();
+  renderActiveCards();
+  updateControlDeck();
+}
+
+function toggleSortDirection() {
+  state.settings.sortDirection = state.settings.sortDirection === 'asc' ? 'desc' : 'asc';
   saveViewState();
   renderActiveCards();
   updateControlDeck();
@@ -5810,8 +5882,12 @@ function matchesLanguageFilter(movie) {
 }
 
 function matchesGenreFilter(movie) {
-  const filter = state.settings.genreFilter || 'all';
-  return filter === 'all' || movieGenres(movie).includes(filter);
+  const filters = selectedGenreFilters();
+  if (!filters.length) return true;
+  const genres = movieGenres(movie);
+  return state.settings.genreMatchMode === 'and'
+    ? filters.every(filter => genres.includes(filter))
+    : filters.some(filter => genres.includes(filter));
 }
 
 function matchesRatingFilter(movie) {
@@ -5819,7 +5895,7 @@ function matchesRatingFilter(movie) {
   if (filter === 'all') return true;
   const rating = Number(movie?.rating || 0);
   if (filter === 'unrated') return rating === 0;
-  return rating === Number(filter);
+  return rating >= Number(filter);
 }
 
 function titleSearchNeedle(value=state.settings.titleSearch) {
@@ -6182,7 +6258,7 @@ function renderRecs() {
     const scored = recommendationCandidates();
     const visibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10));
       const ordered = (state.settings.sortMode || 'recommended') === 'recommended'
-        ? scored
+        ? (state.settings.sortDirection === 'asc' ? [...scored].reverse() : scored)
         : (() => {
             const scoredById = new Map(scored.map(item => [String(item.movie.id), item]));
             return sortMovies(scored.map(item => item.movie), 'title-asc')
@@ -8721,7 +8797,7 @@ function saveLocalState(opts={}) {
   try {
     localStorage.setItem('cinelens_v2_bootstrap',JSON.stringify({
       schema:'cinelens-local-v3',
-      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,sortMode:state.settings?.sortMode,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
+      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,genreFilters:state.settings?.genreFilters,genreMatchMode:state.settings?.genreMatchMode,ratingFilter:state.settings?.ratingFilter,sortMode:state.settings?.sortMode,sortDirection:state.settings?.sortDirection,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
       drive:{enabled:state.drive.enabled,folderId:state.drive.folderId,fileId:state.drive.fileId,manifestFileId:state.drive.manifestFileId||'',lastConnectedAt:state.drive.lastConnectedAt},
       updatedAt:state.meta?.updatedAt || nowStamp()
     }));
@@ -8766,7 +8842,11 @@ function loadLocalState() {
       document.getElementById('minYear').value=state.settings.minYear;
       document.getElementById('languageFilter').value=state.settings.languageFilter||'all';
       const genreFilter=document.getElementById('genreFilter');
-      if (genreFilter) genreFilter.value=state.settings.genreFilter||'all';
+      if (genreFilter) [...genreFilter.options].forEach(option => { option.selected = selectedGenreFilters().includes(option.value); });
+      const genreMatchMode=document.getElementById('genreMatchMode');
+      if (genreMatchMode) genreMatchMode.value=state.settings.genreMatchMode||'or';
+      const ratingFilter=document.getElementById('ratingFilter');
+      if (ratingFilter) ratingFilter.value=state.settings.ratingFilter||'all';
       const sortMode=document.getElementById('sortMode');
       if (sortMode) sortMode.value=state.settings.sortMode||'recommended';
       const titleSearch=document.getElementById('titleSearch');

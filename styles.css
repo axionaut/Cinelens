@@ -94,6 +94,10 @@
   .platform-btn.danger:hover{border-color:var(--danger);background:rgba(239,83,80,.12);color:#fff}
   .platform-select,.manual-title-input,.year-input,.tag-search{background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:'DM Mono',monospace;font-size:10px;padding:4px 7px;outline:none;color-scheme:dark}
   .platform-select option{background:#1a1a1a;color:#f2f2f3}
+  .genre-filter-select{min-width:126px;max-width:154px;height:30px}
+  .genre-match-select{min-width:98px}
+  .sort-direction-btn{width:28px;height:27px;padding:0;border:1px solid var(--border);border-radius:3px;background:var(--surface2);color:var(--text);font:600 17px/1 'DM Mono',monospace;cursor:pointer;transition:all .15s}
+  .sort-direction-btn:hover{border-color:var(--accent);color:var(--accent)}
   .year-input{width:72px}
   .manual-title-input{width:220px}
 

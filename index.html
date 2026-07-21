@@ -101,8 +101,7 @@
       <option value="English">English</option>
     </select>
     <label>Genre</label>
-    <select class="platform-select" id="genreFilter" onchange="updateGenreFilter(this.value)">
-      <option value="all">All genres</option>
+    <select class="platform-select genre-filter-select" id="genreFilter" multiple onchange="updateGenreFilter()" aria-label="Genres" title="Choose one or more genres">
       <option value="action">Action</option>
       <option value="adventure">Adventure</option>
       <option value="animation">Animation</option>
@@ -124,26 +123,31 @@
       <option value="war">War</option>
       <option value="western">Western</option>
     </select>
+    <select class="platform-select genre-match-select" id="genreMatchMode" onchange="updateGenreMatchMode(this.value)" aria-label="Genre match mode" title="Match any or every selected genre">
+      <option value="or">Any selected</option>
+      <option value="and">All selected</option>
+    </select>
     <label>Rating</label>
     <select class="platform-select" id="ratingFilter" onchange="updateRatingFilter(this.value)">
       <option value="all">All ratings</option>
       <option value="unrated">Unrated</option>
-      <option value="5">5 stars</option>
-      <option value="4">4 stars</option>
-      <option value="3">3 stars</option>
-      <option value="2">2 stars</option>
-      <option value="1">1 star</option>
+      <option value="5">5 stars &amp; above</option>
+      <option value="4">4 stars &amp; above</option>
+      <option value="3">3 stars &amp; above</option>
+      <option value="2">2 stars &amp; above</option>
+      <option value="1">1 star &amp; above</option>
     </select>
     <label>Sort</label>
     <select class="platform-select" id="sortMode" onchange="updateSortMode(this.value)">
-      <option value="recommended">Recommended</option>
-      <option value="rating-desc">Rating high</option>
-      <option value="year-desc">Year newest</option>
-      <option value="year-asc">Year oldest</option>
-      <option value="updated-desc">Recently changed</option>
-      <option value="title-asc">Title A-Z</option>
-      <option value="random">Random / Shuffle</option>
+      <option value="recommended">Best match</option>
+      <option value="rating">Your rating</option>
+      <option value="year">Release year</option>
+      <option value="ratedAt">Last rated</option>
+      <option value="addedAt">Added to CineLens</option>
+      <option value="title">Title</option>
+      <option value="random">Surprise me</option>
     </select>
+    <button class="sort-direction-btn" id="sortDirectionBtn" type="button" onclick="toggleSortDirection()" aria-label="Sort descending" title="Sort descending">↓</button>
     <button class="tb-filter-btn" id="shuffleAgainBtn" onclick="shuffleAgain()" hidden>Shuffle again</button>
     <label>Search</label>
     <input class="title-search-input" id="titleSearch" type="search" placeholder="search local + Wikipedia" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)">
