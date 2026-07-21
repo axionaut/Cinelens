@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 55;
+const APP_VERSION = 56;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -403,9 +403,6 @@ let receptionBackfillInProgress = false;
 let receptionCalibrationTimer = null;
 let backgroundAiTaggingInProgress = false;
 let backgroundAiTimer = null;
-let highMatchReverifyTimer = null;
-let highMatchReverifyInProgress = false;
-const HIGH_MATCH_REVERIFY_THRESHOLD = 0.9;
 let movielensImportTimer = null;
 let movielensImportInProgress = false;
 let startupDriveRestoreDone = false;
@@ -3983,7 +3980,11 @@ async function runReceptionBackfill() {
     return;
   }
   const candidates = receptionBackfillCandidates();
-  if (!candidates.length) return;
+  if (!candidates.length) {
+    // Sweep finished — apply any refresh the throttle was holding.
+    if (flushTasteModelInvalidation()) render();
+    return;
+  }
   receptionBackfillInProgress = true;
   const changedMovieIds = [];
   const batch = candidates.slice(0, RECEPTION_BACKFILL_BATCH_SIZE);
@@ -4032,7 +4033,12 @@ async function runReceptionBackfill() {
       updateReceptionCalibration();
       saveLocalState({preserveUpdatedAt:true, changedMovieIds});
       queueDriveSync();
-      invalidateTasteModel();
+      // Throttled so a long reception sweep doesn't re-score the library every
+      // batch; scheduleReceptionBackfill(9000) below re-enters until no work
+      // remains, and the final pass (no candidates) flushes any pending refresh.
+      throttledInvalidateTasteModel();
+      render();
+    } else if (flushTasteModelInvalidation()) {
       render();
     }
   } catch(error) {
@@ -4515,7 +4521,10 @@ async function runMovieLensImport() {
     const workerCount = Math.min(MOVIELENS_IMPORT_FETCH_CONCURRENCY, pending.length);
     await Promise.all(Array.from({length:workerCount}, worker));
     if (completed) {
-      invalidateTasteModel();
+      // Throttled: keeps the taste model/score caches warm between the frequent
+      // (~1.5s) import batches so each render stays cheap. A full flush happens
+      // when the queue drains (below), so the finished import is never stale.
+      throttledInvalidateTasteModel();
       computeTagWeights();
       scheduleReceptionCalibrationUpdate();
       saveLocalState({preserveUpdatedAt:true, changedMovieIds:[...changedMovieIds]});
@@ -4530,7 +4539,12 @@ async function runMovieLensImport() {
       // Gap between batches so reception/TMDB/AI backfill (which all yield to
       // this loop) get a turn, and the UI gets breathing room.
       if (state.meta?.movielensImportQueue?.length) scheduleMovieLensImport(MOVIELENS_IMPORT_BATCH_GAP_MS);
-      else scheduleBackgroundAiQueue(1200);
+      else {
+        // Import drained — make the final recommendations reflect every
+        // imported rating even if the last batch's invalidation was throttled.
+        if (flushTasteModelInvalidation()) { computeTagWeights(); render(); }
+        scheduleBackgroundAiQueue(1200);
+      }
     }
   }
 }
@@ -5549,6 +5563,7 @@ function render() {
   reapplyExpandedCardAfterRender();
 }
 
+
 function renderAppVersion() {
   const label = document.getElementById('appVersion');
   if (!label) return;
@@ -6047,9 +6062,6 @@ async function runBackgroundAiQueue() {
 }
 
 function maybeAutoExpandPool() {
-  // Lowest-priority confirmation loop; self-gates against every other
-  // background loop, so arming it here is safe regardless of collection state.
-  scheduleHighMatchReverify();
   if (
     !startupDriveRestoreDone ||
     !libraryWritesUnlocked ||
@@ -6369,6 +6381,36 @@ function invalidateTasteModel() {
   tasteModelCache = new Map();
   cardMatchCache = null;
   scoredMovieCache = null;
+}
+
+// Invalidating the taste model forces the next render to retrain the model and
+// re-score the entire library — 100+ms on a large library. A bulk background
+// sweep (MovieLens metadata, reception) invalidated it after EVERY batch, so
+// that heavy recompute ran every couple of seconds for hours, freezing clicks.
+// The recommendations do not need to update on every single batch of a long
+// background sweep, so the invalidation is throttled: the caches stay warm
+// (and the per-batch render stays cheap) between refreshes, with a guaranteed
+// flush when the sweep goes idle so the final result is never stale.
+let lastTasteInvalidateAt = 0;
+let tasteInvalidatePending = false;
+const TASTE_INVALIDATE_THROTTLE_MS = 12000;
+function throttledInvalidateTasteModel() {
+  const now = Date.now();
+  if (now - lastTasteInvalidateAt >= TASTE_INVALIDATE_THROTTLE_MS) {
+    lastTasteInvalidateAt = now;
+    tasteInvalidatePending = false;
+    invalidateTasteModel();
+    return true;
+  }
+  tasteInvalidatePending = true;
+  return false;
+}
+function flushTasteModelInvalidation() {
+  if (!tasteInvalidatePending) return false;
+  tasteInvalidatePending = false;
+  lastTasteInvalidateAt = Date.now();
+  invalidateTasteModel();
+  return true;
 }
 
 function invalidateCardMatchCache() {
@@ -7160,82 +7202,15 @@ function scoreMovies() {
   return scoredMovieCache;
 }
 
-// A title that has climbed past the >90% match band earns one extra
-// verification pass (Nitin: "run a pass again whenever something hits >90%
-// match"), so a strong recommendation is never resting on an unconfirmed or
-// partially-grounded tag set. At most once per story version per title
-// (highMatchVerifiedHash), and single-pass (the manual retag owns the
-// two-pass consensus) to keep the daily quota in check.
-function highMatchReverifyCandidates() {
-  const currentHashes = new Map();
-  return scoreMovies()
-    .filter(item => Number(item.matchScore || 0) >= HIGH_MATCH_REVERIFY_THRESHOLD)
-    .map(item => item.movie)
-    .filter(movie => {
-      if (!movie || movie.rating > 0 || !movie.storyText) return false;
-      if (movie.aiTagging?.status !== 'verified') return false;
-      const hash = currentHashes.get(movie.id) || aiStoryHash(movie.storyText);
-      currentHashes.set(movie.id, hash);
-      if (movie.aiTagging.storyHash !== hash) return false;
-      return movie.highMatchVerifiedHash !== hash;
-    });
-}
+// NOTE (v56): the automatic >90%-match re-verify loop was removed. It ran a
+// full retagFromStoredData (Wikipedia + TMDB + Gemini + whole-library
+// rebuildTagBrain/computeTagWeights) per strong match, continuously in the
+// background — a large, ongoing main-thread and quota cost that Nitin traced
+// as a source of the lag. It was also redundant: v52's reconcileAiTagSet
+// already guarantees a retag on an unchanged story returns the identical tag
+// set, so a >90% match cannot drift on re-tagging in the first place. Manual
+// retag still runs the two-pass consensus for on-demand confirmation.
 
-let lastHighMatchScanAt = 0;
-const HIGH_MATCH_SCAN_THROTTLE_MS = 8000;
-
-function scheduleHighMatchReverify(delay = 6000) {
-  if (!libraryWritesUnlocked || autoFetchPaused || highMatchReverifyInProgress) return;
-  // Already armed — don't let a render storm keep pushing the delay out.
-  if (highMatchReverifyTimer) return;
-  // This is called from maybeAutoExpandPool on EVERY render. In the steady
-  // state (no candidates) the scan below would otherwise walk the scored
-  // library on every single render, so throttle how often we even look.
-  const now = Date.now();
-  if (now - lastHighMatchScanAt < HIGH_MATCH_SCAN_THROTTLE_MS) return;
-  lastHighMatchScanAt = now;
-  if (!highMatchReverifyCandidates().length) return;
-  const run = () => { highMatchReverifyTimer = null; runHighMatchReverify(); };
-  if ('requestIdleCallback' in window) {
-    highMatchReverifyTimer = setTimeout(() => requestIdleCallback(run, {timeout: 1500}), delay);
-  } else {
-    highMatchReverifyTimer = setTimeout(run, delay);
-  }
-}
-
-async function runHighMatchReverify() {
-  // Lowest-priority background loop: never contend with collection, tagging,
-  // reception/TMDB backfill, or the MovieLens import for the shared fetch
-  // slot or progress bar.
-  if (autoFetchPaused || !libraryWritesUnlocked || highMatchReverifyInProgress
-      || poolExpansionInProgress || backgroundAiTaggingInProgress
-      || receptionBackfillInProgress || tmdbBackfillInProgress || movielensImportInProgress) {
-    scheduleHighMatchReverify(4000);
-    return;
-  }
-  const movie = highMatchReverifyCandidates()[0];
-  if (!movie) return;
-  const hash = aiStoryHash(movie.storyText);
-  highMatchReverifyInProgress = true;
-  try {
-    await retagFromStoredData(movie.id, {consensus:false, successToast:false, errorToast:false, progressLabel:'Verifying strong match…'});
-    // Stamp regardless of whether tags changed: the point is that this title's
-    // strong match has now been confirmed against a fresh pass exactly once.
-    const current = state.movies[movie.id];
-    if (current) {
-      current.highMatchVerifiedHash = hash;
-      touchRecord(current);
-      saveLocalState({preserveUpdatedAt:true, changedMovieIds:[String(movie.id)]});
-      queueDriveSync();
-    }
-  } catch(_) {
-    // A failed verification does not stamp — it will be retried on a later
-    // pass rather than silently marked confirmed.
-  } finally {
-    highMatchReverifyInProgress = false;
-    scheduleHighMatchReverify(9000);
-  }
-}
 // ─────────────────────────────────────────────
 // RATING
 // ─────────────────────────────────────────────
@@ -8916,7 +8891,6 @@ function kickBackgroundLoopsOnForeground() {
   scheduleTmdbBackfill(400);
   scheduleReceptionBackfill(600);
   if (typeof scheduleMovieLensImport === 'function') scheduleMovieLensImport(800);
-  scheduleHighMatchReverify(1200);
   maybeAutoExpandPool();
 }
 
@@ -9451,6 +9425,13 @@ async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
   return {changedKeys,profileChanged};
 }
 
+// Hand the main thread back to the browser so queued input/paint can run.
+// A macrotask (setTimeout 0) — not a microtask — because only a macrotask
+// yields between rendering opportunities; microtasks would still block paint.
+function yieldToUi() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
 async function syncChunkedDrive(manual=false) {
   let manifestFile=state.drive.manifestFileId ? {id:state.drive.manifestFileId} : await findDriveManifest();
   if (!manifestFile) {
@@ -9465,7 +9446,14 @@ async function syncChunkedDrive(manual=false) {
   const remoteChunks=manifest.chunks || {};
   const nextChunks={...remoteChunks};
 
+  // driveHash stringifies + character-hashes a whole chunk; summed across the
+  // library that was a multi-hundred-ms main-thread freeze on every sync (the
+  // common "nothing changed" path has no network await to break it up). Yield
+  // between chunks so clicks and paint are never starved — same total work,
+  // no single long task.
+  let chunkIndex=0;
   for (const key of new Set([...Object.keys(chunks),...Object.keys(remoteChunks)])) {
+    if ((chunkIndex++ % 3) === 0) await yieldToUi();
     const localPayload={schema:DRIVE_SYNC_MODEL_V2,chunk:key,movies:chunks[key] || {}};
     const localHash=driveHash(localPayload);
     const remote=remoteChunks[key];
