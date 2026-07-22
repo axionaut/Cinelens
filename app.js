@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 58;
+const APP_VERSION = 59;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -1715,6 +1715,7 @@ async function requestAiTags(movies, opts={}) {
         storyHash:aiStoryHash(movie.storyText),
         error:String(e?.message || e),
         partialCount,
+        failCount:Number(movie.aiTagging?.failCount || 0) + 1,
         attemptedAt:new Date().toISOString()
       };
       movie.retagStatus = 'needs-ai-tags';
@@ -3275,6 +3276,7 @@ async function expandPool(manual=true) {
           promptVersion:AI_TAG_PROMPT_VERSION,
           storyHash:aiStoryHash(movie.storyText),
           error:message,
+          failCount:Number(movie.aiTagging?.failCount || 0) + 1,
           attemptedAt:nowStamp()
         };
         movie.retagStatus = 'needs-ai-tags';
@@ -3960,9 +3962,22 @@ function needsReceptionBackfill(movie) {
   return needsThumbnail || !movie.reception || Number(movie.reception.version || 0) < RECEPTION_VERSION;
 }
 
+// Escalating backoff so a title that keeps failing to yield reception data
+// (transient errors) isn't retried on the same 6h cooldown indefinitely.
+const RECEPTION_BACKFILL_BACKOFF_MS = [
+  6 * 60 * 60 * 1000,        // 1st retry: 6h
+  24 * 60 * 60 * 1000,       // then 1 day
+  3 * 24 * 60 * 60 * 1000,   // then 3 days
+  14 * 24 * 60 * 60 * 1000   // then ~fortnightly
+];
 function receptionBackfillRecentlyAttempted(movie, now=Date.now()) {
   const attemptedAt = Date.parse(movie?.receptionBackfillAttemptedAt || '') || 0;
-  return !!attemptedAt && now - attemptedAt < RECEPTION_BACKFILL_RETRY_COOLDOWN_MS;
+  if (!attemptedAt) return false;
+  const fails = Math.max(0, Number(movie?.receptionBackfillFailCount || 0));
+  const cooldown = fails > 0
+    ? RECEPTION_BACKFILL_BACKOFF_MS[Math.min(fails - 1, RECEPTION_BACKFILL_BACKOFF_MS.length - 1)]
+    : RECEPTION_BACKFILL_RETRY_COOLDOWN_MS;
+  return now - attemptedAt < cooldown;
 }
 
 function sortByBackfillPriority(candidates) {
@@ -4074,17 +4089,33 @@ async function runReceptionBackfill() {
           movie.thumbnailBackfillAttemptedAt = nowStamp();
         }
         if (!fresh?.reception) {
-          movie.receptionBackfillAttemptedAt = nowStamp();
+          // This page has no usable Reception section (most smaller/older
+          // titles never will). Record an empty reception at the CURRENT
+          // version so needsReceptionBackfill stops re-queuing it forever —
+          // previously it left movie.reception null and re-fetched the same
+          // title every 6h indefinitely, the churn Nitin saw. It only returns
+          // if RECEPTION_VERSION bumps. Any existing TMDB user-score signal is
+          // preserved.
+          if (!movie.reception || Number(movie.reception.version || 0) < RECEPTION_VERSION) {
+            movie.reception = normaliseReceptionRecord({...(movie.reception || {}), version:RECEPTION_VERSION});
+          }
+          delete movie.receptionBackfillAttemptedAt;
+          delete movie.receptionBackfillFailCount;
           touchRecord(movie);
           changedMovieIds.push(String(movie.id));
           continue;
         }
         movie.reception = normaliseReceptionRecord(fresh.reception);
         delete movie.receptionBackfillAttemptedAt;
+        delete movie.receptionBackfillFailCount;
         movie.wikiParserVersion = Math.max(Number(movie.wikiParserVersion || 0), Number(fresh.wikiParserVersion || WIKI_PARSER_VERSION));
         touchRecord(movie);
         changedMovieIds.push(String(movie.id));
       } catch(error) {
+        // A fetch error may be transient, so don't permanently skip — but
+        // count failures so a title that reliably errors backs off instead of
+        // retrying on the same short cooldown forever.
+        movie.receptionBackfillFailCount = Number(movie.receptionBackfillFailCount || 0) + 1;
         movie.receptionBackfillAttemptedAt = nowStamp();
         touchRecord(movie);
         changedMovieIds.push(String(movie.id));
@@ -5473,6 +5504,7 @@ function markAiBatchRetryFailure(movie, error) {
     promptVersion:AI_TAG_PROMPT_VERSION,
     storyHash:aiStoryHash(movie.storyText),
     error:message,
+    failCount:Number(movie.aiTagging?.failCount || 0) + 1,
     attemptedAt:nowStamp()
   };
   movie.retagStatus = 'needs-ai-tags';
@@ -6068,14 +6100,30 @@ function taggedUnseenPoolCount() {
   ).length;
 }
 
+// Escalating backoff so a title AI tagging can't finish (a story too thin to
+// ground even the reduced minimum, or repeated model failures) stops churning
+// every 2 minutes forever. It never gives up entirely — the final tier retries
+// about daily — so it can still recover if the story is enriched or quota frees.
+const AI_BACKGROUND_RETRY_BACKOFF_MS = [
+  2 * 60 * 1000,        // 1st retry: 2 min
+  15 * 60 * 1000,       // 15 min
+  60 * 60 * 1000,       // 1 h
+  6 * 60 * 60 * 1000,   // 6 h
+  24 * 60 * 60 * 1000   // then ~daily
+];
+function aiBackgroundRetryReady(movie, now) {
+  const attemptedAt = Date.parse(movie.aiTagging?.attemptedAt || '') || 0;
+  if (!attemptedAt) return true;
+  const fails = Math.max(0, Number(movie.aiTagging?.failCount || 0));
+  const cooldown = AI_BACKGROUND_RETRY_BACKOFF_MS[Math.min(fails, AI_BACKGROUND_RETRY_BACKOFF_MS.length - 1)];
+  return now - attemptedAt >= cooldown;
+}
+
 function pendingBackgroundAiMovies() {
   const now = Date.now();
   return Object.values(state.movies || {})
     .filter(movie => movie?.storyText && !hasCurrentAiTags(movie) && !movie.hidden)
-    .filter(movie => {
-      const attemptedAt = Date.parse(movie.aiTagging?.attemptedAt || '') || 0;
-      return !attemptedAt || now - attemptedAt >= AI_BACKGROUND_RETRY_MS;
-    })
+    .filter(movie => aiBackgroundRetryReady(movie, now))
     .sort((a, b) => {
       const aTime = Date.parse(a.aiTagging?.attemptedAt || '') || 0;
       const bTime = Date.parse(b.aiTagging?.attemptedAt || '') || 0;
