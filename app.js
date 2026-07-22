@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 60;
+const APP_VERSION = 61;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -5756,10 +5756,9 @@ const GENRE_FILTER_LABELS = Object.fromEntries(GENRE_FILTER_OPTIONS);
 // the toggle never widens the settings bar.
 function genreFilterSummary() {
   const selected = selectedGenreFilters();
-  if (!selected.length) return 'All genres';
-  if (selected.length === 1) return GENRE_FILTER_LABELS[selected[0]] || selected[0];
-  if (selected.length === 2) return selected.map(g => GENRE_FILTER_LABELS[g] || g).join(', ');
-  return `${selected.length} genres`;
+  if (!selected.length) return 'Genres';
+  if (selected.length === 1) return `Genres · ${GENRE_FILTER_LABELS[selected[0]] || selected[0]}`;
+  return `Genres · ${selected.length} selected`;
 }
 
 function setGenreFilters(genres) {
