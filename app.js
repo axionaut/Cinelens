@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 59;
+const APP_VERSION = 60;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -5683,9 +5683,9 @@ function updateControlDeck() {
   if (genreMsLabel) genreMsLabel.textContent=genreFilterSummary();
   const genreMsToggle=document.getElementById('genreMsToggle');
   if (genreMsToggle) genreMsToggle.classList.toggle('has-filter', selectedGenreFilters().length > 0);
-  // If the panel is open, keep its checkboxes/mode in sync.
-  const genrePanel=document.getElementById('genreMsPanel');
-  if (genrePanel && !genrePanel.hidden) renderGenreMenu();
+  // Keep the (static) checkboxes and mode buttons reflecting saved state, even
+  // before the panel is first opened.
+  renderGenreMenu();
   const languageFilter=document.getElementById('languageFilter');
   if (languageFilter && languageFilter.value !== (state.settings.languageFilter || 'all')) languageFilter.value=state.settings.languageFilter || 'all';
   const ratingFilter=document.getElementById('ratingFilter');
@@ -5794,15 +5794,16 @@ function updateGenreMatchMode(mode) {
   updateControlDeck();
 }
 
+// The genre checkboxes live statically in index.html so they always render.
+// This only reflects the current selection into them (checked state + the
+// highlight class) and the active match-mode button.
 function renderGenreMenu() {
-  const options = document.getElementById('genreMsOptions');
-  if (!options) return;
   const selected = new Set(selectedGenreFilters());
-  options.innerHTML = GENRE_FILTER_OPTIONS.map(([value, label]) => `
-    <label class="genre-ms-option${selected.has(value) ? ' checked' : ''}">
-      <input type="checkbox" value="${value}"${selected.has(value) ? ' checked' : ''} onchange="updateGenreFilter('${value}', this.checked)">
-      <span>${label}</span>
-    </label>`).join('');
+  document.querySelectorAll('#genreMsOptions input[type="checkbox"]').forEach(cb => {
+    cb.checked = selected.has(cb.value);
+    const label = cb.closest('.genre-ms-option');
+    if (label) label.classList.toggle('checked', cb.checked);
+  });
   document.querySelectorAll('#genreMsPanel .genre-ms-mode-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.mode === (state.settings.genreMatchMode || 'or'));
   });

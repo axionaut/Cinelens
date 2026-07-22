@@ -7,7 +7,7 @@
 <style>html,body{margin:0;min-height:100%;background:#080808;color:#f2f2f3}</style>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230a0a0a'/%3E%3Ccircle cx='32' cy='32' r='21' fill='none' stroke='%23e5383b' stroke-width='6'/%3E%3Ccircle cx='32' cy='32' r='7' fill='%23e5383b'/%3E%3Cpath d='M32 11v10M32 43v10M11 32h10M43 32h10' stroke='%23e5383b' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=59">
+<link rel="stylesheet" href="styles.css?v=60">
 </head>
 <body>
 
@@ -110,7 +110,28 @@
           <button type="button" class="genre-ms-mode-btn" data-mode="or" onclick="updateGenreMatchMode('or')">Match any</button>
           <button type="button" class="genre-ms-mode-btn" data-mode="and" onclick="updateGenreMatchMode('and')">Match all</button>
         </div>
-        <div class="genre-ms-options" id="genreMsOptions"></div>
+        <div class="genre-ms-options" id="genreMsOptions">
+          <label class="genre-ms-option"><input type="checkbox" value="action" onchange="updateGenreFilter('action',this.checked)"><span>Action</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="adventure" onchange="updateGenreFilter('adventure',this.checked)"><span>Adventure</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="animation" onchange="updateGenreFilter('animation',this.checked)"><span>Animation</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="comedy" onchange="updateGenreFilter('comedy',this.checked)"><span>Comedy</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="crime" onchange="updateGenreFilter('crime',this.checked)"><span>Crime</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="documentary" onchange="updateGenreFilter('documentary',this.checked)"><span>Documentary</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="drama" onchange="updateGenreFilter('drama',this.checked)"><span>Drama</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="family" onchange="updateGenreFilter('family',this.checked)"><span>Family</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="fantasy" onchange="updateGenreFilter('fantasy',this.checked)"><span>Fantasy</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="historical" onchange="updateGenreFilter('historical',this.checked)"><span>Historical</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="horror" onchange="updateGenreFilter('horror',this.checked)"><span>Horror</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="kids" onchange="updateGenreFilter('kids',this.checked)"><span>Kids</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="musical" onchange="updateGenreFilter('musical',this.checked)"><span>Musical</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="mystery" onchange="updateGenreFilter('mystery',this.checked)"><span>Mystery</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="romance" onchange="updateGenreFilter('romance',this.checked)"><span>Romance</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="science-fiction" onchange="updateGenreFilter('science-fiction',this.checked)"><span>Science fiction</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="sports" onchange="updateGenreFilter('sports',this.checked)"><span>Sports</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="thriller" onchange="updateGenreFilter('thriller',this.checked)"><span>Thriller</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="war" onchange="updateGenreFilter('war',this.checked)"><span>War</span></label>
+          <label class="genre-ms-option"><input type="checkbox" value="western" onchange="updateGenreFilter('western',this.checked)"><span>Western</span></label>
+        </div>
         <div class="genre-ms-foot">
           <button type="button" class="genre-ms-clear" onclick="clearGenreFilters()">Clear</button>
         </div>
@@ -249,6 +270,6 @@
 <button class="go-top-btn" id="goTopBtn" onclick="goToTop()" title="Go to top">↑</button>
 
 <script async src="https://accounts.google.com/gsi/client"></script>
-<script src="app.js?v=59"></script>
+<script src="app.js?v=60"></script>
 </body>
 </html>

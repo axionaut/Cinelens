@@ -111,11 +111,14 @@
   .genre-ms-mode{display:flex;gap:6px;padding:9px 10px;border-bottom:1px solid rgba(255,255,255,.08)}
   .genre-ms-mode-btn{flex:1;padding:5px 6px;border:1px solid var(--border);border-radius:5px;background:transparent;color:var(--muted);font-family:'DM Mono',monospace;font-size:11px;cursor:pointer;transition:all .12s}
   .genre-ms-mode-btn.active{border-color:var(--accent);background:rgba(var(--accent-rgb),.12);color:var(--accent)}
-  .genre-ms-options{overflow-y:auto;padding:5px 4px;display:flex;flex-direction:column}
-  .genre-ms-option{display:flex;align-items:center;gap:9px;padding:6px 9px;border-radius:5px;cursor:pointer;font-size:13px;color:var(--text)}
+  .genre-ms-options{overflow-y:auto;padding:5px 4px;display:flex;flex-direction:column;min-height:0}
+  /* High-specificity + explicit visibility so the generic `.settings-bar label`
+     rule (muted, 14px) can't dim these and nothing collapses them. */
+  .genre-ms-panel .genre-ms-option{display:flex;align-items:center;gap:9px;margin:0;padding:6px 9px;border-radius:5px;cursor:pointer;font-size:13px;color:var(--text);visibility:visible;opacity:1}
+  .genre-ms-panel .genre-ms-option span{color:inherit;font-size:13px}
   .genre-ms-option:hover{background:rgba(255,255,255,.05)}
-  .genre-ms-option.checked{color:var(--accent)}
-  .genre-ms-option input{accent-color:var(--accent);width:15px;height:15px;cursor:pointer;flex:0 0 auto}
+  .genre-ms-panel .genre-ms-option.checked,.genre-ms-panel .genre-ms-option.checked span{color:var(--accent)}
+  .genre-ms-panel .genre-ms-option input{accent-color:var(--accent);width:15px;height:15px;min-width:15px;cursor:pointer;flex:0 0 auto;margin:0;opacity:1}
   .genre-ms-foot{display:flex;justify-content:flex-end;padding:8px 10px;border-top:1px solid rgba(255,255,255,.08)}
   .genre-ms-clear{padding:4px 12px;border:1px solid var(--border);border-radius:5px;background:transparent;color:var(--muted);font-family:'DM Mono',monospace;font-size:11px;cursor:pointer}
   .genre-ms-clear:hover{border-color:var(--accent);color:var(--accent)}
