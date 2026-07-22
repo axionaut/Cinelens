@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 61;
+const APP_VERSION = 62;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -5679,13 +5679,13 @@ function updateControlDeck() {
     modeBtn.classList.toggle('active', !!state.settings.tagDeleteMode);
     modeBtn.textContent=state.settings.tagDeleteMode ? 'Tag clicks: remove' : 'Tag clicks: explore';
   }
-  const genreMsLabel=document.getElementById('genreMsLabel');
-  if (genreMsLabel) genreMsLabel.textContent=genreFilterSummary();
-  const genreMsToggle=document.getElementById('genreMsToggle');
-  if (genreMsToggle) genreMsToggle.classList.toggle('has-filter', selectedGenreFilters().length > 0);
-  // Keep the (static) checkboxes and mode buttons reflecting saved state, even
-  // before the panel is first opened.
-  renderGenreMenu();
+  const genreFilter=document.getElementById('genreFilter');
+  if (genreFilter) {
+    const selected = new Set(selectedGenreFilters());
+    [...genreFilter.options].forEach(option => { option.selected = selected.has(option.value); });
+  }
+  const genreMatchMode=document.getElementById('genreMatchMode');
+  if (genreMatchMode) genreMatchMode.value=state.settings.genreMatchMode || 'or';
   const languageFilter=document.getElementById('languageFilter');
   if (languageFilter && languageFilter.value !== (state.settings.languageFilter || 'all')) languageFilter.value=state.settings.languageFilter || 'all';
   const ratingFilter=document.getElementById('ratingFilter');
@@ -5743,24 +5743,6 @@ function normaliseFilterAndSortSettings() {
   state.settings.sortDirection = state.settings.sortDirection === 'asc' ? 'asc' : 'desc';
 }
 
-const GENRE_FILTER_OPTIONS = [
-  ['action','Action'],['adventure','Adventure'],['animation','Animation'],['comedy','Comedy'],
-  ['crime','Crime'],['documentary','Documentary'],['drama','Drama'],['family','Family'],
-  ['fantasy','Fantasy'],['historical','Historical'],['horror','Horror'],['kids','Kids'],
-  ['musical','Musical'],['mystery','Mystery'],['romance','Romance'],['science-fiction','Science fiction'],
-  ['sports','Sports'],['thriller','Thriller'],['war','War'],['western','Western']
-];
-const GENRE_FILTER_LABELS = Object.fromEntries(GENRE_FILTER_OPTIONS);
-
-// A single genre reads as its name; a couple fit; more collapse to a count so
-// the toggle never widens the settings bar.
-function genreFilterSummary() {
-  const selected = selectedGenreFilters();
-  if (!selected.length) return 'Genres';
-  if (selected.length === 1) return `Genres · ${GENRE_FILTER_LABELS[selected[0]] || selected[0]}`;
-  return `Genres · ${selected.length} selected`;
-}
-
 function setGenreFilters(genres) {
   const clean = [...new Set((genres || []).map(v => String(v || '').trim().toLowerCase()).filter(Boolean))];
   state.settings.genreFilters = clean;
@@ -5771,19 +5753,18 @@ function setGenreFilters(genres) {
   updateControlDeck();
 }
 
-// Called from the checkbox onchange. `genre` toggles; a plain string value from
-// a legacy caller (or the old single-select) sets that one genre.
 function updateGenreFilter(genre, checked) {
   const value = typeof genre === 'string' ? genre.trim().toLowerCase() : '';
-  if (!value || value === 'all') { setGenreFilters([]); return; }
+  if (!value) {
+    const control=document.getElementById('genreFilter');
+    setGenreFilters(control ? [...control.selectedOptions].map(option => option.value) : []);
+    return;
+  }
+  if (value === 'all') { setGenreFilters([]); return; }
   const current = new Set(selectedGenreFilters());
   const nowChecked = checked === undefined ? !current.has(value) : !!checked;
   if (nowChecked) current.add(value); else current.delete(value);
   setGenreFilters([...current]);
-}
-
-function clearGenreFilters() {
-  setGenreFilters([]);
 }
 
 function updateGenreMatchMode(mode) {
@@ -5791,51 +5772,6 @@ function updateGenreMatchMode(mode) {
   saveViewState();
   renderActiveCards();
   updateControlDeck();
-}
-
-// The genre checkboxes live statically in index.html so they always render.
-// This only reflects the current selection into them (checked state + the
-// highlight class) and the active match-mode button.
-function renderGenreMenu() {
-  const selected = new Set(selectedGenreFilters());
-  document.querySelectorAll('#genreMsOptions input[type="checkbox"]').forEach(cb => {
-    cb.checked = selected.has(cb.value);
-    const label = cb.closest('.genre-ms-option');
-    if (label) label.classList.toggle('checked', cb.checked);
-  });
-  document.querySelectorAll('#genreMsPanel .genre-ms-mode-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.mode === (state.settings.genreMatchMode || 'or'));
-  });
-}
-
-function closeGenreMenu() {
-  const panel = document.getElementById('genreMsPanel');
-  const toggle = document.getElementById('genreMsToggle');
-  if (panel) panel.hidden = true;
-  if (toggle) toggle.setAttribute('aria-expanded', 'false');
-  document.removeEventListener('click', handleGenreMenuOutsideClick, true);
-}
-
-function handleGenreMenuOutsideClick(event) {
-  const root = document.getElementById('genreMultiselect');
-  if (root && !root.contains(event.target)) closeGenreMenu();
-}
-
-function toggleGenreMenu(event) {
-  if (event) event.stopPropagation();
-  const panel = document.getElementById('genreMsPanel');
-  const toggle = document.getElementById('genreMsToggle');
-  if (!panel) return;
-  const open = panel.hidden;
-  if (open) {
-    renderGenreMenu();
-    panel.hidden = false;
-    if (toggle) toggle.setAttribute('aria-expanded', 'true');
-    // Capture-phase so a click anywhere else (including other controls) closes it.
-    setTimeout(() => document.addEventListener('click', handleGenreMenuOutsideClick, true), 0);
-  } else {
-    closeGenreMenu();
-  }
 }
 
 // Card width is fixed (compact only, per Nitin's request — no size picker).
