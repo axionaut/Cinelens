@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 62;
+const APP_VERSION = 63;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -1919,7 +1919,7 @@ function renderWatchPlatformPicker() {
 
 window.addEventListener('DOMContentLoaded', async () => {
   syncMaintenancePanelPlacement();
-  window.addEventListener('resize', syncMaintenancePanelPlacement);
+  window.addEventListener('resize', onResizeEvent);
   renderAppVersion();
   renderWatchPlatformPicker();
   initExpandedCardObserver();
@@ -1960,7 +1960,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // authority to start collection. Existing offline-only libraries can still run
   // when Drive was never enabled on that browser.
   finalizeStartupAfterDrive({allowCollection: restored || (!state.drive.enabled && startupInitialLibraryPresent)});
-  window.addEventListener('scroll', handleScroll);
+  window.addEventListener('scroll', onScrollEvent, {passive:true});
 });
 
 // ─────────────────────────────────────────────
@@ -2557,6 +2557,43 @@ function wrongPickMatches(value) {
   return Object.values(state.wrongPicks || {}).some(item => recordMatchesDiscoveryCandidate(item, value));
 }
 
+// v63: hiddenTitleMatches/wrongPickMatches walk their whole record map per
+// call, and a discovery scan calls both once per scanned title (up to 900 per
+// lane, synchronously, while the user is clicking). These build the same
+// answer as one reusable index per discovery pass.
+//
+// The lookup mirrors recordMatchesDiscoveryCandidate exactly:
+//   - both sides carry a page ID  -> page IDs must be equal
+//   - otherwise                   -> the candidate title key must equal one of
+//                                     the record's title/wikiTitle/pageTitle
+// so a candidate WITH a page ID can still match a record that has none by
+// title, which is why the title keys are indexed twice.
+function buildDiscoveryExclusionIndex(records) {
+  const pageIds = new Set();
+  const titleKeysAll = new Set();
+  const titleKeysWithoutPage = new Set();
+  Object.values(records || {}).forEach(record => {
+    if (!record) return;
+    const pageId = candidatePageId(record);
+    if (pageId) pageIds.add(pageId);
+    [record.title, record.wikiTitle, record.pageTitle].forEach(title => {
+      const key = normaliseTitleKey(title);
+      if (!key) return;
+      titleKeysAll.add(key);
+      if (!pageId) titleKeysWithoutPage.add(key);
+    });
+  });
+  return {pageIds, titleKeysAll, titleKeysWithoutPage};
+}
+
+function discoveryExclusionIndexMatches(index, candidate) {
+  if (!index || !candidate) return false;
+  const key = normaliseTitleKey(typeof candidate === 'string' ? candidate : candidate?.title);
+  const pageId = candidatePageId(typeof candidate === 'string' ? null : candidate);
+  if (pageId) return index.pageIds.has(pageId) || (!!key && index.titleKeysWithoutPage.has(key));
+  return !!key && index.titleKeysAll.has(key);
+}
+
 function isHindiShowRecord(movie) {
   return !!movie?.format && String(movie.language || '').trim().toLowerCase() === 'hindi';
 }
@@ -2916,9 +2953,20 @@ function discoveryCandidateIdentity(candidate) {
   return pageId ? `page:${pageId}` : `title:${normaliseTitleKey(candidate?.title || candidate)}`;
 }
 
+// v63: this allocated an Object.entries() pair array of the whole ledger (up
+// to DISCOVERY_LEDGER_CAP) on EVERY candidate, and once the ledger was full it
+// also sorted that array on every candidate — inside a discovery scan that
+// walks up to 900 titles per lane with no yield. The cap is a storage bound,
+// not a per-title invariant, so the trim is now amortized: it only does the
+// entries+sort work once the ledger drifts a slack window past the cap, then
+// cuts straight back to the cap. Deliberately reads the live object (no cached
+// size) because state.discoveryLedger is reassigned wholesale by Drive
+// restore, dataset merges and Reset.
+const DISCOVERY_LEDGER_TRIM_SLACK = 200;
 function trimDiscoveryLedger() {
-  const entries = Object.entries(state.discoveryLedger || {});
-  if (entries.length <= DISCOVERY_LEDGER_CAP) return;
+  const ledger = state.discoveryLedger || {};
+  if (Object.keys(ledger).length <= DISCOVERY_LEDGER_CAP + DISCOVERY_LEDGER_TRIM_SLACK) return;
+  const entries = Object.entries(ledger);
   entries.sort(([,a],[,b]) => Date.parse(a?.lastSeenAt || '') - Date.parse(b?.lastSeenAt || ''))
     .slice(0, entries.length - DISCOVERY_LEDGER_CAP)
     .forEach(([key]) => delete state.discoveryLedger[key]);
@@ -2930,6 +2978,7 @@ function noteDiscoveryEncounter(candidate, status, reason='') {
   const key = discoveryCandidateIdentity(candidate);
   if (!key || key.endsWith(':')) return;
   const previous = state.discoveryLedger[key] || {};
+  const isNewKey = !state.discoveryLedger[key];
   const stamp = nowStamp();
   state.discoveryLedger[key] = {
     pageId:candidatePageId(candidate),
@@ -2943,7 +2992,9 @@ function noteDiscoveryEncounter(candidate, status, reason='') {
     firstSeenAt:previous.firstSeenAt || stamp,
     lastSeenAt:stamp
   };
-  trimDiscoveryLedger();
+  // Re-noting an existing candidate cannot grow the ledger, so it cannot need
+  // a trim either.
+  if (isNewKey) trimDiscoveryLedger();
 }
 
 function discoveryCandidateDecision(title, lane, existing, seenThisRun, opts={}) {
@@ -2955,8 +3006,17 @@ function discoveryCandidateDecision(title, lane, existing, seenThisRun, opts={})
   if (obviousNonMovieTitle(candidateTitle)) return {allowed:false, reason:'non-article namespace'};
   if (pageId && existing.pageIds.has(pageId)) return {allowed:false, reason:'active page ID'};
   if (!pageId && existing.titles.has(clean)) return {allowed:false, reason:'active fallback title'};
-  if (hiddenTitleMatches(title)) return {allowed:false, reason:'hidden identity'};
-  if (wrongPickMatches(title)) return {allowed:false, reason:'manual removal identity'};
+  // Use the per-pass indexes when the caller built them (nextDiscoveryCandidates
+  // does); fall back to the direct scans for one-off callers such as
+  // auditTitleDiscovery and the harness fixtures.
+  const hiddenHit = existing.hiddenIndex
+    ? discoveryExclusionIndexMatches(existing.hiddenIndex, title)
+    : hiddenTitleMatches(title);
+  if (hiddenHit) return {allowed:false, reason:'hidden identity'};
+  const wrongPickHit = existing.wrongPickIndex
+    ? discoveryExclusionIndexMatches(existing.wrongPickIndex, title)
+    : wrongPickMatches(title);
+  if (wrongPickHit) return {allowed:false, reason:'manual removal identity'};
   const seenKey = discoveryCandidateIdentity(title);
   if (seenThisRun.has(seenKey)) return {allowed:false, reason:'already seen this run'};
   const ledgerRecord = state.discoveryLedger?.[seenKey];
@@ -3043,7 +3103,10 @@ async function nextDiscoveryCandidates(mode, limit, seenThisRun=new Set()) {
   const knownRecords = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})];
   const existing = {
     titles:new Set(knownRecords.flatMap(movie => [movie.title, movie.wikiTitle, movie.pageTitle].map(normaliseTitleKey).filter(Boolean))),
-    pageIds:new Set(knownRecords.map(wikiPageIdFromMovie).filter(Boolean))
+    pageIds:new Set(knownRecords.map(wikiPageIdFromMovie).filter(Boolean)),
+    // Built once per discovery pass instead of re-scanned per scanned title.
+    hiddenIndex:buildDiscoveryExclusionIndex(state.hiddenTitles),
+    wrongPickIndex:buildDiscoveryExclusionIndex(state.wrongPicks)
   };
   const laneLimit = Math.max(1, Math.ceil(limit / Math.max(1, lanes.length)));
   const out = [];
@@ -3230,6 +3293,14 @@ async function expandPool(manual=true) {
     if (movie?.id) pendingCollectionSaveIds.add(String(movie.id));
   };
 
+  // v63: the per-batch discovery checkpoint below used to call
+  // saveLocalState({preserveUpdatedAt:true}) with no changedMovieIds, which
+  // means a FULL IndexedDB save: JSON.stringify() of every stored title, once
+  // per batch of 8 candidates, for the whole collection run. It only actually
+  // needed to persist the discovery cursor (which lives in the profile payload
+  // and is compared on every save, scoped or not) plus the titles this batch
+  // touched — which is exactly what a scoped collection save writes. This is
+  // the collection hot path spec 2.4 explicitly allows to be scoped.
   const saveCollectionState = (opts={}) => {
     const changedMovieIds = [...pendingCollectionSaveIds];
     pendingCollectionSaveIds.clear();
@@ -3409,8 +3480,8 @@ async function expandPool(manual=true) {
           state.discoveryCursor[laneKey] = checkpoint;
         });
         ensureDiscoveryCursor();
-        saveLocalState({preserveUpdatedAt:true});
-      } else saveLocalState({preserveUpdatedAt:true});
+        saveCollectionState({preserveUpdatedAt:true});
+      } else saveCollectionState({preserveUpdatedAt:true});
 
       if (!fetchAbortRequested) await flushPendingAiMovies();
     }
@@ -4355,20 +4426,71 @@ function parseMovieLensRatingsCsv(text) {
   }, []);
 }
 
-function movieLensLibraryMatch(row, {includePending=true}={}) {
-  const records = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})]
-    .filter(movie => includePending || !movie?.movielensImportPending);
+// v63: movieLensLibraryMatch used to rebuild an array of the ENTIRE library
+// (movies + hidden, spread and filtered) on every call, then scan it linearly.
+// It is called once per CSV row on import (1,158 rows) and once per queued row
+// on every startup via ensureMovieLensQueueRecords — O(rows x library), which
+// froze the tab for seconds. This index is built once and answers every row in
+// constant time. It reproduces the old result exactly, including "first record
+// in movies-then-hidden iteration order wins", via the stored ordinal.
+function buildMovieLensMatchIndex() {
+  const byTmdb = new Map();
+  const byTitleYear = new Map();
+  let ordinal = 0;
+  const add = movie => {
+    if (!movie) return;
+    const entry = {movie, ordinal:ordinal++, pending:!!movie.movielensImportPending};
+    const tmdbId = Number(movie.tmdbId);
+    if (Number.isFinite(tmdbId) && tmdbId > 0) {
+      if (!byTmdb.has(tmdbId)) byTmdb.set(tmdbId, []);
+      byTmdb.get(tmdbId).push(entry);
+    }
+    const year = Number(movie.year);
+    // A record without a usable year could never satisfy the old
+    // |record.year - row.year| <= 1 test, so it is not title-indexed.
+    if (!Number.isFinite(year)) return;
+    const keys = new Set();
+    [movie.title, movie.wikiTitle, movie.pageTitle].forEach(value => {
+      const canonical = canonicalTitle(value);
+      if (canonical) keys.add(`${canonical}|${year}`);
+    });
+    keys.forEach(key => {
+      if (!byTitleYear.has(key)) byTitleYear.set(key, []);
+      byTitleYear.get(key).push(entry);
+    });
+  };
+  Object.values(state.movies || {}).forEach(add);
+  Object.values(state.hiddenTitles || {}).forEach(add);
+  return {byTmdb, byTitleYear};
+}
+
+function firstMovieLensEntry(entries, includePending) {
+  let best = null;
+  (entries || []).forEach(entry => {
+    if (!includePending && entry.pending) return;
+    if (!best || entry.ordinal < best.ordinal) best = entry;
+  });
+  return best;
+}
+
+function movieLensLibraryMatch(row, {includePending=true, index=null}={}) {
+  const matchIndex = index || buildMovieLensMatchIndex();
   const tmdbId = Number(row?.tmdbId);
   if (Number.isFinite(tmdbId) && tmdbId > 0) {
-    const byTmdb = records.find(movie => Number(movie?.tmdbId) === tmdbId);
-    if (byTmdb) return byTmdb;
+    const byTmdb = firstMovieLensEntry(matchIndex.byTmdb.get(tmdbId), includePending);
+    if (byTmdb) return byTmdb.movie;
   }
-  if (!row?.title || !Number.isFinite(Number(row.year))) return null;
-  return records.find(movie => {
-    const titleMatches = [movie?.title, movie?.wikiTitle, movie?.pageTitle]
-      .some(value => sameCanonicalTitle(value, row.title));
-    return titleMatches && Math.abs(Number(movie?.year) - Number(row.year)) <= 1;
-  }) || null;
+  const rowYear = Number(row?.year);
+  const canonical = canonicalTitle(row?.title);
+  if (!canonical || !Number.isFinite(rowYear)) return null;
+  // Same +/-1 year tolerance as before; the lowest ordinal across the three
+  // buckets is the record the old linear scan would have found first.
+  let best = null;
+  for (let year = rowYear - 1; year <= rowYear + 1; year++) {
+    const entry = firstMovieLensEntry(matchIndex.byTitleYear.get(`${canonical}|${year}`), includePending);
+    if (entry && (!best || entry.ordinal < best.ordinal)) best = entry;
+  }
+  return best ? best.movie : null;
 }
 
 function movieLensStubId(row) {
@@ -4407,8 +4529,13 @@ function ensureMovieLensQueueRecords() {
   const queue = state.meta?.movielensImportQueue;
   if (!Array.isArray(queue)) return [];
   const changedMovieIds = [];
+  // Safe to reuse one index across the loop: stageMovieLensRecord only ever
+  // adds records flagged movielensImportPending, and includePending:false
+  // excludes those anyway — so a record staged here can never be the match for
+  // a later row.
+  const index = buildMovieLensMatchIndex();
   queue.forEach(row => {
-    const existing = movieLensLibraryMatch(row, {includePending:false});
+    const existing = movieLensLibraryMatch(row, {includePending:false, index});
     if (existing) return;
     const before = row.recordId;
     const record = stageMovieLensRecord(row);
@@ -4673,8 +4800,11 @@ async function importMovieLensRatingsCsv(file) {
       state.meta.movielensImportSkips = [];
       state.meta.movielensImportSummary = {total:rows.length, checkpoint:0, imported:0, skipped:0};
     }
+    // One index for the whole file (see ensureMovieLensQueueRecords for why a
+    // single index stays correct while rows are being staged).
+    const matchIndex = buildMovieLensMatchIndex();
     rows.forEach(row => {
-      const existing = movieLensLibraryMatch(row, {includePending:false});
+      const existing = movieLensLibraryMatch(row, {includePending:false, index:matchIndex});
       if (existing) {
         if (!sameSource) state.meta.movielensImportSummary.checkpoint++;
         if (applyMovieLensRating(existing, row.rating)) changedMovieIds.push(String(existing.id));
@@ -5430,22 +5560,50 @@ function nextPaint() {
   });
 }
 
+// v63: every progress tick unconditionally rewrote three text nodes, a width
+// and — inside a rAF — read el.offsetHeight (a forced synchronous layout) and
+// then wrote a custom property on :root, which invalidates style for the WHOLE
+// document. Background loops tick this many times a second, so the progress
+// bar itself was a steady source of layout churn. Each write is now skipped
+// when the value has not actually changed, and the offsetHeight measurement
+// only re-arms when the bar's text content changed (its height is what that
+// property tracks).
+let lastFetchProgressHeight = '';
+let fetchProgressMeasureQueued = false;
+function measureFetchProgressHeight(el) {
+  if (fetchProgressMeasureQueued) return;
+  fetchProgressMeasureQueued = true;
+  requestAnimationFrame(() => {
+    fetchProgressMeasureQueued = false;
+    // hideFetchProgress may have run between arming and firing; measuring a
+    // hidden strip would re-add the spacing it just cleared.
+    if (!el.isConnected || !el.classList.contains('visible')) return;
+    const next = `${el.offsetHeight + 10}px`;
+    if (next === lastFetchProgressHeight) return;
+    lastFetchProgressHeight = next;
+    document.documentElement.style.setProperty('--fetch-progress-height', next);
+  });
+}
 function showFetchProgress(label, pct, sub) {
   const el = document.getElementById('fetchProgress');
   if (!el) return;
   const safePct = Math.max(0, Math.min(100, Number(pct) || 0));
-  el.classList.add('visible');
-  el.setAttribute('aria-busy', 'true');
+  // classList.add rewrites the class attribute even when the token is already
+  // present, so an unguarded add is a real attribute mutation on every tick.
+  if (!el.classList.contains('visible')) el.classList.add('visible');
+  if (el.getAttribute('aria-busy') !== 'true') el.setAttribute('aria-busy', 'true');
   const labelEl = document.getElementById('fetchLabel');
   const fillEl = document.getElementById('fetchFill');
   const subEl = document.getElementById('fetchSub');
-  if (labelEl) labelEl.textContent = label || 'Working…';
-  if (fillEl) fillEl.style.width = `${safePct}%`;
-  if (subEl) subEl.textContent = sub || '';
-  document.body.classList.add('fetching');
-  requestAnimationFrame(() => {
-    document.documentElement.style.setProperty('--fetch-progress-height', `${el.offsetHeight + 10}px`);
-  });
+  const nextLabel = label || 'Working…';
+  const nextSub = sub || '';
+  const nextWidth = `${safePct}%`;
+  let textChanged = false;
+  if (labelEl && labelEl.textContent !== nextLabel) { labelEl.textContent = nextLabel; textChanged = true; }
+  if (fillEl && fillEl.style.width !== nextWidth) fillEl.style.width = nextWidth;
+  if (subEl && subEl.textContent !== nextSub) { subEl.textContent = nextSub; textChanged = true; }
+  if (!document.body.classList.contains('fetching')) document.body.classList.add('fetching');
+  if (textChanged || !lastFetchProgressHeight) measureFetchProgressHeight(el);
 }
 function hideFetchProgress() {
   const el = document.getElementById('fetchProgress');
@@ -5454,6 +5612,7 @@ function hideFetchProgress() {
     el.setAttribute('aria-busy', 'false');
   }
   document.body.classList.remove('fetching');
+  lastFetchProgressHeight = '';
   document.documentElement.style.removeProperty('--fetch-progress-height');
 }
 
@@ -5779,8 +5938,13 @@ function updateGenreMatchMode(mode) {
 // hardcoded number.
 const CARD_MIN_WIDTH_PX = 200;
 
+// Called from updateControlDeck on every render, but the value is a constant —
+// and writing a custom property on :root invalidates style for the entire
+// document. Write it only when it isn't already the value in effect.
 function applyCardSize() {
-  document.documentElement.style.setProperty('--card-min-width', CARD_MIN_WIDTH_PX + 'px');
+  const next = CARD_MIN_WIDTH_PX + 'px';
+  if (document.documentElement.style.getPropertyValue('--card-min-width') === next) return;
+  document.documentElement.style.setProperty('--card-min-width', next);
 }
 
 // Which platforms to check availability for is a personal viewing-service
@@ -6151,7 +6315,14 @@ function updateLibraryHealth() {
   const tmdbBtn = document.getElementById('tmdbBackfillToggleBtn');
   if (tmdbBtn) {
     const paused = !!state.settings.tmdbBackfillPaused;
-    const remaining = tmdbBackfillCandidates().length;
+    // v63: this used tmdbBackfillCandidates().length — which runs
+    // sortByBackfillPriority() -> scoreMovies() and builds a Map of the whole
+    // scored library, just to print a number. updateLibraryHealth() runs on
+    // EVERY render (render -> maybeAutoExpandPool -> updateLibraryHealth) and
+    // after every background batch, so a button label was paying for a full
+    // taste re-score on every paint. tmdbBackfillPendingCount() exists for
+    // exactly this and was already used by the status text above.
+    const remaining = tmdbBackfillPendingCount();
     // "Pause TMDB refresh" with no qualifier reads as "something is running
     // right now" — but the button previously showed that label purely from
     // the paused flag, even with zero pending titles and nothing running.
@@ -6537,8 +6708,11 @@ function updateVisibleSections() {
   setSectionVisibility('.rated-only', ratedMode);
   setSectionVisibility('.watchlist-only', recentMode);
   setSectionVisibility('.tag-only', tagMode);
-  document.querySelectorAll('.audit-only').forEach(el => el.style.display = 'none');
-  document.querySelectorAll('.control-deck').forEach(el => el.style.display = '');
+  // Assigning style.display invalidates layout for that element even when the
+  // value is identical, and this runs on every render — including every render
+  // a background batch triggers. Only write on a real change.
+  document.querySelectorAll('.audit-only').forEach(el => { if (el.style.display !== 'none') el.style.display = 'none'; });
+  document.querySelectorAll('.control-deck').forEach(el => { if (el.style.display !== '') el.style.display = ''; });
 
   if (activeTab === 'pool') {
     showAuditSection(['poolSep','poolHeader','poolGrid']);
@@ -9917,6 +10091,33 @@ function flushPendingDriveSync() {
 // ─────────────────────────────────────────────
 function recommendationPageActive() {
   return activeTab === 'all' || activeTab === 'movie' || activeTab === 'show';
+}
+
+// v63: this ran on EVERY scroll event, and it reads
+// document.documentElement.scrollHeight — a forced synchronous layout. On a
+// grid of a few hundred cards a browser fires scroll far faster than it
+// paints, so the reflow was being paid many times per frame: the most
+// directly felt "jitter" in the app. The work is now coalesced to at most one
+// run per animation frame, and the listener is passive so the browser never
+// has to wait on it before scrolling.
+let scrollFrameQueued = false;
+function onScrollEvent() {
+  if (scrollFrameQueued) return;
+  scrollFrameQueued = true;
+  requestAnimationFrame(() => {
+    scrollFrameQueued = false;
+    handleScroll();
+  });
+}
+
+let resizeFrameQueued = false;
+function onResizeEvent() {
+  if (resizeFrameQueued) return;
+  resizeFrameQueued = true;
+  requestAnimationFrame(() => {
+    resizeFrameQueued = false;
+    syncMaintenancePanelPlacement();
+  });
 }
 
 function handleScroll() {
