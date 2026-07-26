@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 63;
+const APP_VERSION = 64;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -257,6 +257,8 @@ const MOVIELENS_IMPORT_BATCH_SIZE = 48;
 const MOVIELENS_IMPORT_BATCH_GAP_MS = 1500;
 const IMPORT_PROGRESS_THROTTLE_MS = 150;
 const CARD_REFRESH_BATCH_SIZE = 20;
+const BACKGROUND_SYNC_DEBOUNCE_MS = 30 * 1000;
+let backgroundChangesSinceRender = 0;
 const WIKI_PARSER_VERSION = 6;
 const REC_INFINITE_PAGE_SIZE = 20;
 const STRONG_REC_TARGET = 40;
@@ -268,6 +270,17 @@ function formatStrongMatchCount(strongCount, target) {
   const count = Number(strongCount || 0);
   const goal = Number(target || 0);
   return count >= goal ? `${count} strong matches (past the ${goal} target)` : `${count}/${goal} strong matches`;
+}
+
+function checkpointBackgroundUi(changedCount=0, force=false) {
+  backgroundChangesSinceRender += Math.max(0, Number(changedCount) || 0);
+  if (force || backgroundChangesSinceRender >= CARD_REFRESH_BATCH_SIZE) {
+    backgroundChangesSinceRender = 0;
+    render();
+    return true;
+  }
+  updateLibraryHealth();
+  return false;
 }
 const STRONG_REC_REFILL_THRESHOLD = 20;
 const STRONG_REC_MIN_OVERLAP = 3;
@@ -4129,7 +4142,8 @@ async function runReceptionBackfill() {
   const candidates = receptionBackfillCandidates();
   if (!candidates.length) {
     // Sweep finished — apply any refresh the throttle was holding.
-    if (flushTasteModelInvalidation()) render();
+    const modelChanged = flushTasteModelInvalidation();
+    if (modelChanged || backgroundChangesSinceRender) checkpointBackgroundUi(0, true);
     return;
   }
   receptionBackfillInProgress = true;
@@ -4195,12 +4209,12 @@ async function runReceptionBackfill() {
     if (changedMovieIds.length) {
       updateReceptionCalibration();
       saveLocalState({preserveUpdatedAt:true, changedMovieIds});
-      queueDriveSync();
+      queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
       // Throttled so a long reception sweep doesn't re-score the library every
       // batch; scheduleReceptionBackfill(9000) below re-enters until no work
       // remains, and the final pass (no candidates) flushes any pending refresh.
       throttledInvalidateTasteModel();
-      render();
+      checkpointBackgroundUi(changedMovieIds.length);
     } else if (flushTasteModelInvalidation()) {
       render();
     }
@@ -4306,7 +4320,10 @@ async function runTmdbBackfill() {
     return;
   }
   const candidates = tmdbBackfillCandidates();
-  if (!candidates.length) return;
+  if (!candidates.length) {
+    if (backgroundChangesSinceRender) checkpointBackgroundUi(0, true);
+    return;
+  }
   tmdbBackfillInProgress = true;
   const changedMovieIds = [];
   const batch = candidates.slice(0, TMDB_BACKFILL_BATCH_SIZE);
@@ -4335,8 +4352,8 @@ async function runTmdbBackfill() {
     }
     if (changedMovieIds.length) {
       saveLocalState({preserveUpdatedAt:true, changedMovieIds});
-      queueDriveSync();
-      render();
+      queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
+      checkpointBackgroundUi(changedMovieIds.length);
     }
   } catch(error) {
     console.warn('TMDB backfill paused', error);
@@ -4754,8 +4771,8 @@ async function runMovieLensImport() {
       computeTagWeights();
       scheduleReceptionCalibrationUpdate();
       saveLocalState({preserveUpdatedAt:true, changedMovieIds:[...changedMovieIds]});
-      queueDriveSync();
-      render();
+      queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
+      updateLibraryHealth();
     }
   } finally {
     movielensImportInProgress = false;
@@ -5562,28 +5579,9 @@ function nextPaint() {
 
 // v63: every progress tick unconditionally rewrote three text nodes, a width
 // and — inside a rAF — read el.offsetHeight (a forced synchronous layout) and
-// then wrote a custom property on :root, which invalidates style for the WHOLE
-// document. Background loops tick this many times a second, so the progress
-// bar itself was a steady source of layout churn. Each write is now skipped
-// when the value has not actually changed, and the offsetHeight measurement
-// only re-arms when the bar's text content changed (its height is what that
-// property tracks).
-let lastFetchProgressHeight = '';
-let fetchProgressMeasureQueued = false;
-function measureFetchProgressHeight(el) {
-  if (fetchProgressMeasureQueued) return;
-  fetchProgressMeasureQueued = true;
-  requestAnimationFrame(() => {
-    fetchProgressMeasureQueued = false;
-    // hideFetchProgress may have run between arming and firing; measuring a
-    // hidden strip would re-add the spacing it just cleared.
-    if (!el.isConnected || !el.classList.contains('visible')) return;
-    const next = `${el.offsetHeight + 10}px`;
-    if (next === lastFetchProgressHeight) return;
-    lastFetchProgressHeight = next;
-    document.documentElement.style.setProperty('--fetch-progress-height', next);
-  });
-}
+// v64 removes that measurement and custom property entirely. The activity
+// surface is fixed outside document flow; ticks only update changed values and
+// never shift sticky offsets or invalidate the card grid.
 function showFetchProgress(label, pct, sub) {
   const el = document.getElementById('fetchProgress');
   if (!el) return;
@@ -5598,12 +5596,9 @@ function showFetchProgress(label, pct, sub) {
   const nextLabel = label || 'Working…';
   const nextSub = sub || '';
   const nextWidth = `${safePct}%`;
-  let textChanged = false;
-  if (labelEl && labelEl.textContent !== nextLabel) { labelEl.textContent = nextLabel; textChanged = true; }
+  if (labelEl && labelEl.textContent !== nextLabel) labelEl.textContent = nextLabel;
   if (fillEl && fillEl.style.width !== nextWidth) fillEl.style.width = nextWidth;
-  if (subEl && subEl.textContent !== nextSub) { subEl.textContent = nextSub; textChanged = true; }
-  if (!document.body.classList.contains('fetching')) document.body.classList.add('fetching');
-  if (textChanged || !lastFetchProgressHeight) measureFetchProgressHeight(el);
+  if (subEl && subEl.textContent !== nextSub) subEl.textContent = nextSub;
 }
 function hideFetchProgress() {
   const el = document.getElementById('fetchProgress');
@@ -5611,18 +5606,23 @@ function hideFetchProgress() {
     el.classList.remove('visible');
     el.setAttribute('aria-busy', 'false');
   }
-  document.body.classList.remove('fetching');
-  lastFetchProgressHeight = '';
-  document.documentElement.style.removeProperty('--fetch-progress-height');
 }
 
 function aiTagCandidates() {
+  const now = Date.now();
   return [
     ...Object.values(state.movies || {}),
     ...Object.values(state.hiddenTitles || {}).filter(movie => movie.storyText)
   ]
     .filter(movie => movie.title && !hasCurrentAiTags(movie))
-    .sort((a,b)=>Number(b.rating || 0)-Number(a.rating || 0)||String(a.title || '').localeCompare(String(b.title || '')));
+    .filter(movie => aiBackgroundRetryReady(movie, now))
+    .sort((a,b) => {
+      const aAttempt = Date.parse(a.aiTagging?.attemptedAt || '') || 0;
+      const bAttempt = Date.parse(b.aiTagging?.attemptedAt || '') || 0;
+      return aAttempt - bAttempt
+        || Number(b.rating || 0) - Number(a.rating || 0)
+        || String(a.title || '').localeCompare(String(b.title || ''));
+    });
 }
 
 async function enrichLegacyTitleForAi(movie) {
@@ -6389,6 +6389,8 @@ async function runBackgroundAiQueue() {
     rebuildTagBrain();
     computeTagWeights();
     saveLocalState();
+    queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
+    checkpointBackgroundUi(batch.length);
     if (Number(result?.failed || 0)) {
       console.info('CineLens AI queue retained pending titles for a later retry.', result);
     }
@@ -6401,6 +6403,7 @@ async function runBackgroundAiQueue() {
         promptVersion: AI_TAG_PROMPT_VERSION,
         storyHash: aiStoryHash(movie.storyText),
         error: message,
+        failCount: Number(movie.aiTagging?.failCount || 0) + 1,
         attemptedAt: nowStamp()
       };
       movie.retagStatus = 'needs-ai-tags';
@@ -6408,6 +6411,8 @@ async function runBackgroundAiQueue() {
       touchRecord(movie);
     });
     saveLocalState();
+    queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
+    checkpointBackgroundUi(batch.length);
     if (isExternalRateLimitError(error)) {
       autoFetchPaused = true;
       showToast('Background collection paused by Gemini rate limit. It will resume when you reopen or resume collection.', 'error');
@@ -6417,8 +6422,8 @@ async function runBackgroundAiQueue() {
   } finally {
     backgroundAiTaggingInProgress = false;
     hideFetchProgress();
-    updateLibraryHealth();
-    render();
+    if (pendingBackgroundAiMovies().length) scheduleBackgroundAiQueue(1200);
+    else checkpointBackgroundUi(0, true);
   }
 }
 
