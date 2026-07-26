@@ -931,6 +931,15 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .movie-card.expanded .card-poster{flex:0 0 220px;max-width:220px}
 .movie-card.expanded .card-front-copy{display:none} /* full title/meta already shown in the expanded body */
 .movie-card.expanded .card-body{display:flex}
+.movie-card-modal[hidden]{display:none}
+.movie-card-modal{position:fixed;inset:0;z-index:400;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.78);backdrop-filter:blur(8px)}
+.movie-card-modal-dialog{position:relative;width:min(980px,100%);max-height:calc(100vh - 48px);overflow:auto;border-radius:10px;background:#111;box-shadow:0 28px 90px rgba(0,0,0,.72)}
+.movie-card-modal-content{min-width:0}
+.movie-card-modal-content .movie-card.expanded{width:100%;min-height:min(620px,calc(100vh - 48px));grid-column:auto;border-radius:10px;box-shadow:none}
+.movie-card-modal-content .movie-card.expanded .card-poster{flex:0 0 min(38vw,360px);max-width:360px}
+.movie-card-modal-close{position:absolute;z-index:8;top:10px;right:10px;width:34px;height:34px;border:0;border-radius:50%;background:rgba(0,0,0,.72);color:#fff;font-size:24px;line-height:1;cursor:pointer}
+.movie-card-modal-close:hover,.movie-card-modal-close:focus-visible{background:var(--accent);color:var(--button-text,#000);outline:none}
+body.movie-modal-open{overflow:hidden}
 .card-head{display:block}
 .format-row .match-percent{display:none}
 .source-link-row{display:none}
@@ -948,6 +957,10 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
   .movies-grid{grid-template-columns:1fr}
   .movie-card{aspect-ratio:3/4}
   .movie-card.expanded .card-poster{flex:0 0 130px;max-width:130px}
+  .movie-card-modal{padding:0;align-items:stretch}
+  .movie-card-modal-dialog{width:100%;max-height:100vh;border-radius:0}
+  .movie-card-modal-content .movie-card.expanded{min-height:100vh;border-radius:0;flex-direction:column}
+  .movie-card-modal-content .movie-card.expanded .card-poster{flex:0 0 42vh;max-width:none;width:100%}
 }
 
 /* No borders anywhere, per explicit request. This overrides every border

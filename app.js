@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 67;
+const APP_VERSION = 68;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -5887,6 +5887,7 @@ function render() {
   else renderRecs();
   maybeAutoExpandPool();
   reapplyExpandedCardAfterRender();
+  refreshOpenMovieCardModal();
 }
 
 
@@ -6947,7 +6948,11 @@ function buildCard(movie, opts={}) {
   const card = document.createElement('div');
   card.className = `movie-card ${isShow(movie) ? 'show-card' : 'film-card'}` + (movie.rating > 0 ? ' rated' : '');
   card.id = 'card-' + movie.id;
+  card.tabIndex = 0;
+  card.setAttribute('role', 'button');
+  card.setAttribute('aria-label', `Open details for ${movie.title}`);
   card.setAttribute('onclick', 'toggleCardReveal(event,this)');
+  card.setAttribute('onkeydown', "if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCardReveal(event,this)}");
   const matchPct = Math.round(resolvedMatchScore * 100);
   const receptionHint = usableReception(movie) ? ` · reception ${formatReceptionEffect(resolvedReceptionEffect)}` : '';
   const matchSummary = resolvedPosOverlap
@@ -7039,6 +7044,7 @@ function buildCard(movie, opts={}) {
 // automatically — the card opens right where it was clicked and the only
 // possible gap is the normal partial last row of the whole grid.
 let expandedMovieId = '';
+let openCardModalId = '';
 
 function collapseExpandedCard() {
   document.querySelectorAll('.movie-card.expanded').forEach(card => card.classList.remove('expanded'));
@@ -7048,12 +7054,75 @@ function toggleCardReveal(event, card) {
   const interactive = event?.target?.closest?.('button,a,input,select,textarea,.star,.card-act,.source-link-btn,.genre-chip,.tag-insight-chip');
   if (interactive) return;
   if (!card) return;
-  const collapsingSelf = card.classList.contains('expanded');
-  collapseExpandedCard();
-  if (collapsingSelf) { expandedMovieId = ''; return; }
-  card.classList.add('expanded');
-  expandedMovieId = card.id.replace(/^card-/, '');
+  openMovieCardModal(card);
 }
+
+function ensureMovieCardModal() {
+  let modal = document.getElementById('movieCardModal');
+  if (modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'movieCardModal';
+  modal.className = 'movie-card-modal';
+  modal.hidden = true;
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.innerHTML = `
+    <div class="movie-card-modal-dialog">
+      <button class="movie-card-modal-close" type="button" onclick="closeMovieCardModal()" aria-label="Close title details">×</button>
+      <div class="movie-card-modal-content"></div>
+    </div>`;
+  modal.addEventListener('click', event => {
+    if (event.target === modal) closeMovieCardModal();
+  });
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function openMovieCardModal(card) {
+  const modal = ensureMovieCardModal();
+  const content = modal.querySelector('.movie-card-modal-content');
+  if (!content) return;
+  const clone = card.cloneNode(true);
+  openCardModalId = card.id.replace(/^card-/, '');
+  clone.id = `modal-card-${openCardModalId}`;
+  clone.removeAttribute('onclick');
+  clone.removeAttribute('onkeydown');
+  clone.tabIndex = -1;
+  clone.setAttribute('role', 'document');
+  clone.querySelectorAll('[id]').forEach(node => { node.id = `modal-${node.id}`; });
+  clone.classList.add('expanded');
+  content.replaceChildren(clone);
+  modal.hidden = false;
+  document.body.classList.add('movie-modal-open');
+  modal.querySelector('.movie-card-modal-close')?.focus();
+}
+
+function refreshOpenMovieCardModal() {
+  const modal = document.getElementById('movieCardModal');
+  if (!openCardModalId || !modal || modal.hidden) return;
+  const source = [...document.querySelectorAll('.movie-card')]
+    .find(card => card.id === `card-${openCardModalId}` && !card.closest('.movie-card-modal'));
+  if (!source) {
+    closeMovieCardModal();
+    return;
+  }
+  openMovieCardModal(source);
+}
+
+function closeMovieCardModal() {
+  const modal = document.getElementById('movieCardModal');
+  if (!modal || modal.hidden) return;
+  modal.hidden = true;
+  modal.querySelector('.movie-card-modal-content')?.replaceChildren();
+  document.body.classList.remove('movie-modal-open');
+  const opener = document.getElementById(`card-${openCardModalId}`);
+  openCardModalId = '';
+  opener?.focus?.();
+}
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeMovieCardModal();
+});
 
 // Every tab's grid element stays in the DOM at once (hidden via CSS, not
 // removed) and only the active tab's grid gets rebuilt by render() — so an

@@ -3031,6 +3031,20 @@ after GitHub Pages has deployed the new files.
   and details work. Timeout aborts the active request, releases the progress
   surface in `finally`, persists the failure, and moves on to another title.
 
+### 30.31 Title detail modal (v68)
+
+Clicking or keyboard-activating a title card opens its complete details in a
+viewport modal instead of expanding the card inside the grid. Opening details
+must not resize, reorder or reflow surrounding cards.
+
+- The modal uses a dimmed backdrop, locks page scrolling and keeps the full
+  poster, match explanation, rating, genres, tags, availability and actions.
+- It closes through its close button, backdrop click or Escape.
+- Rating and other foreground renders refresh the open modal from the newly
+  rendered source card; removing the open title closes the modal.
+- Card-internal controls remain directly actionable and do not open a second
+  modal. Cards are keyboard-focusable and Enter or Space opens details.
+
 ## 26. Rejected Title Refresh Lane
 
 Rejected Wikipedia titles are not permanent dead ends. Pool expansion keeps a persisted count of successful new additions and, after every 500 additions, runs a bounded rejected-title refresh lane.
