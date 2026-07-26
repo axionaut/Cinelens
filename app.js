@@ -28,13 +28,16 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 70;
+const APP_VERSION = 71;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
 const AI_TAG_MAX_COUNT = 20;
 const AI_TAG_MIGRATION_VERSION = 1;
 const AI_TAG_BATCH_SIZE = 3;
+const AI_MANUAL_TAG_BATCH_SIZE = 10;
+const AI_MANUAL_RESOLVE_CONCURRENCY = 10;
+const AI_MANUAL_REQUEST_DELAY_MS = 4500;
 const AI_TAG_RETRY_LIMIT = 3;
 const AI_VOCABULARY_SAMPLE_SIZE = 240;
 const AI_TAG_CLOUD_NORMALIZE_EVERY = 100;
@@ -1583,7 +1586,8 @@ function purgeAiSensitiveContentExclusions() {
 }
 
 async function postAiTaggerBatch(items, partials, opts={}) {
-  const wait = Math.max(0, AI_REQUEST_DELAY_MS - (Date.now() - lastAiRequestAt));
+  const requestDelay = Math.max(0, Number(opts.requestDelayMs ?? AI_REQUEST_DELAY_MS));
+  const wait = Math.max(0, requestDelay - (Date.now() - lastAiRequestAt));
   if (wait) await abortableSleep(wait);
   if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
   lastAiRequestAt = Date.now();
@@ -1645,7 +1649,8 @@ async function postAiTaggerBatch(items, partials, opts={}) {
 }
 
 async function requestAiTags(movies, opts={}) {
-  const items = (movies || []).filter(movie => movie?.storyText).slice(0, AI_TAG_BATCH_SIZE);
+  const batchSize = Math.max(1, Number(opts.batchSize || AI_TAG_BATCH_SIZE));
+  const items = (movies || []).filter(movie => movie?.storyText).slice(0, batchSize);
   if (!items.length) return {tagged:0, failed:0};
   const savedPartials = Object.fromEntries(items
     .filter(movie => movie.aiTagPartial?.tags?.length)
@@ -1742,6 +1747,7 @@ async function requestAiTags(movies, opts={}) {
   });
   if (retryItems.length && Number(opts.retry || 0) < AI_TAG_RETRY_LIMIT) {
     const retryResult = await requestAiTags(retryItems, {
+      ...opts,
       retry:Number(opts.retry || 0) + 1,
       partials:retryPartials,
       retryReason:`Continue the existing tag sets. Add at least the requested minimumAdditionalTags for each title. Return only new, distinct, story-grounded tags; do not repeat existingTags or excludedTags.`
@@ -5185,7 +5191,7 @@ async function enrichLegacyTitleForAi(movie) {
   if (!movie || hasCurrentAiTags(movie)) return movie;
   if (movie.storyText) return movie;
   try {
-    const fresh = await refreshTitleFromWikipedia(movie, {ai:false});
+    const fresh = await refreshTitleFromWikipedia(movie, {ai:false, tmdb:false});
     if (!fresh) throw new Error('Wikipedia title could not be resolved');
     return applyFreshWikiMovie(movie.id, fresh, movie);
   } catch(e) {
@@ -5259,17 +5265,19 @@ async function tagAllUntagged() {
     while (index < queue.length && !fetchAbortRequested) {
       const batch = [];
 
-      while (index < queue.length && batch.length < AI_TAG_BATCH_SIZE && !fetchAbortRequested) {
-        const candidate = queue[index++];
-        showFetchProgress(
-          `Resolving title data · ${index}/${queue.length}`,
-          Math.round((index / queue.length) * 100),
-          candidate.title
-        );
-
-        const enriched = await enrichLegacyTitleForAi(candidate);
+      const candidates = queue.slice(index, index + AI_MANUAL_RESOLVE_CONCURRENCY);
+      index += candidates.length;
+      showFetchProgress(
+        `Resolving title data · ${index}/${queue.length}`,
+        Math.round((index / queue.length) * 100),
+        candidates.map(movie => movie.title).join(' · ')
+      );
+      const enrichedCandidates = await Promise.all(
+        candidates.map(movie => enrichLegacyTitleForAi(movie))
+      );
+      enrichedCandidates.forEach(enriched => {
         if (enriched?.storyText && !hasCurrentAiTags(enriched)) batch.push(enriched);
-      }
+      });
 
       if (!batch.length) continue;
 
@@ -5283,7 +5291,10 @@ async function tagAllUntagged() {
       // A blocked or empty Gemini response must not strand the rest of the queue.
       let result;
       try {
-        result = await requestAiTags(batch);
+        result = await requestAiTags(batch, {
+          batchSize:AI_MANUAL_TAG_BATCH_SIZE,
+          requestDelayMs:AI_MANUAL_REQUEST_DELAY_MS
+        });
       } catch (batchError) {
         if (isExternalRateLimitError(batchError)) throw batchError;
 
@@ -5297,7 +5308,7 @@ async function tagAllUntagged() {
           for (const movie of batch) {
             if (fetchAbortRequested) break;
             try {
-              const single = await requestAiTags([movie]);
+              const single = await requestAiTags([movie], {requestDelayMs:AI_MANUAL_REQUEST_DELAY_MS});
               result.tagged += Number(single?.tagged || 0);
               result.failed += Number(single?.failed || 0);
             } catch (singleError) {
@@ -5314,13 +5325,17 @@ async function tagAllUntagged() {
       tagged += Number(result?.tagged || 0);
       failed += Number(result?.failed || 0);
 
-      rebuildTagBrain();
-      computeTagWeights();
-      saveLocalState();
-      render();
+      saveLocalState({
+        preserveUpdatedAt:true,
+        changedMovieIds:batch.map(movie => String(movie.id)),
+        silentUi:true
+      });
       await nextPaint();
     }
 
+    rebuildTagBrain();
+    computeTagWeights();
+    render();
     queueDriveSync();
     scheduleTagCloudNormalization(1200);
     showToast(
@@ -7318,13 +7333,14 @@ async function refreshTitleFromWikipedia(movie=null, opts={}) {
     if (!movie.wikiPageId && String(movie.id || '').startsWith('wiki_')) {
       movie.wikiPageId = String(movie.id).replace(/^wiki_/, '');
     }
-    const byPageId = await fetchWikiPageIdAcrossModes(wikiPageIdFromMovie(movie), modes, {ai:opts.ai !== false, manualLanguageOverride:!!opts.manualLanguageOverride});
+    const byPageId = await fetchWikiPageIdAcrossModes(wikiPageIdFromMovie(movie), modes, {ai:opts.ai !== false, tmdb:opts.tmdb !== false, manualLanguageOverride:!!opts.manualLanguageOverride});
     if (byPageId && (acceptDifferentTitle || freshMatchesTitleRecord(byPageId, movie))) return byPageId;
   }
 
   if (urlTitle) {
     const fresh = await fetchWikiTitleAcrossModes(urlTitle, modes, diagnostics, {
       ai:opts.ai !== false,
+      tmdb:opts.tmdb !== false,
       manualLanguageOverride:!!opts.manualLanguageOverride,
       directLink:!!rawUrl
     });
@@ -7346,14 +7362,14 @@ async function refreshTitleFromWikipedia(movie=null, opts={}) {
   ].filter(Boolean);
 
   for (const title of [...new Set(candidates)]) {
-    const fresh = await fetchWikiTitleAcrossModes(title, modes, null, {ai:opts.ai !== false, manualLanguageOverride:!!opts.manualLanguageOverride});
+    const fresh = await fetchWikiTitleAcrossModes(title, modes, null, {ai:opts.ai !== false, tmdb:opts.tmdb !== false, manualLanguageOverride:!!opts.manualLanguageOverride});
     if (fresh && freshMatchesTitleRecord(fresh, movie, title)) return fresh;
   }
 
   try {
     const searchTitles = await fetchWikiSearchTitles(`${movie.title} ${movie.year || ''} ${movie.format ? 'television series' : 'film'}`);
     for (const title of searchTitles) {
-      const fresh = await fetchWikiTitleAcrossModes(title, modes, null, {ai:opts.ai !== false, manualLanguageOverride:!!opts.manualLanguageOverride});
+      const fresh = await fetchWikiTitleAcrossModes(title, modes, null, {ai:opts.ai !== false, tmdb:opts.tmdb !== false, manualLanguageOverride:!!opts.manualLanguageOverride});
       if (fresh && freshMatchesTitleRecord(fresh, movie, title)) return fresh;
     }
   } catch(e) {}

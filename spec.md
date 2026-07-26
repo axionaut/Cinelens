@@ -3079,6 +3079,21 @@ must not resize, reorder or reflow surrounding cards.
 - Manual collection/tagging and direct title actions remain foreground
   operations and refresh their visible result normally.
 
+### 30.34 Fast manual AI-tag refresh (v71)
+
+- The explicit **Retry pending AI tags** action resolves title narrative data
+  in bounded groups of ten instead of awaiting one Wikipedia title at a time.
+- Narrative-only resolution must pass `tmdb:false`; poster, provider and TMDB
+  metadata maintenance is independent and must not delay AI-tag repair.
+- Manual Gemini requests accept up to ten titles per batch and use a controlled
+  4.5-second request interval. Automatic background tagging retains its smaller,
+  more conservative batch and pacing.
+- A failed or blank multi-title response retains the per-title isolation
+  fallback so one problematic title cannot strand the rest of the queue.
+- Each completed batch is saved as a scoped IndexedDB checkpoint without
+  rendering. Tag-brain rebuilding, recommendation-weight computation and the
+  foreground render happen once after the requested run completes.
+
 ## 26. Rejected Title Refresh Lane
 
 Rejected Wikipedia titles are not permanent dead ends. Pool expansion keeps a persisted count of successful new additions and, after every 500 additions, runs a bounded rejected-title refresh lane.
