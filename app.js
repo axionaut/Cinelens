@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 66;
+const APP_VERSION = 67;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -49,6 +49,7 @@ const AI_TAGGER_TIMEOUT_MS = 45 * 1000;
 // pipeline at "TMDB refresh running"). v36 fixed this for the AI tagger
 // only; these give the remaining paths the same discipline.
 const TMDB_FETCH_TIMEOUT_MS = 15 * 1000;
+const TMDB_TITLE_REFRESH_TIMEOUT_MS = 25 * 1000;
 const WIKI_FETCH_TIMEOUT_MS = 30 * 1000;
 const DRIVE_FETCH_TIMEOUT_MS = 60 * 1000;
 const SEED_FETCH_TIMEOUT_MS = 20 * 1000;
@@ -1733,6 +1734,10 @@ async function requestAiTags(movies, opts={}) {
       };
       movie.retagStatus = 'needs-ai-tags';
       movie.retagMessage = `AI building tags ${partialCount}/${aiTagMinimumForStory(movie.storyText)}`;
+      // Retry metadata must participate in record-level Drive convergence.
+      // Without a new record timestamp, an older remote copy can erase
+      // failCount/attemptedAt on the next load and put this title first again.
+      touchRecord(movie);
       failed++;
     }
   });
@@ -3974,9 +3979,8 @@ async function fetchTmdbDetails(title, year, format) {
   }
 }
 
-async function attachTmdbDetails(movie) {
-  if (!movie?.title) return movie;
-  const tmdb = await fetchTmdbDetails(movie.title, movie.year, movie.format);
+function applyTmdbDetails(movie, tmdb) {
+  if (!movie) return movie;
   if (tmdb) {
     if (tmdb.posterUrl) movie.posterUrl = tmdb.posterUrl;
     if (tmdb.tmdbId) { movie.tmdbId = tmdb.tmdbId; movie.tmdbMediaType = tmdb.tmdbMediaType; }
@@ -3991,6 +3995,30 @@ async function attachTmdbDetails(movie) {
   delete movie.posterBackfillAttemptedAt;
   if (!movie.posterUrl) movie.posterBackfillAttemptedAt = nowStamp();
   return movie;
+}
+
+async function attachTmdbDetails(movie) {
+  if (!movie?.title) return movie;
+  const tmdb = await fetchTmdbDetails(movie.title, movie.year, movie.format);
+  return applyTmdbDetails(movie, tmdb);
+}
+
+async function attachTmdbDetailsWithDeadline(movie) {
+  let timer = null;
+  try {
+    const tmdb = await Promise.race([
+      fetchTmdbDetails(movie.title, movie.year, movie.format),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          currentTmdbAbortController?.abort();
+          reject(new Error(`TMDB title refresh timed out after ${TMDB_TITLE_REFRESH_TIMEOUT_MS / 1000}s`));
+        }, TMDB_TITLE_REFRESH_TIMEOUT_MS);
+      })
+    ]);
+    return applyTmdbDetails(movie, tmdb);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Wikipedia must complete first (it establishes the title's identity —
@@ -4060,6 +4088,16 @@ function receptionBackfillRecentlyAttempted(movie, now=Date.now()) {
 function sortByBackfillPriority(candidates) {
   const scored = new Map(scoreMovies().map(item => [String(item.movie.id), item]));
   return candidates.sort((a,b) => {
+    const aAttempt = Math.max(
+      Date.parse(a.receptionBackfillAttemptedAt || '') || 0,
+      Date.parse(a.posterBackfillAttemptedAt || '') || 0
+    );
+    const bAttempt = Math.max(
+      Date.parse(b.receptionBackfillAttemptedAt || '') || 0,
+      Date.parse(b.posterBackfillAttemptedAt || '') || 0
+    );
+    if (!!aAttempt !== !!bAttempt) return aAttempt ? 1 : -1;
+    if (aAttempt !== bAttempt) return aAttempt - bAttempt;
     const aRated = Number(a.rating || 0) > 0;
     const bRated = Number(b.rating || 0) > 0;
     if (aRated !== bRated) return aRated ? -1 : 1;
@@ -4227,7 +4265,6 @@ async function runReceptionBackfill() {
 // adding Wikipedia load.
 function needsTmdbBackfill(movie) {
   if (!movie || movie.source !== 'wikipedia') return false;
-  if (movie.posterBackfillAttemptedAt) return false;
   const missingPoster = !movie.posterUrl && !movie.tmdbId;
   // A v17 record already has a poster but was built from the fixed-India
   // response shape (or predates the version marker entirely) — it needs one
@@ -4236,9 +4273,20 @@ function needsTmdbBackfill(movie) {
   return missingPoster || staleTmdbVersion;
 }
 
+const TMDB_BACKFILL_BACKOFF_MS = [
+  6 * 60 * 60 * 1000,
+  24 * 60 * 60 * 1000,
+  3 * 24 * 60 * 60 * 1000,
+  14 * 24 * 60 * 60 * 1000
+];
 function tmdbBackfillRecentlyAttempted(movie, now=Date.now()) {
   const attemptedAt = Date.parse(movie?.posterBackfillAttemptedAt || '') || 0;
-  return !!attemptedAt && now - attemptedAt < TMDB_BACKFILL_RETRY_COOLDOWN_MS;
+  if (!attemptedAt) return false;
+  const fails = Math.max(0, Number(movie?.tmdbBackfillFailCount || 0));
+  const cooldown = fails > 0
+    ? TMDB_BACKFILL_BACKOFF_MS[Math.min(fails - 1, TMDB_BACKFILL_BACKOFF_MS.length - 1)]
+    : TMDB_BACKFILL_RETRY_COOLDOWN_MS;
+  return now - attemptedAt < cooldown;
 }
 
 function tmdbBackfillCandidates() {
@@ -4334,10 +4382,27 @@ async function runTmdbBackfill() {
         `${movie.title} · posters, genres, availability`
       );
       try {
-        await attachTmdbDetails(movie);
+        const versionBefore = Number(movie.tmdbDataVersion || 0);
+        const tmdbIdBefore = String(movie.tmdbId || '');
+        const posterBefore = String(movie.posterUrl || '');
+        await attachTmdbDetailsWithDeadline(movie);
+        const refreshed = Number(movie.tmdbDataVersion || 0) >= TMDB_DATA_VERSION
+          && (
+            Number(movie.tmdbDataVersion || 0) > versionBefore
+            || String(movie.tmdbId || '') !== tmdbIdBefore
+            || String(movie.posterUrl || '') !== posterBefore
+          );
+        if (!refreshed) {
+          movie.tmdbBackfillFailCount = Number(movie.tmdbBackfillFailCount || 0) + 1;
+          movie.posterBackfillAttemptedAt = nowStamp();
+        } else {
+          delete movie.tmdbBackfillFailCount;
+          delete movie.posterBackfillAttemptedAt;
+        }
         touchRecord(movie);
         changedMovieIds.push(String(movie.id));
       } catch(error) {
+        movie.tmdbBackfillFailCount = Number(movie.tmdbBackfillFailCount || 0) + 1;
         movie.posterBackfillAttemptedAt = nowStamp();
         touchRecord(movie);
         changedMovieIds.push(String(movie.id));

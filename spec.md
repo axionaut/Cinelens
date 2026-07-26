@@ -3016,6 +3016,21 @@ references in `index.html` to the same integer as `APP_VERSION`. Reusing an old
 asset query can leave an open browser tab running a stale activity surface even
 after GitHub Pages has deployed the new files.
 
+### 30.30 Persisted retry demotion and per-title deadlines (v67)
+
+- AI partial/insufficient-tag failures must call `touchRecord()` after updating
+  `aiTagging.failCount` and `aiTagging.attemptedAt`. Retry history therefore
+  wins record-level Drive convergence and survives reloads and other devices.
+- Automatic AI and metadata queues order never-attempted titles before
+  previously attempted titles, then order attempted titles oldest-first.
+- TMDB no-match, unchanged stale metadata and thrown/timeout outcomes increment
+  a persisted `tmdbBackfillFailCount` and stamp
+  `posterBackfillAttemptedAt`. Cooldowns escalate from six hours to one day,
+  three days and fourteen days.
+- One complete TMDB title refresh has a hard 25-second deadline across search
+  and details work. Timeout aborts the active request, releases the progress
+  surface in `finally`, persists the failure, and moves on to another title.
+
 ## 26. Rejected Title Refresh Lane
 
 Rejected Wikipedia titles are not permanent dead ends. Pool expansion keeps a persisted count of successful new additions and, after every 500 additions, runs a bounded rejected-title refresh lane.
