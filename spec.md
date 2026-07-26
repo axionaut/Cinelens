@@ -3009,6 +3009,13 @@ and foreground recovery do not schedule MovieLens reconciliation, and the
 maintenance status line does not report an import queue. Ratings already
 imported remain ordinary CineLens ratings and are not removed.
 
+### 30.29 Release asset cache busting (v66)
+
+Every shipped version bump must update the `styles.css?v=N` and `app.js?v=N`
+references in `index.html` to the same integer as `APP_VERSION`. Reusing an old
+asset query can leave an open browser tab running a stale activity surface even
+after GitHub Pages has deployed the new files.
+
 ## 26. Rejected Title Refresh Lane
 
 Rejected Wikipedia titles are not permanent dead ends. Pool expansion keeps a persisted count of successful new additions and, after every 500 additions, runs a bounded rejected-title refresh lane.
