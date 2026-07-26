@@ -3007,7 +3007,10 @@ The MovieLens CSV import was a one-time migration and is no longer a product
 workflow. Library maintenance does not show a ratings-import control, startup
 and foreground recovery do not schedule MovieLens reconciliation, and the
 maintenance status line does not report an import queue. Ratings already
-imported remain ordinary CineLens ratings and are not removed.
+imported remain ordinary CineLens ratings and are not removed. As of v69, the
+retired parser, matcher, importer and reconciliation implementation is also
+removed from the shipped JavaScript; only the resulting ordinary title records
+remain.
 
 ### 30.29 Release asset cache busting (v66)
 
@@ -3044,6 +3047,21 @@ must not resize, reorder or reflow surrounding cards.
   rendered source card; removing the open title closes the modal.
 - Card-internal controls remain directly actionable and do not open a second
   modal. Cards are keyboard-focusable and Enter or Space opens details.
+
+### 30.32 Lean runtime cleanup (v69)
+
+- The retired MovieLens import implementation is deleted rather than merely
+  disconnected from startup.
+- The former in-grid card expansion state, observer and reapply paths are
+  deleted. The title modal is the only detail surface and uses ordinary card
+  markup inside a fixed viewport overlay.
+- Obsolete expansion-only CSS is deleted. Grid cards no longer carry layout
+  rules for a feature that cannot run.
+- A Drive sync stops being marked as deferred as soon as its bounded wait ends
+  and the sync begins.
+- Existing IndexedDB and Drive migration readers remain intentionally: removing
+  them would strand valid libraries created by earlier shipped versions and is
+  not considered safe code reduction.
 
 ## 26. Rejected Title Refresh Lane
 

@@ -878,23 +878,8 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .movie-card.film-card .title-format{color:var(--film-card-border, var(--accent));border-color:var(--film-card-border, var(--accent));background:var(--palette-chip-bg)}
 .movie-card.show-card .title-format{color:var(--show-card-border, var(--green));border-color:var(--show-card-border, var(--green));background:var(--palette-chip-bg)}
 
-/* v16 image-forward cards and palette-aware chrome */
-/* v20: replaces the flip/crossfade with expand-in-place. Collapsed cards are
-   plain poster tiles (no absolute-stacked faces, no 3D transform). Clicking
-   a card adds .expanded: it spans the full grid row (grid-column:1/-1) and
-   lays out poster (left, fixed width) + full detail body (right, flexes to
-   fill) side by side. That layout shift itself is a discrete change, not a
-   smoothly animated one (no current browser can smoothly tween a
-   grid-column span change); the poster/body crossfade within the expanding
-   card is what's animated. Card width is fixed-compact only
-   (CARD_MIN_WIDTH_PX, no size picker).
-   v31 (replaces the v24 DOM-node-moving approach): row dense — an
-   .expanded card spans the full width at its own row, which punches a
-   hole in the row it left; dense packing pulls the following cards up
-   into that hole so the grid never shows a mid-grid gap and the expanded
-   card opens right where it was clicked (see toggleCardReveal). The card
-   never moves in the DOM. */
-.movies-grid{grid-template-columns:repeat(auto-fit,minmax(var(--card-min-width,200px),1fr));gap:12px;grid-auto-flow:row dense}
+/* Image-forward cards. Full details open in a viewport modal. */
+.movies-grid{grid-template-columns:repeat(auto-fit,minmax(var(--card-min-width,200px),1fr));gap:12px}
 .movie-card{display:flex;align-items:stretch;aspect-ratio:2/3;border-radius:8px;overflow:hidden;cursor:pointer;background:var(--film-card-bg)!important;position:relative;grid-column:span 1;transition:grid-column .01s}
 .movie-card.show-card{background:var(--show-card-bg)!important}
 .card-poster{position:relative;flex:1 1 auto;min-width:0;display:flex;flex-direction:column;justify-content:flex-end;background:var(--film-card-bg)}
@@ -927,16 +912,14 @@ header .logo,.stat-val,.match-percent,.score-badge{color:var(--accent)}
 .movie-card.show-card .card-type-badge{background:var(--show-badge-bg,var(--green));color:var(--show-badge-text,#000)}
 .card-body{display:none;flex-direction:column;flex:1 1 auto;min-width:0;padding:14px;gap:8px;background:var(--film-card-bg);color:var(--card-text)}
 .show-card .card-body{background:var(--show-card-bg)}
-.movie-card.expanded{grid-column:1 / -1;aspect-ratio:auto;cursor:default}
-.movie-card.expanded .card-poster{flex:0 0 220px;max-width:220px}
-.movie-card.expanded .card-front-copy{display:none} /* full title/meta already shown in the expanded body */
-.movie-card.expanded .card-body{display:flex}
 .movie-card-modal[hidden]{display:none}
 .movie-card-modal{position:fixed;inset:0;z-index:400;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.78);backdrop-filter:blur(8px)}
 .movie-card-modal-dialog{position:relative;width:min(980px,100%);max-height:calc(100vh - 48px);overflow:auto;border-radius:10px;background:#111;box-shadow:0 28px 90px rgba(0,0,0,.72)}
 .movie-card-modal-content{min-width:0}
-.movie-card-modal-content .movie-card.expanded{width:100%;min-height:min(620px,calc(100vh - 48px));grid-column:auto;border-radius:10px;box-shadow:none}
-.movie-card-modal-content .movie-card.expanded .card-poster{flex:0 0 min(38vw,360px);max-width:360px}
+.movie-card-modal-content .movie-card{width:100%;max-width:none;min-height:min(620px,calc(100vh - 48px));aspect-ratio:auto;cursor:default;border-radius:10px;box-shadow:none}
+.movie-card-modal-content .card-poster{flex:0 0 min(38vw,360px);max-width:360px}
+.movie-card-modal-content .card-front-copy{display:none}
+.movie-card-modal-content .card-body{display:flex}
 .movie-card-modal-close{position:absolute;z-index:8;top:10px;right:10px;width:34px;height:34px;border:0;border-radius:50%;background:rgba(0,0,0,.72);color:#fff;font-size:24px;line-height:1;cursor:pointer}
 .movie-card-modal-close:hover,.movie-card-modal-close:focus-visible{background:var(--accent);color:var(--button-text,#000);outline:none}
 body.movie-modal-open{overflow:hidden}
@@ -951,16 +934,15 @@ body.movie-modal-open{overflow:hidden}
 .film-card .genre-chip.clickable:hover,.film-card .genre-chip.matched{color:var(--film-card-border);border-color:var(--film-card-border);background:color-mix(in srgb,var(--film-card-border) 16%,var(--film-chip-bg))}
 .show-card .genre-chip.clickable:hover,.show-card .genre-chip.matched{color:var(--show-card-border);border-color:var(--show-card-border);background:color-mix(in srgb,var(--show-card-border) 16%,var(--show-chip-bg))}
 @media(min-width:769px){
-  .movie-card:not(.expanded){max-width:300px}
+  .movie-card{max-width:300px}
 }
 @media(max-width:768px){
   .movies-grid{grid-template-columns:1fr}
   .movie-card{aspect-ratio:3/4}
-  .movie-card.expanded .card-poster{flex:0 0 130px;max-width:130px}
   .movie-card-modal{padding:0;align-items:stretch}
   .movie-card-modal-dialog{width:100%;max-height:100vh;border-radius:0}
-  .movie-card-modal-content .movie-card.expanded{min-height:100vh;border-radius:0;flex-direction:column}
-  .movie-card-modal-content .movie-card.expanded .card-poster{flex:0 0 42vh;max-width:none;width:100%}
+  .movie-card-modal-content .movie-card{min-height:100vh;max-width:none;border-radius:0;flex-direction:column}
+  .movie-card-modal-content .card-poster{flex:0 0 42vh;max-width:none;width:100%}
 }
 
 /* No borders anywhere, per explicit request. This overrides every border

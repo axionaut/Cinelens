@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 68;
+const APP_VERSION = 69;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -247,16 +247,6 @@ let lastAutoExpandAt = 0;
 let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
-const MOVIELENS_CSV_HEADER = ['movie_id','imdb_id','tmdb_id','rating','average_rating','title'];
-const MOVIELENS_IMPORT_FETCH_CONCURRENCY = 16;
-// The import used to drain the WHOLE queue in one invocation. With 1000+
-// staged titles that held movielensImportInProgress for hours, which every
-// other background loop yields to — so reception/TMDB/AI backfill were starved
-// the entire time and the UI got a constant stream of progress writes. It now
-// works in bounded batches and releases the pipeline between them.
-const MOVIELENS_IMPORT_BATCH_SIZE = 48;
-const MOVIELENS_IMPORT_BATCH_GAP_MS = 1500;
-const IMPORT_PROGRESS_THROTTLE_MS = 150;
 const CARD_REFRESH_BATCH_SIZE = 20;
 const BACKGROUND_SYNC_DEBOUNCE_MS = 30 * 1000;
 let backgroundChangesSinceRender = 0;
@@ -417,8 +407,6 @@ let receptionBackfillInProgress = false;
 let receptionCalibrationTimer = null;
 let backgroundAiTaggingInProgress = false;
 let backgroundAiTimer = null;
-let movielensImportTimer = null;
-let movielensImportInProgress = false;
 let startupDriveRestoreDone = false;
 // A browser with no local library must restore Drive before background work can
 // create titles or advance the dataset timestamp.
@@ -1784,10 +1772,6 @@ function meaningfulTagCount(movie) { return rawScoringTags(movie).length; }
 
 function migrateLegacyPoolItems() {
   Object.values(state.movies || {}).forEach(m => {
-    if (m.movielensImportPending || m.movielensImportSkipped) {
-      m.source = 'movielens-import';
-      return;
-    }
     if (m.source === 'wikipedia') return;
     m.source = 'legacy';
     m.tags = [];
@@ -1806,13 +1790,7 @@ function rebuildDescriptorBrain() {
   let changed = 0;
   [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(m => {
     const before = JSON.stringify({tags:m.tags||[], coreTags:m.coreTags||[], plotTags:m.plotTags||[], descriptorTags:m.descriptorTags||[], tagged:m.tagged});
-    if (m.movielensImportPending || m.movielensImportSkipped) {
-      m.source = 'movielens-import';
-      clearGeneratedTags(m);
-      m.needsManualUrl = false;
-      m.retagStatus = 'needs-refresh';
-      m.retagMessage = m.movielensImportPending ? 'MovieLens metadata pending' : 'MovieLens metadata unavailable';
-    } else if (hasCurrentAiTags(m)) {
+    if (hasCurrentAiTags(m)) {
       m.tags = cleanTagArray(m.tags || [], m, false);
       m.coreTags = [...m.tags];
       m.plotTags = [...m.tags];
@@ -1934,7 +1912,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.addEventListener('resize', onResizeEvent);
   renderAppVersion();
   renderWatchPlatformPicker();
-  initExpandedCardObserver();
   loadLocalState();
   applyCardSize();
   await loadIndexedDbState();
@@ -2179,19 +2156,6 @@ function normaliseReceptionRecord(reception=null) {
 
 function normaliseStoredTitleRecord(movie) {
   if (!movie) return movie;
-  if (movie.movielensImportPending || movie.movielensImportSkipped) {
-    movie.source = 'movielens-import';
-    movie.tags = [];
-    movie.coreTags = [];
-    movie.plotTags = [];
-    movie.descriptorTags = [];
-    movie.rawDescriptors = [];
-    movie.tagged = false;
-    movie.needsManualUrl = false;
-    movie.retagStatus = 'needs-refresh';
-    movie.retagMessage = movie.movielensImportPending ? 'MovieLens metadata pending' : 'MovieLens metadata unavailable';
-    return movie;
-  }
   if (!movie.wikiPageId && String(movie.id || '').startsWith('wiki_')) {
     movie.wikiPageId = String(movie.id).replace(/^wiki_/, '');
   }
@@ -4166,7 +4130,7 @@ async function runReceptionBackfill() {
   // the shared progress bar at any moment. autoFetchPaused ("Pause
   // collection") halts this loop too but keeps polling so it resumes
   // automatically once collection resumes.
-  if (autoFetchPaused || !libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || tmdbBackfillInProgress || movielensImportInProgress) {
+  if (autoFetchPaused || !libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || tmdbBackfillInProgress) {
     scheduleReceptionBackfill(3000);
     return;
   }
@@ -4356,7 +4320,7 @@ async function runTmdbBackfill() {
   // polling so it resumes by itself the moment collection is resumed —
   // pausing collection should quiet ALL background fetching, not leave the
   // progress bar reappearing seconds later for a different loop.
-  if (autoFetchPaused || !libraryWritesUnlocked || tmdbBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress || movielensImportInProgress) {
+  if (autoFetchPaused || !libraryWritesUnlocked || tmdbBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) {
     scheduleTmdbBackfill(3000);
     return;
   }
@@ -4419,500 +4383,6 @@ async function runTmdbBackfill() {
     tmdbBackfillInProgress = false;
     hideFetchProgress(tmdbBackfillPendingCount() ? 10000 : 0);
     scheduleTmdbBackfill(6000);
-  }
-}
-
-function parseQuotedCsv(text) {
-  const rows = [];
-  const source = String(text || '').replace(/^\uFEFF/, '');
-  let row = [];
-  let field = '';
-  let quoted = false;
-  for (let index = 0; index < source.length; index++) {
-    const character = source[index];
-    if (quoted) {
-      if (character === '"') {
-        if (source[index + 1] === '"') {
-          field += '"';
-          index++;
-        } else {
-          quoted = false;
-        }
-      } else {
-        field += character;
-      }
-      continue;
-    }
-    if (character === '"' && !field) {
-      quoted = true;
-    } else if (character === ',') {
-      row.push(field);
-      field = '';
-    } else if (character === '\n' || character === '\r') {
-      if (character === '\r' && source[index + 1] === '\n') index++;
-      row.push(field);
-      if (row.some(value => value !== '')) rows.push(row);
-      row = [];
-      field = '';
-    } else {
-      field += character;
-    }
-  }
-  if (quoted) throw new Error('Ratings CSV has an unfinished quoted field');
-  row.push(field);
-  if (row.some(value => value !== '')) rows.push(row);
-  return rows;
-}
-
-function movieLensTitleAndYear(value) {
-  const raw = String(value || '').trim();
-  const match = raw.match(/^(.*?)\s*\((\d{4})\)\s*$/);
-  return {
-    title: (match ? match[1] : raw).trim(),
-    year: match ? Number(match[2]) : null
-  };
-}
-
-function movieLensQueueKey(row) {
-  return `tmdb:${String(row?.tmdbId || '').trim()}`;
-}
-
-function parseMovieLensRatingsCsv(text) {
-  const [header = [], ...dataRows] = parseQuotedCsv(text);
-  if (header.length !== MOVIELENS_CSV_HEADER.length || header.some((value, index) => value !== MOVIELENS_CSV_HEADER[index])) {
-    throw new Error(`Ratings CSV header must be ${MOVIELENS_CSV_HEADER.join(',')}`);
-  }
-  const seen = new Set();
-  return dataRows.reduce((rows, values) => {
-    const tmdbId = String(values[2] || '').trim();
-    const rawRating = Number(values[3]);
-    const title = movieLensTitleAndYear(values[5]);
-    if (!tmdbId || !Number.isFinite(rawRating) || !title.title) return rows;
-    const key = movieLensQueueKey({tmdbId});
-    if (seen.has(key)) return rows;
-    seen.add(key);
-    rows.push({
-      tmdbId,
-      title: title.title,
-      year: title.year,
-      rating: Math.max(0, Math.min(5, Math.ceil(rawRating)))
-    });
-    return rows;
-  }, []);
-}
-
-// v63: movieLensLibraryMatch used to rebuild an array of the ENTIRE library
-// (movies + hidden, spread and filtered) on every call, then scan it linearly.
-// It is called once per CSV row on import (1,158 rows) and once per queued row
-// on every startup via ensureMovieLensQueueRecords — O(rows x library), which
-// froze the tab for seconds. This index is built once and answers every row in
-// constant time. It reproduces the old result exactly, including "first record
-// in movies-then-hidden iteration order wins", via the stored ordinal.
-function buildMovieLensMatchIndex() {
-  const byTmdb = new Map();
-  const byTitleYear = new Map();
-  let ordinal = 0;
-  const add = movie => {
-    if (!movie) return;
-    const entry = {movie, ordinal:ordinal++, pending:!!movie.movielensImportPending};
-    const tmdbId = Number(movie.tmdbId);
-    if (Number.isFinite(tmdbId) && tmdbId > 0) {
-      if (!byTmdb.has(tmdbId)) byTmdb.set(tmdbId, []);
-      byTmdb.get(tmdbId).push(entry);
-    }
-    const year = Number(movie.year);
-    // A record without a usable year could never satisfy the old
-    // |record.year - row.year| <= 1 test, so it is not title-indexed.
-    if (!Number.isFinite(year)) return;
-    const keys = new Set();
-    [movie.title, movie.wikiTitle, movie.pageTitle].forEach(value => {
-      const canonical = canonicalTitle(value);
-      if (canonical) keys.add(`${canonical}|${year}`);
-    });
-    keys.forEach(key => {
-      if (!byTitleYear.has(key)) byTitleYear.set(key, []);
-      byTitleYear.get(key).push(entry);
-    });
-  };
-  Object.values(state.movies || {}).forEach(add);
-  Object.values(state.hiddenTitles || {}).forEach(add);
-  return {byTmdb, byTitleYear};
-}
-
-function firstMovieLensEntry(entries, includePending) {
-  let best = null;
-  (entries || []).forEach(entry => {
-    if (!includePending && entry.pending) return;
-    if (!best || entry.ordinal < best.ordinal) best = entry;
-  });
-  return best;
-}
-
-function movieLensLibraryMatch(row, {includePending=true, index=null}={}) {
-  const matchIndex = index || buildMovieLensMatchIndex();
-  const tmdbId = Number(row?.tmdbId);
-  if (Number.isFinite(tmdbId) && tmdbId > 0) {
-    const byTmdb = firstMovieLensEntry(matchIndex.byTmdb.get(tmdbId), includePending);
-    if (byTmdb) return byTmdb.movie;
-  }
-  const rowYear = Number(row?.year);
-  const canonical = canonicalTitle(row?.title);
-  if (!canonical || !Number.isFinite(rowYear)) return null;
-  // Same +/-1 year tolerance as before; the lowest ordinal across the three
-  // buckets is the record the old linear scan would have found first.
-  let best = null;
-  for (let year = rowYear - 1; year <= rowYear + 1; year++) {
-    const entry = firstMovieLensEntry(matchIndex.byTitleYear.get(`${canonical}|${year}`), includePending);
-    if (entry && (!best || entry.ordinal < best.ordinal)) best = entry;
-  }
-  return best ? best.movie : null;
-}
-
-function movieLensStubId(row) {
-  return `movielens_${String(row?.tmdbId || '').trim()}`;
-}
-
-function stageMovieLensRecord(row, stamp=nowStamp()) {
-  const id = String(row.recordId || movieLensStubId(row));
-  row.recordId = id;
-  const existing = state.movies?.[id];
-  if (existing) return existing;
-  const record = {
-    id,
-    title:row.title,
-    year:row.year || null,
-    tmdbId:Number(row.tmdbId) || row.tmdbId,
-    source:'movielens-import',
-    tags:[],
-    coreTags:[],
-    plotTags:[],
-    descriptorTags:[],
-    rawDescriptors:[],
-    tagged:false,
-    movielensImportPending:true,
-    movielensImported:true,
-    addedAt:stamp,
-    ratedAt:stamp,
-    _updatedAt:stamp
-  };
-  applyMovieLensRating(record, row.rating, stamp);
-  state.movies[id] = record;
-  return record;
-}
-
-function ensureMovieLensQueueRecords() {
-  const queue = state.meta?.movielensImportQueue;
-  if (!Array.isArray(queue)) return [];
-  const changedMovieIds = [];
-  // Safe to reuse one index across the loop: stageMovieLensRecord only ever
-  // adds records flagged movielensImportPending, and includePending:false
-  // excludes those anyway — so a record staged here can never be the match for
-  // a later row.
-  const index = buildMovieLensMatchIndex();
-  queue.forEach(row => {
-    const existing = movieLensLibraryMatch(row, {includePending:false, index});
-    if (existing) return;
-    const before = row.recordId;
-    const record = stageMovieLensRecord(row);
-    if (!before || !state.movies?.[before]) changedMovieIds.push(String(record.id));
-  });
-  return changedMovieIds;
-}
-
-function applyMovieLensRating(movie, rating, stamp=nowStamp()) {
-  if (!movie) return false;
-  const nextRating = Math.max(0, Math.min(5, Math.ceil(Number(rating) || 0)));
-  const ratingChanged = Number(movie.rating || 0) !== nextRating;
-  const importChanged = !movie.movielensImported;
-  if (!ratingChanged && !importChanged) return false;
-  movie.rating = nextRating;
-  if (ratingChanged) movie.ratedAt = stamp;
-  if (nextRating > 0) movie.watchlist = false;
-  movie.movielensImported = true;
-  touchRecord(movie, stamp);
-  return true;
-}
-
-function movieLensImportStatusText() {
-  const summary = state.meta?.movielensImportSummary;
-  if (!summary || !Number(summary.total || 0)) return '';
-  const done = Math.min(Number(summary.total), Number(summary.checkpoint || 0));
-  const skipped = Number(summary.skipped || 0);
-  // "skipped" = a MovieLens title CineLens couldn't turn into a library entry:
-  // no usable English/Hindi Wikipedia page (MovieLens is full of foreign-
-  // language films CineLens doesn't cover), or the page didn't match the
-  // title/year. Spell that out so the count isn't a mystery.
-  const skipText = skipped ? ` · ${skipped} not added (foreign-language or no Wikipedia match)` : '';
-  return `MovieLens import · ${done}/${summary.total}${skipText}`;
-}
-
-function movieLensImportQueue() {
-  state.meta = state.meta || {};
-  if (!Array.isArray(state.meta.movielensImportQueue)) state.meta.movielensImportQueue = [];
-  return state.meta.movielensImportQueue;
-}
-
-function movieLensSkipQueueItem(item, reason) {
-  const skips = Array.isArray(state.meta.movielensImportSkips) ? state.meta.movielensImportSkips : [];
-  const key = movieLensQueueKey(item);
-  const entry = {key, tmdbId:item.tmdbId, title:item.title, year:item.year, reason:String(reason || 'Wikipedia rejected title')};
-  const existing = skips.findIndex(skip => skip?.key === key);
-  if (existing >= 0) skips[existing] = entry;
-  else skips.push(entry);
-  state.meta.movielensImportSkips = skips;
-  state.meta.movielensImportSummary = {
-    ...(state.meta.movielensImportSummary || {}),
-    skipped: skips.length,
-    checkpoint: Number(state.meta.movielensImportSummary?.checkpoint || 0) + 1
-  };
-}
-
-function markMovieLensRecordSkipped(item, reason, changedMovieIds) {
-  const record = state.movies?.[item.recordId] || movieLensLibraryMatch(item);
-  if (!record) return;
-  record.movielensImportPending = false;
-  record.movielensImportSkipped = true;
-  record.movielensImportSkipReason = String(reason || 'Wikipedia metadata unavailable');
-  touchRecord(record);
-  changedMovieIds.add(String(record.id));
-}
-
-function scheduleMovieLensImport(delay=3500) {
-  if (!libraryWritesUnlocked || movielensImportInProgress || !state.meta?.movielensImportQueue?.length) return;
-  if (movielensImportTimer) {
-    clearTimeout(movielensImportTimer);
-    movielensImportTimer = null;
-  }
-  const run = () => {
-    movielensImportTimer = null;
-    runMovieLensImport();
-  };
-  if (delay <= 0) {
-    movielensImportTimer = setTimeout(run, 0);
-  } else if ('requestIdleCallback' in window) {
-    movielensImportTimer = setTimeout(() => requestIdleCallback(run, {timeout:1500}), delay);
-  } else {
-    movielensImportTimer = setTimeout(run, delay);
-  }
-}
-
-async function fetchMovieLensQueueItem(item) {
-  const diagnostics = {};
-  const qualifiedTitle = item.year ? `${item.title} (${item.year} film)` : item.title;
-  let fresh = await fetchWikiMovie(qualifiedTitle, 'all', diagnostics, {ai:false});
-  if (!fresh && qualifiedTitle !== item.title && !autoFetchPaused && !fetchAbortRequested) {
-    fresh = await fetchWikiMovie(item.title, 'all', diagnostics, {ai:false});
-  }
-  return {fresh, reason:diagnostics.reason || 'Wikipedia rejected title'};
-}
-
-function removeMovieLensQueueItem(queue, item) {
-  const index = queue.findIndex(queued => movieLensQueueKey(queued) === movieLensQueueKey(item));
-  if (index >= 0) queue.splice(index, 1);
-}
-
-function reconcileMovieLensQueueItem(queue, item, result, changedMovieIds) {
-  const fetched = result?.fresh;
-  if (!fetched) {
-    removeMovieLensQueueItem(queue, item);
-    const reason = result?.reason || 'Wikipedia request failed';
-    movieLensSkipQueueItem(item, reason);
-    markMovieLensRecordSkipped(item, reason, changedMovieIds);
-    return;
-  }
-  if (!sameCanonicalTitle(fetched.title || fetched.pageTitle, item.title) || (item.year && (!Number.isFinite(Number(fetched.year)) || Math.abs(Number(fetched.year) - item.year) > 1))) {
-    removeMovieLensQueueItem(queue, item);
-    const reason = 'Wikipedia returned a different title or year';
-    movieLensSkipQueueItem(item, reason);
-    markMovieLensRecordSkipped(item, reason, changedMovieIds);
-    return;
-  }
-  if (isMovieHidden(fetched)) {
-    removeMovieLensQueueItem(queue, item);
-    const reason = 'Title is permanently removed from this library';
-    movieLensSkipQueueItem(item, reason);
-    markMovieLensRecordSkipped(item, reason, changedMovieIds);
-    return;
-  }
-  const stored = upsertMoviePreservingUserState(fetched, state.movies?.[item.recordId] || null);
-  if (!stored) {
-    removeMovieLensQueueItem(queue, item);
-    const reason = 'Wikipedia record could not be stored';
-    movieLensSkipQueueItem(item, reason);
-    markMovieLensRecordSkipped(item, reason, changedMovieIds);
-    return;
-  }
-  applyMovieLensRating(stored, item.rating);
-  delete stored.movielensImportPending;
-  delete stored.movielensImportSkipped;
-  delete stored.movielensImportSkipReason;
-  removeMovieLensQueueItem(queue, item);
-  state.meta.movielensImportSummary = {
-    ...(state.meta.movielensImportSummary || {}),
-    checkpoint: Number(state.meta.movielensImportSummary?.checkpoint || 0) + 1,
-    imported: Number(state.meta.movielensImportSummary?.imported || 0) + 1
-  };
-  changedMovieIds.add(String(stored.id));
-}
-
-async function runMovieLensImport() {
-  if (
-    autoFetchPaused ||
-    !libraryWritesUnlocked ||
-    movielensImportInProgress ||
-    poolExpansionInProgress ||
-    backgroundAiTaggingInProgress ||
-    receptionBackfillInProgress ||
-    tmdbBackfillInProgress
-  ) {
-    scheduleMovieLensImport(3000);
-    return;
-  }
-  const queue = state.meta?.movielensImportQueue;
-  const queued = Array.isArray(queue) ? queue : [];
-  if (!queued.length) return;
-  // One bounded batch per invocation, so the shared background pipeline is
-  // handed back to the other loops between batches instead of being held for
-  // the entire import.
-  const pending = queued.slice(0, MOVIELENS_IMPORT_BATCH_SIZE);
-
-  movielensImportInProgress = true;
-  try {
-    const summary = state.meta.movielensImportSummary || {};
-    const startingCheckpoint = Number(summary.checkpoint || 0);
-    const total = Number(summary.total || startingCheckpoint + queued.length);
-    let nextIndex = 0;
-    let completed = 0;
-    let lastProgressAt = 0;
-    const changedMovieIds = new Set();
-    showFetchProgress(
-      `MovieLens metadata · ${startingCheckpoint}/${total}`,
-      Math.round((startingCheckpoint / Math.max(1, total)) * 100),
-      `${queued.length} titles pending`
-    );
-
-    const worker = async () => {
-      while (nextIndex < pending.length && !autoFetchPaused && !fetchAbortRequested) {
-        const item = pending[nextIndex++];
-        let result;
-        try {
-          result = await fetchMovieLensQueueItem(item);
-        } catch (error) {
-          if (autoFetchPaused || fetchAbortRequested || error?.name === 'AbortError') return;
-          result = {fresh:null, reason:String(error?.message || 'Wikipedia request failed')};
-        }
-        if (autoFetchPaused || fetchAbortRequested) return;
-        reconcileMovieLensQueueItem(queue, item, result, changedMovieIds);
-        completed++;
-        // Up to 16 workers finish concurrently; without throttling each one
-        // wrote the progress bar, thrashing layout for no visible benefit.
-        const now = Date.now();
-        if (now - lastProgressAt >= IMPORT_PROGRESS_THROTTLE_MS) {
-          lastProgressAt = now;
-          const checkpoint = startingCheckpoint + completed;
-          showFetchProgress(
-            `MovieLens metadata · ${checkpoint}/${total}`,
-            Math.round((checkpoint / Math.max(1, total)) * 100),
-            item.title
-          );
-        }
-      }
-    };
-
-    const workerCount = Math.min(MOVIELENS_IMPORT_FETCH_CONCURRENCY, pending.length);
-    await Promise.all(Array.from({length:workerCount}, worker));
-    if (completed) {
-      // Throttled: keeps the taste model/score caches warm between the frequent
-      // (~1.5s) import batches so each render stays cheap. A full flush happens
-      // when the queue drains (below), so the finished import is never stale.
-      throttledInvalidateTasteModel();
-      computeTagWeights();
-      scheduleReceptionCalibrationUpdate();
-      saveLocalState({preserveUpdatedAt:true, changedMovieIds:[...changedMovieIds]});
-      queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
-      updateLibraryHealth();
-    }
-  } finally {
-    movielensImportInProgress = false;
-    hideFetchProgress(state.meta?.movielensImportQueue?.length ? 10000 : 0);
-    updateLibraryHealth();
-    if (!autoFetchPaused) {
-      // Gap between batches so reception/TMDB/AI backfill (which all yield to
-      // this loop) get a turn, and the UI gets breathing room.
-      if (state.meta?.movielensImportQueue?.length) scheduleMovieLensImport(MOVIELENS_IMPORT_BATCH_GAP_MS);
-      else {
-        // Import drained — make the final recommendations reflect every
-        // imported rating even if the last batch's invalidation was throttled.
-        if (flushTasteModelInvalidation()) { computeTagWeights(); render(); }
-        scheduleBackgroundAiQueue(1200);
-      }
-    }
-  }
-}
-
-function chooseMovieLensRatingsCsv() {
-  document.getElementById('movielensRatingsCsvInput')?.click();
-}
-
-async function importMovieLensRatingsCsv(file) {
-  const input = document.getElementById('movielensRatingsCsvInput');
-  if (!file) return;
-  try {
-    const csvText = await file.text();
-    const rows = parseMovieLensRatingsCsv(csvText);
-    if (!rows.length) throw new Error('Ratings CSV has no usable rating rows');
-    const sourceHash = String(stableHash(rows.map(row => [row.tmdbId, row.rating, row.title, row.year || ''].join('|')).join('\n')));
-    const sameSource = state.meta?.movielensImportSourceHash === sourceHash;
-    const queue = movieLensImportQueue();
-    const queued = new Set(queue.map(movieLensQueueKey));
-    const skipped = new Set((sameSource ? state.meta.movielensImportSkips || [] : []).map(skip => skip?.key));
-    const changedMovieIds = [];
-    let matched = 0;
-    let enqueued = 0;
-
-    if (!sameSource) {
-      state.meta.movielensImportSourceHash = sourceHash;
-      state.meta.movielensImportSkips = [];
-      state.meta.movielensImportSummary = {total:rows.length, checkpoint:0, imported:0, skipped:0};
-    }
-    // One index for the whole file (see ensureMovieLensQueueRecords for why a
-    // single index stays correct while rows are being staged).
-    const matchIndex = buildMovieLensMatchIndex();
-    rows.forEach(row => {
-      const existing = movieLensLibraryMatch(row, {includePending:false, index:matchIndex});
-      if (existing) {
-        if (!sameSource) state.meta.movielensImportSummary.checkpoint++;
-        if (applyMovieLensRating(existing, row.rating)) changedMovieIds.push(String(existing.id));
-        matched++;
-        return;
-      }
-      const key = movieLensQueueKey(row);
-      if (!queued.has(key) && !skipped.has(key)) {
-        const staged = stageMovieLensRecord(row);
-        changedMovieIds.push(String(staged.id));
-        queue.push(row);
-        queued.add(key);
-        enqueued++;
-      }
-    });
-    if (changedMovieIds.length || enqueued || !sameSource) {
-      invalidateTasteModel();
-      computeTagWeights();
-      scheduleReceptionCalibrationUpdate();
-      saveLocalState({preserveUpdatedAt:true, changedMovieIds, localSaveDelay:0});
-      queueDriveSync();
-      render();
-    }
-    scheduleMovieLensImport(0);
-    updateLibraryHealth();
-    showToast(
-      sameSource ? 'MovieLens ratings already imported; pending titles remain queued.' : `MovieLens ratings imported: ${matched} matched, ${enqueued} queued.`,
-      'success'
-    );
-  } catch (error) {
-    showToast(`Ratings import failed: ${error.message || error}`, 'error');
-  } finally {
-    if (input) input.value = '';
   }
 }
 
@@ -5864,7 +5334,6 @@ function setTab(tab, btn) {
   render();
 }
 function isShow(m) { return !!m.format; }
-function isMovieLensMetadataPending(movie) { return !!movie?.movielensImportPending; }
 function matchesTab(m) {
   if (activeTab === 'all' || activeTab === 'pool' || activeTab === 'rated' || activeTab === 'recent' || activeTab === 'tags') return true;
   if (activeTab === 'show') return isShow(m);
@@ -5886,7 +5355,6 @@ function render() {
   else if (activeTab === 'pool') renderPoolGrid();
   else renderRecs();
   maybeAutoExpandPool();
-  reapplyExpandedCardAfterRender();
   refreshOpenMovieCardModal();
 }
 
@@ -6427,7 +5895,6 @@ function scheduleBackgroundAiQueue(delay = 700) {
     backgroundAiTaggingInProgress ||
     backgroundAiTimer ||
     poolExpansionInProgress ||
-    movielensImportInProgress ||
     !pendingBackgroundAiMovies().length
   ) {
     return;
@@ -6440,7 +5907,7 @@ function scheduleBackgroundAiQueue(delay = 700) {
 }
 
 async function runBackgroundAiQueue() {
-  if (backgroundAiTaggingInProgress || poolExpansionInProgress || movielensImportInProgress || autoFetchPaused) return;
+  if (backgroundAiTaggingInProgress || poolExpansionInProgress || autoFetchPaused) return;
   const batch = pendingBackgroundAiMovies().slice(0, AI_TAG_BATCH_SIZE);
   if (!batch.length) return;
 
@@ -6500,7 +5967,6 @@ function maybeAutoExpandPool() {
     autoFetchPaused ||
     poolExpansionInProgress ||
     backgroundAiTaggingInProgress ||
-    movielensImportInProgress ||
     autoExpandTimer ||
     backgroundAiTimer
   ) {
@@ -6727,7 +6193,6 @@ function renderRatedGrid() {
   const grid = document.getElementById('ratedGrid');
   if (!grid) return;
   const filtered = Object.values(state.movies || {})
-    .filter(m => !isMovieLensMetadataPending(m))
     .filter(m => Number(m.rating || 0) > 0)
     .filter(matchesGlobalFilters);
   // "Newest rated first" is only this tab's *default* view (sortMode
@@ -6750,7 +6215,6 @@ function renderRecentlyAdded() {
   const grid = document.getElementById('recentGrid');
   if (!grid) return;
   const filtered = Object.values(state.movies || {})
-    .filter(m => !isMovieLensMetadataPending(m))
     .filter(m => matchesGlobalFilters(m));
   // "Newest added first" is only this tab's *default* view (sortMode
   // 'recommended', i.e. no explicit choice made) — any other sort picked
@@ -6818,7 +6282,7 @@ function invalidateTasteModel() {
 
 // Invalidating the taste model forces the next render to retrain the model and
 // re-score the entire library — 100+ms on a large library. A bulk background
-// sweep (MovieLens metadata, reception) invalidated it after EVERY batch, so
+// sweep (metadata or reception) invalidated it after EVERY batch, so
 // that heavy recompute ran every couple of seconds for hours, freezing clicks.
 // The recommendations do not need to update on every single batch of a long
 // background sweep, so the invalidation is throttled: the caches stay warm
@@ -7021,34 +6485,7 @@ function buildCard(movie, opts={}) {
   return card;
 }
 
-// v20: expand-in-place replaces the hover flip. A layout-shifting expand
-// (the card spans the full grid row, pushing siblings down) can't safely be
-// hover-triggered — the pointer would end up over whatever card the reflow
-// left underneath it. Click/tap toggles on every device instead.
-//
-// v28: background work (backfills, tag normalisation, pool expansion) calls
-// render(), which rebuilds the active grid from scratch — a fresh DOM node
-// with no .expanded class, collapsing whatever the user had open mid-read.
-// expandedMovieId tracks *which movie* is expanded (survives a rebuild,
-// unlike a DOM reference); reapplyExpandedCardAfterRender() re-expands that
-// movie's freshly-built card after every render() call, so the only way to
-// actually collapse a card is to click it again.
-//
-// v31: the v24 approach of physically moving the card's DOM node to the end
-// of its row is gone. It pushed the expanded card a full row DOWN from where
-// the user clicked (forcing a scroll to find it) and still left a mid-grid
-// hole whenever the moved card had been the row's last item. The grid now
-// uses grid-auto-flow: row dense (styles.css): the card keeps its DOM
-// position, .expanded makes it span the full width at its own row, and
-// dense packing pulls the row's remaining cards up into the hole
-// automatically — the card opens right where it was clicked and the only
-// possible gap is the normal partial last row of the whole grid.
-let expandedMovieId = '';
 let openCardModalId = '';
-
-function collapseExpandedCard() {
-  document.querySelectorAll('.movie-card.expanded').forEach(card => card.classList.remove('expanded'));
-}
 
 function toggleCardReveal(event, card) {
   const interactive = event?.target?.closest?.('button,a,input,select,textarea,.star,.card-act,.source-link-btn,.genre-chip,.tag-insight-chip');
@@ -7090,7 +6527,7 @@ function openMovieCardModal(card) {
   clone.tabIndex = -1;
   clone.setAttribute('role', 'document');
   clone.querySelectorAll('[id]').forEach(node => { node.id = `modal-${node.id}`; });
-  clone.classList.add('expanded');
+  clone.classList.add('modal-detail');
   content.replaceChildren(clone);
   modal.hidden = false;
   document.body.classList.add('movie-modal-open');
@@ -7123,49 +6560,6 @@ function closeMovieCardModal() {
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') closeMovieCardModal();
 });
-
-// Every tab's grid element stays in the DOM at once (hidden via CSS, not
-// removed) and only the active tab's grid gets rebuilt by render() — so an
-// inactive tab can be sitting on a stale card with the same "card-<id>" id
-// as the freshly-rendered one in the active tab. document.getElementById
-// would silently resolve to whichever copy comes first in the DOM, which
-// may not be the visible one, so this looks inside the active tab's own
-// grid specifically instead.
-function activeGridElement() {
-  const gridId = activeTab === 'rated' ? 'ratedGrid'
-    : activeTab === 'recent' ? 'recentGrid'
-    : activeTab === 'pool' ? 'poolGrid'
-    : activeTab === 'tags' ? 'tagMoviesGrid'
-    : 'recsGrid';
-  return document.getElementById(gridId);
-}
-
-function reapplyExpandedCardAfterRender() {
-  if (!expandedMovieId) return;
-  const grid = activeGridElement();
-  const targetId = 'card-' + expandedMovieId;
-  const card = grid ? Array.from(grid.children).find(el => el.id === targetId) : null;
-  if (!card || card.classList.contains('expanded')) return;
-  card.classList.add('expanded');
-}
-
-// v29: render() isn't the only place a grid gets rebuilt from scratch —
-// renderTagDetail() (the Tags tab's per-tag title list) does its own
-// grid.innerHTML='' + rebuild and was never routed through render(), so the
-// v28 fix above didn't reach it. Rather than keep hunting down every place
-// that rebuilds a grid (this is already the second one found), a
-// MutationObserver on every card grid catches all of them structurally:
-// any childList change anywhere re-runs the same reapply check above, which
-// is already a cheap no-op when there's nothing to do.
-let expandedCardObserver = null;
-function initExpandedCardObserver() {
-  if (expandedCardObserver) return;
-  expandedCardObserver = new MutationObserver(() => reapplyExpandedCardAfterRender());
-  ['recsGrid', 'ratedGrid', 'recentGrid', 'poolGrid', 'tagMoviesGrid'].forEach(id => {
-    const grid = document.getElementById(id);
-    if (grid) expandedCardObserver.observe(grid, {childList: true});
-  });
-}
 
 function renderGenres(movie, matchedGenres=null) {
   const genres = movieGenres(movie);
@@ -8841,7 +8235,6 @@ function syncMustWaitForForegroundWork({respectHardCap=false}={}) {
     poolExpansionInProgress ||
     receptionBackfillInProgress ||
     tmdbBackfillInProgress ||
-    movielensImportInProgress ||
     backgroundAiTaggingInProgress ||
     tagCloudNormalizationInProgress ||
     tasteStoryInProgress
@@ -8862,6 +8255,7 @@ function queueDriveSync(delay=DRIVE_SYNC_DEBOUNCE_MS) {
       return;
     }
     driveSyncDeferred=false;
+    driveSyncDeferredSince=0;
     syncDrive(false);
   }, Math.max(0, Number.isFinite(requestedDelay) ? requestedDelay : DRIVE_SYNC_DEBOUNCE_MS));
 }
