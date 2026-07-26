@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 69;
+const APP_VERSION = 70;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -247,7 +247,6 @@ let lastAutoExpandAt = 0;
 let lastWikiRequestAt = 0;
 const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
-const CARD_REFRESH_BATCH_SIZE = 20;
 const BACKGROUND_SYNC_DEBOUNCE_MS = 30 * 1000;
 let backgroundChangesSinceRender = 0;
 const WIKI_PARSER_VERSION = 6;
@@ -265,11 +264,9 @@ function formatStrongMatchCount(strongCount, target) {
 
 function checkpointBackgroundUi(changedCount=0, force=false) {
   backgroundChangesSinceRender += Math.max(0, Number(changedCount) || 0);
-  if (force || backgroundChangesSinceRender >= CARD_REFRESH_BATCH_SIZE) {
-    backgroundChangesSinceRender = 0;
-    render();
-    return true;
-  }
+  // Background maintenance never rebuilds the card grids. The changed records
+  // are already durable; the next foreground render naturally picks them up.
+  if (force) backgroundChangesSinceRender = 0;
   updateLibraryHealth();
   return false;
 }
@@ -649,6 +646,11 @@ function scheduleRecommendationRefresh() {
   if (recRefreshScheduled) return;
   recRefreshScheduled = true;
   setTimeout(runRecommendationRefresh, 0);
+}
+function deferRecommendationRefresh() {
+  // Background maintenance marks derived data stale without scheduling heavy
+  // main-thread work. Foreground edits still use scheduleRecommendationRefresh.
+  recRefreshDirty = true;
 }
 function runRecommendationRefresh() {
   recRefreshScheduled = false;
@@ -1110,7 +1112,7 @@ function rewriteTagEvidence(evidence, rewrite) {
   return output;
 }
 
-function applyTagCloudRewrite(groups={}) {
+function applyTagCloudRewrite(groups={}, opts={}) {
   const rewrite = tagRewriteMap(groups);
   if (!rewrite.size) {
     state.legacyTagAliases = {};
@@ -1162,7 +1164,8 @@ function applyTagCloudRewrite(groups={}) {
   state.settings.tagPreferences = nextPreferences;
   if (selectedTag) selectedTag = rewrite.get(normaliseTagName(selectedTag)) || normaliseTagName(selectedTag);
   state.legacyTagAliases = {};
-  invalidateTagCaches();
+  if (opts.deferUi) deferRecommendationRefresh();
+  else invalidateTagCaches();
   return {changedTitles, rewrites:rewrite.size};
 }
 
@@ -1202,7 +1205,8 @@ function scheduleTagCloudNormalization(delay=1200) {
 
     normalizeTagCloudWithAi({
       force: true,
-      toast: false
+      toast: false,
+      deferUi: true
     }).catch(error => {
       console.warn('Tag cloud normalization failed', error);
     });
@@ -1246,7 +1250,7 @@ async function normalizeTagCloudWithAi(opts={}) {
     const payload = await response.json();
     if (payload.ok === false) throw new Error(payload.error || 'AI tag normalization failed');
     const groups = payload.rewriteGroups || payload.tagRewrites || {};
-    const result = applyTagCloudRewrite(groups);
+    const result = applyTagCloudRewrite(groups, opts);
     state.tagNormalization = {
       version:AI_TAG_CLOUD_NORMALIZE_VERSION,
       lastRawTagCount:fullAiTagVocabulary().length,
@@ -1256,11 +1260,14 @@ async function normalizeTagCloudWithAi(opts={}) {
       rewrites:result.rewrites,
       error:''
     };
-    rebuildTagBrain();
-    computeTagWeights();
-    saveLocalState();
+    if (opts.deferUi) deferRecommendationRefresh();
+    else {
+      rebuildTagBrain();
+      computeTagWeights();
+    }
+    saveLocalState(opts.deferUi ? {silentUi:true} : {});
     queueDriveSync();
-    render();
+    if (!opts.deferUi) render();
     if (opts.toast !== false) showToast(`Gemini rewrote ${result.rewrites} tags across ${result.changedTitles} titles`, 'success');
     return result;
   } catch(error) {
@@ -1270,7 +1277,7 @@ async function normalizeTagCloudWithAi(opts={}) {
       error:String(error?.message || error),
       attemptedAt:nowStamp()
     };
-    saveLocalState();
+    saveLocalState(opts.deferUi ? {silentUi:true} : {});
     if (opts.toast) showToast(`Tag normalization failed: ${error?.message || error}`, 'error');
     throw error;
   } finally {
@@ -1468,7 +1475,7 @@ function consensusTagResult(resultA, resultB) {
   return {...resultA, tags:agreed};
 }
 
-function commitAiTagSet(movie, cleaned, model='') {
+function commitAiTagSet(movie, cleaned, model='', opts={}) {
   const reconciled = reconcileAiTagSet(movie, cleaned);
   const minimumTags=aiTagMinimumForStory(movie?.storyText);
   if (reconciled.tags.length < minimumTags) throw new Error(`AI returned too few usable tags for ${movie.title}`);
@@ -1491,7 +1498,8 @@ function commitAiTagSet(movie, cleaned, model='') {
   movie.retagStatus = 'verified';
   movie.retagMessage = '';
   touchRecord(movie);
-  invalidateTagCaches();
+  if (opts.deferUi) deferRecommendationRefresh();
+  else invalidateTagCaches();
   return movie;
 }
 
@@ -1529,7 +1537,7 @@ function makeAiSensitiveContentError(message='Title excluded after Gemini safety
   return error;
 }
 
-function excludeTitleForAiSensitiveContent(movie, error) {
+function excludeTitleForAiSensitiveContent(movie, error, opts={}) {
   if (!movie?.id || movie._aiSensitiveContentExcluded) return false;
   const stamp = nowStamp();
   const id = String(movie.id);
@@ -1553,11 +1561,14 @@ function excludeTitleForAiSensitiveContent(movie, error) {
     error:String(error?.message || error || 'Gemini safety block: PROHIBITED_CONTENT'),
     excludedAt:stamp
   };
-  invalidateTagCaches();
-  invalidateTasteModel();
-  rebuildTagBrain();
-  computeTagWeights();
-  saveLocalState();
+  if (opts.deferUi) deferRecommendationRefresh();
+  else {
+    invalidateTagCaches();
+    invalidateTasteModel();
+    rebuildTagBrain();
+    computeTagWeights();
+  }
+  saveLocalState(opts.deferUi ? {silentUi:true} : {});
   queueDriveSync();
   return true;
 }
@@ -1674,7 +1685,7 @@ async function requestAiTags(movies, opts={}) {
         }
         return {tagged, failed, excluded};
       }
-      excludeTitleForAiSensitiveContent(items[0], error);
+      excludeTitleForAiSensitiveContent(items[0], error, opts);
       return {tagged:0, failed:0, excluded:1};
     }
     throw error;
@@ -1697,7 +1708,7 @@ async function requestAiTags(movies, opts={}) {
       // set, so the match% stays put and the title never falsely degrades to
       // "building N/10" just because a stochastic pass was sparse.
       if (merged.tags.length >= minimumTags || aiTagSetAlreadyStable(movie)) {
-        commitAiTagSet(movie, merged, payload.model);
+        commitAiTagSet(movie, merged, payload.model, opts);
         tagged++;
       } else {
         retryItems.push(movie);
@@ -3279,7 +3290,7 @@ async function expandPool(manual=true) {
   const saveCollectionState = (opts={}) => {
     const changedMovieIds = [...pendingCollectionSaveIds];
     pendingCollectionSaveIds.clear();
-    saveLocalState({...opts, changedMovieIds});
+    saveLocalState({...opts, changedMovieIds, silentUi:!manual});
   };
 
   const progress = (label, title='') => {
@@ -3306,10 +3317,14 @@ async function expandPool(manual=true) {
     progress('AI tagging new titles…', movies.map(movie => movie.title).join(' · '));
 
     try {
-      const result = await requestAiTags(movies);
+      const result = await requestAiTags(movies, manual ? {} : {deferUi:true});
       outcomes.ai += Number(result?.failed || 0);
-      rebuildTagBrain();
-      computeTagWeights();
+      if (manual) {
+        rebuildTagBrain();
+        computeTagWeights();
+      } else if (Number(result?.tagged || 0)) {
+        deferRecommendationRefresh();
+      }
       saveCollectionState();
       if (!manual && !shouldRunBackgroundCollection()) collectionSatisfied = true;
     } catch (error) {
@@ -3476,12 +3491,17 @@ async function expandPool(manual=true) {
     }
 
     hideFetchProgress();
-    rebuildTagBrain();
-    computeTagWeights();
     saveCollectionState();
     queueDriveSync();
     scheduleTagCloudNormalization(1500);
-    render();
+    if (manual) {
+      rebuildTagBrain();
+      computeTagWeights();
+      render();
+    } else {
+      deferRecommendationRefresh();
+      checkpointBackgroundUi(added, true);
+    }
 
     const outcomeSummary = `parser ${outcomes.parser}, duplicate ${outcomes.duplicate}, hidden ${outcomes.hidden}, filters ${outcomes.filtered}, AI pending ${outcomes.ai}`;
     console.info('CineLens expansion outcomes', {attempts, added, kept:added, outcomes, parserReasons, health:collectionHealth()});
@@ -4050,7 +4070,9 @@ function receptionBackfillRecentlyAttempted(movie, now=Date.now()) {
 }
 
 function sortByBackfillPriority(candidates) {
-  const scored = new Map(scoreMovies().map(item => [String(item.movie.id), item]));
+  // Maintenance ordering may reuse an already-built score cache, but must not
+  // train and score the whole library merely to choose its next few records.
+  const scored = new Map((scoredMovieCache || []).map(item => [String(item.movie.id), item]));
   return candidates.sort((a,b) => {
     const aAttempt = Math.max(
       Date.parse(a.receptionBackfillAttemptedAt || '') || 0,
@@ -4137,8 +4159,8 @@ async function runReceptionBackfill() {
   const candidates = receptionBackfillCandidates();
   if (!candidates.length) {
     // Sweep finished — apply any refresh the throttle was holding.
-    const modelChanged = flushTasteModelInvalidation();
-    if (modelChanged || backgroundChangesSinceRender) checkpointBackgroundUi(0, true);
+    flushTasteModelInvalidation();
+    if (backgroundChangesSinceRender) checkpointBackgroundUi(0, true);
     return;
   }
   receptionBackfillInProgress = true;
@@ -4202,17 +4224,14 @@ async function runReceptionBackfill() {
       }
     }
     if (changedMovieIds.length) {
-      updateReceptionCalibration();
-      saveLocalState({preserveUpdatedAt:true, changedMovieIds});
+      saveLocalState({preserveUpdatedAt:true, changedMovieIds, silentUi:true});
       queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
       // Throttled so a long reception sweep doesn't re-score the library every
       // batch; scheduleReceptionBackfill(9000) below re-enters until no work
       // remains, and the final pass (no candidates) flushes any pending refresh.
       throttledInvalidateTasteModel();
       checkpointBackgroundUi(changedMovieIds.length);
-    } else if (flushTasteModelInvalidation()) {
-      render();
-    }
+    } else flushTasteModelInvalidation();
   } catch(error) {
     console.warn('Reception backfill paused', error);
   } finally {
@@ -4373,7 +4392,7 @@ async function runTmdbBackfill() {
       }
     }
     if (changedMovieIds.length) {
-      saveLocalState({preserveUpdatedAt:true, changedMovieIds});
+      saveLocalState({preserveUpdatedAt:true, changedMovieIds, silentUi:true});
       queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
       checkpointBackgroundUi(changedMovieIds.length);
     }
@@ -5345,6 +5364,7 @@ function matchesTab(m) {
 // RENDER
 // ─────────────────────────────────────────────
 function render() {
+  flushRecommendationRefresh();
   updateStats();
   updateAiTagButton();
   updateVisibleSections();
@@ -5918,10 +5938,9 @@ async function runBackgroundAiQueue() {
       45,
       `${batch.length} titles queued · ${batch.map(movie => movie.title).join(' · ')}`
     );
-    const result = await requestAiTags(batch);
-    rebuildTagBrain();
-    computeTagWeights();
-    saveLocalState();
+    const result = await requestAiTags(batch, {deferUi:true});
+    if (Number(result?.tagged || 0)) deferRecommendationRefresh();
+    saveLocalState({silentUi:true});
     queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
     checkpointBackgroundUi(Number(result?.tagged || 0));
     if (Number(result?.failed || 0)) {
@@ -5943,7 +5962,7 @@ async function runBackgroundAiQueue() {
       movie.retagMessage = 'AI retry pending';
       touchRecord(movie);
     });
-    saveLocalState();
+    saveLocalState({silentUi:true});
     queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
     if (isExternalRateLimitError(error)) {
       autoFetchPaused = true;
@@ -6296,7 +6315,7 @@ function throttledInvalidateTasteModel() {
   if (now - lastTasteInvalidateAt >= TASTE_INVALIDATE_THROTTLE_MS) {
     lastTasteInvalidateAt = now;
     tasteInvalidatePending = false;
-    invalidateTasteModel();
+    deferRecommendationRefresh();
     return true;
   }
   tasteInvalidatePending = true;
@@ -6306,7 +6325,7 @@ function flushTasteModelInvalidation() {
   if (!tasteInvalidatePending) return false;
   tasteInvalidatePending = false;
   lastTasteInvalidateAt = Date.now();
-  invalidateTasteModel();
+  deferRecommendationRefresh();
   return true;
 }
 
@@ -8570,7 +8589,7 @@ function saveLocalState(opts={}) {
     }));
   } catch(e) { console.warn('Local bootstrap save failed',e); }
   queueIndexedDbSave(opts.localSaveDelay ?? 450, opts.changedMovieIds);
-  updateStats();
+  if (!opts.silentUi) updateStats();
 }
 function loadLocalState() {
   try {
@@ -9329,10 +9348,11 @@ function yieldToUi() {
 }
 
 async function syncChunkedDrive(manual=false) {
+  let pulledRemote = false;
   let manifestFile=state.drive.manifestFileId ? {id:state.drive.manifestFileId} : await findDriveManifest();
   if (!manifestFile) {
     await migrateLegacyDriveToChunked();
-    return;
+    return false;
   }
   state.drive.manifestFileId=manifestFile.id;
   let manifest=await readDriveJson(manifestFile.id);
@@ -9365,6 +9385,7 @@ async function syncChunkedDrive(manual=false) {
       const payload=await readDriveJson(remote.id);
       Object.keys(state.movies || {}).forEach(id => { if (driveChunkKey(state.movies[id]) === key) delete state.movies[id]; });
       Object.assign(state.movies,payload.movies || {});
+      pulledRemote = true;
       nextChunks[key]=remote;
       continue;
     }
@@ -9376,6 +9397,7 @@ async function syncChunkedDrive(manual=false) {
       if (mergedHash !== remote.hash) await uploadDriveJson(remote.id,mergedPayload);
       Object.keys(state.movies || {}).forEach(id => { if (driveChunkKey(state.movies[id]) === key) delete state.movies[id]; });
       Object.assign(state.movies,merged);
+      pulledRemote = true;
       nextChunks[key]={...remote,hash:mergedHash,updatedAt:nowStamp(),count:Object.keys(merged).length};
       continue;
     }
@@ -9397,9 +9419,11 @@ async function syncChunkedDrive(manual=false) {
     const remoteChanged=remoteProfile.hash !== cachedProfileHash;
     if (!localChanged && remoteChanged) {
       applyDriveProfile(await readDriveJson(remoteProfile.id),{merge:true});
+      pulledRemote = true;
     } else if (localChanged && remoteChanged && localProfileHash !== remoteProfile.hash) {
       const remote=await readDriveJson(remoteProfile.id);
       applyDriveProfile(remote,{merge:true});
+      pulledRemote = true;
       const merged=exportDriveProfile();
       const mergedHash=driveHash(merged);
       await uploadDriveJson(remoteProfile.id,merged);
@@ -9419,10 +9443,17 @@ async function syncChunkedDrive(manual=false) {
   state.meta.driveManifestFileId=manifestFile.id;
   state.meta.driveChunkHashes=Object.fromEntries(Object.entries(nextChunks).map(([key,info])=>[key,info.hash]));
   state.meta.driveProfileHash=manifest.profile?.hash || driveHash(exportDriveProfile());
-  rebuildTagBrain();
-  computeTagWeights();
-  saveLocalState({preserveUpdatedAt:true});
+  if (pulledRemote) {
+    if (manual) {
+      rebuildTagBrain();
+      computeTagWeights();
+    } else {
+      deferRecommendationRefresh();
+    }
+  }
+  saveLocalState({preserveUpdatedAt:true, silentUi:!manual});
   if (manual) showToast('Drive synchronized.', 'success');
+  return pulledRemote;
 }
 
 async function readDriveDataset(fileId) {
@@ -9575,8 +9606,8 @@ async function syncDrive(manual=false) {
     driveSyncRetryBackoffMs=0;
     clearTimeout(driveSyncRetryTimer);
     driveSyncRetryTimer=null;
-    saveLocalState({preserveUpdatedAt:true});
-    render();
+    saveLocalState({preserveUpdatedAt:true, silentUi:!manual});
+    if (manual) render();
     setDriveStatus('connected');
   } catch(error) {
     console.error('Drive sync failed', error);

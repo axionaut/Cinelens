@@ -3063,6 +3063,22 @@ must not resize, reorder or reflow surrounding cards.
   them would strand valid libraries created by earlier shipped versions and is
   not considered safe code reduction.
 
+### 30.33 Zero-reflow background maintenance (v70)
+
+- Automatic collection, reception refresh, TMDB refresh, AI tagging, tag-cloud
+  normalization and Drive upload must not call the global renderer or retrain
+  recommendation data.
+- Background writes persist changed records and may update the fixed activity
+  and Library status surfaces only. They mark derived recommendation data stale;
+  the next deliberate foreground render incorporates those changes.
+- Maintenance ordering may reuse the last computed recommendation scores, but
+  must not score the whole library merely to choose the next background batch.
+- Automatic Drive uploads do not rebuild the tag brain, recompute weights,
+  refresh header statistics or rebuild card grids. Explicit Drive connection
+  and manual synchronization may refresh the foreground after convergence.
+- Manual collection/tagging and direct title actions remain foreground
+  operations and refresh their visible result normally.
+
 ## 26. Rejected Title Refresh Lane
 
 Rejected Wikipedia titles are not permanent dead ends. Pool expansion keeps a persisted count of successful new additions and, after every 500 additions, runs a bounded rejected-title refresh lane.
