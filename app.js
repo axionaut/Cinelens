@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 64;
+const APP_VERSION = 65;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -1894,11 +1894,6 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
 
   // Maintenance can rewrite stored data, so it must follow the Drive decision.
   if (libraryWritesUnlocked) {
-    const stagedMovieLensIds = ensureMovieLensQueueRecords();
-    if (stagedMovieLensIds.length) {
-      saveLocalState({preserveUpdatedAt:true, changedMovieIds:stagedMovieLensIds});
-      queueDriveSync();
-    }
     const migratedWrongPicks = migrateVisibleWrongPicks();
     const migratedAliases = migrateLegacyTagAliases();
     const purgedTags = purgeLegacyTagsForAi();
@@ -1912,7 +1907,6 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
     scheduleTagCloudNormalization(1800);
     scheduleReceptionBackfill(4500);
     scheduleTmdbBackfill(4500);
-    scheduleMovieLensImport(5000);
   }
 
   render();
@@ -2725,7 +2719,6 @@ function stopOrExpandPool() {
   else {
     autoFetchPaused = false;
     expandPool(true);
-    scheduleMovieLensImport(500);
   }
 }
 
@@ -4222,7 +4215,7 @@ async function runReceptionBackfill() {
     console.warn('Reception backfill paused', error);
   } finally {
     receptionBackfillInProgress = false;
-    hideFetchProgress();
+    hideFetchProgress(receptionBackfillPendingCount() ? 10000 : 0);
     scheduleReceptionBackfill(9000);
   }
 }
@@ -4359,7 +4352,7 @@ async function runTmdbBackfill() {
     console.warn('TMDB backfill paused', error);
   } finally {
     tmdbBackfillInProgress = false;
-    hideFetchProgress();
+    hideFetchProgress(tmdbBackfillPendingCount() ? 10000 : 0);
     scheduleTmdbBackfill(6000);
   }
 }
@@ -4776,7 +4769,7 @@ async function runMovieLensImport() {
     }
   } finally {
     movielensImportInProgress = false;
-    hideFetchProgress();
+    hideFetchProgress(state.meta?.movielensImportQueue?.length ? 10000 : 0);
     updateLibraryHealth();
     if (!autoFetchPaused) {
       // Gap between batches so reception/TMDB/AI backfill (which all yield to
@@ -5585,6 +5578,8 @@ function nextPaint() {
 function showFetchProgress(label, pct, sub) {
   const el = document.getElementById('fetchProgress');
   if (!el) return;
+  clearTimeout(fetchProgressHideTimer);
+  fetchProgressHideTimer = null;
   const safePct = Math.max(0, Math.min(100, Number(pct) || 0));
   // classList.add rewrites the class attribute even when the token is already
   // present, so an unguarded add is a real attribute mutation on every tick.
@@ -5600,12 +5595,19 @@ function showFetchProgress(label, pct, sub) {
   if (fillEl && fillEl.style.width !== nextWidth) fillEl.style.width = nextWidth;
   if (subEl && subEl.textContent !== nextSub) subEl.textContent = nextSub;
 }
-function hideFetchProgress() {
+let fetchProgressHideTimer = null;
+function hideFetchProgress(delay=0) {
   const el = document.getElementById('fetchProgress');
-  if (el) {
+  clearTimeout(fetchProgressHideTimer);
+  fetchProgressHideTimer = null;
+  const hide = () => {
+    fetchProgressHideTimer = null;
+    if (!el) return;
     el.classList.remove('visible');
     el.setAttribute('aria-busy', 'false');
-  }
+  };
+  if (delay > 0) fetchProgressHideTimer = setTimeout(hide, delay);
+  else hide();
 }
 
 function aiTagCandidates() {
@@ -6296,8 +6298,6 @@ function updateLibraryHealth() {
   const receptionSegment = receptionStatus ? ` · ${receptionStatus}` : '';
   const tmdbStatus = tmdbBackfillStatusText();
   const tmdbSegment = tmdbStatus ? ` · ${tmdbStatus}` : '';
-  const movieLensStatus = movieLensImportStatusText();
-  const movieLensSegment = movieLensStatus ? ` · ${movieLensStatus}` : '';
 
   let text;
   if (autoFetchPaused) text = 'Collection paused';
@@ -6310,7 +6310,7 @@ function updateLibraryHealth() {
 
   if (label) label.textContent = text;
   if (maintenance) {
-    maintenance.textContent = `${text} · ${health.pendingTags} pending AI tags${receptionSegment}${tmdbSegment}${movieLensSegment} · ${drive}`;
+    maintenance.textContent = `${text} · ${health.pendingTags} pending AI tags${receptionSegment}${tmdbSegment} · ${drive}`;
   }
   const tmdbBtn = document.getElementById('tmdbBackfillToggleBtn');
   if (tmdbBtn) {
@@ -6390,7 +6390,7 @@ async function runBackgroundAiQueue() {
     computeTagWeights();
     saveLocalState();
     queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
-    checkpointBackgroundUi(batch.length);
+    checkpointBackgroundUi(Number(result?.tagged || 0));
     if (Number(result?.failed || 0)) {
       console.info('CineLens AI queue retained pending titles for a later retry.', result);
     }
@@ -6412,7 +6412,6 @@ async function runBackgroundAiQueue() {
     });
     saveLocalState();
     queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
-    checkpointBackgroundUi(batch.length);
     if (isExternalRateLimitError(error)) {
       autoFetchPaused = true;
       showToast('Background collection paused by Gemini rate limit. It will resume when you reopen or resume collection.', 'error');
@@ -6421,9 +6420,10 @@ async function runBackgroundAiQueue() {
     }
   } finally {
     backgroundAiTaggingInProgress = false;
-    hideFetchProgress();
-    if (pendingBackgroundAiMovies().length) scheduleBackgroundAiQueue(1200);
-    else checkpointBackgroundUi(0, true);
+    const moreBackgroundAi = pendingBackgroundAiMovies().length;
+    hideFetchProgress(moreBackgroundAi ? 10000 : 0);
+    if (moreBackgroundAi) scheduleBackgroundAiQueue(1200);
+    else if (backgroundChangesSinceRender) checkpointBackgroundUi(0, true);
   }
 }
 
@@ -9259,7 +9259,6 @@ function kickBackgroundLoopsOnForeground() {
   if (!libraryWritesUnlocked || autoFetchPaused) return;
   scheduleTmdbBackfill(400);
   scheduleReceptionBackfill(600);
-  if (typeof scheduleMovieLensImport === 'function') scheduleMovieLensImport(800);
   maybeAutoExpandPool();
 }
 

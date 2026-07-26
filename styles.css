@@ -547,21 +547,23 @@
 .library-health-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }
 .fetch-progress {
   position:fixed;
-  top:68px;
-  right:16px;
+  left:0;
+  right:0;
+  bottom:0;
   z-index:210;
-  width:min(360px, calc(100vw - 32px));
+  width:100%;
   margin:0;
-  padding:9px 11px;
-  border:1px solid rgba(var(--accent-rgb), .25);
-  border-radius:8px;
+  padding:8px max(16px, calc((100vw - 1760px) / 2));
+  border:0;
+  border-top:1px solid rgba(var(--accent-rgb), .3);
+  border-radius:0;
   background:rgba(15, 15, 16, .94);
-  box-shadow:0 12px 28px rgba(0, 0, 0, .38);
+  box-shadow:0 -8px 24px rgba(0, 0, 0, .34);
   backdrop-filter:blur(10px);
   pointer-events:none;
 }
 .fetch-progress.visible { display:block; }
-.fetch-progress .fetch-label { padding-right:92px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.fetch-progress .fetch-label { padding-right:92px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; animation:none; }
 .fetch-progress .fetch-sub { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .fetch-progress .fetch-stop { pointer-events:auto; position:absolute; top:7px; right:8px; }
 .maintenance-panel {
@@ -608,7 +610,7 @@
 @media (max-width:768px) {
   .library-status { max-width:100%; font-size:10px; }
   .library-health-label { max-width:190px; }
-  .fetch-progress { top:auto; right:10px; bottom:10px; width:calc(100vw - 20px); }
+  .fetch-progress { padding:8px 10px; }
   .maintenance-panel { grid-column:1 / -1; }
   /* A ragged flex-wrap row of differently-sized buttons is a big part of
      why this panel feels crowded on a phone — a fixed two-column grid of

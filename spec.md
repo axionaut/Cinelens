@@ -2988,6 +2988,27 @@ disturbing the foreground workspace.
   repeatedly reopening the app must not reset a bad title to the head of the
   queue.
 
+### 30.27 Continuous background activity session (v65)
+
+- The activity surface is a slim full-width bar fixed to the bottom viewport
+  edge, never a floating corner card and never part of document flow.
+- It is absent while idle. During a continuing background queue it remains
+  steadily visible across the short scheduled gaps between batches; the next
+  batch cancels the pending dismissal instead of flashing a new bar.
+- When a queue actually drains, the bar dismisses immediately. Foreground
+  operations retain their normal immediate completion dismissal.
+- Background AI failures update retry metadata but do not trigger a card-grid
+  render. Successful recommendation-affecting changes accumulate toward the
+  shared card refresh batch, with one final refresh when that queue drains.
+
+### 30.28 MovieLens importer retirement (v65)
+
+The MovieLens CSV import was a one-time migration and is no longer a product
+workflow. Library maintenance does not show a ratings-import control, startup
+and foreground recovery do not schedule MovieLens reconciliation, and the
+maintenance status line does not report an import queue. Ratings already
+imported remain ordinary CineLens ratings and are not removed.
+
 ## 26. Rejected Title Refresh Lane
 
 Rejected Wikipedia titles are not permanent dead ends. Pool expansion keeps a persisted count of successful new additions and, after every 500 additions, runs a bounded rejected-title refresh lane.
