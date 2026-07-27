@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 74;
+const APP_VERSION = 75;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -253,7 +253,7 @@ const WIKI_REQUEST_DELAY_MS = 850;
 const WIKI_BATCH_PAUSE_MS = 2500;
 const BACKGROUND_SYNC_DEBOUNCE_MS = 30 * 1000;
 let backgroundChangesSinceRender = 0;
-const WIKI_PARSER_VERSION = 6;
+const WIKI_PARSER_VERSION = 7;
 const REC_INFINITE_PAGE_SIZE = 20;
 const STRONG_REC_TARGET = 40;
 
@@ -1859,7 +1859,7 @@ function runStartupMaintenance() {
   const run = () => {
     try {
       const removedHindiShows = purgeDisallowedHindiShows();
-      const removedConventionalHorror = purgeDisallowedConventionalHorror();
+      const clearedHorrorExclusions = clearConventionalHorrorExclusions();
       const excludedSensitiveTitles = purgeAiSensitiveContentExclusions();
       const addedAtMigrated = ensureAddedAtMetadata();
       const ratedAtMigrated = ensureRatedAtMetadata();
@@ -1868,7 +1868,7 @@ function runStartupMaintenance() {
       const removedLegacyPoolExclusions = legacyDiscoveryExclusionsRemovedDuringLoad || Object.hasOwn(state, 'rollingPoolExclusions');
       legacyDiscoveryExclusionsRemovedDuringLoad = false;
       if (Object.hasOwn(state, 'rollingPoolExclusions')) delete state.rollingPoolExclusions;
-      if (removedHindiShows || removedConventionalHorror || excludedSensitiveTitles || addedAtMigrated || ratedAtMigrated || retiredWatchlist || changed || removedLegacyPoolExclusions) {
+      if (removedHindiShows || clearedHorrorExclusions || excludedSensitiveTitles || addedAtMigrated || ratedAtMigrated || retiredWatchlist || changed || removedLegacyPoolExclusions) {
         saveLocalState();
         queueDriveSync();
         render();
@@ -1949,11 +1949,11 @@ window.addEventListener('DOMContentLoaded', async () => {
   // catalogue instead of starting blank. Never runs for an existing library.
   await loadSeedCatalogueIfEmpty();
   const startupRemovedHindiShows = purgeDisallowedHindiShows();
-  const startupRemovedConventionalHorror = purgeDisallowedConventionalHorror();
+  const startupClearedHorrorExclusions = clearConventionalHorrorExclusions();
   const startupAddedAtMigrated = ensureAddedAtMetadata();
   const startupRatedAtMigrated = ensureRatedAtMetadata();
   const startupRetiredWatchlist = retireWatchlistForRecentlyAdded();
-  if (startupRemovedHindiShows || startupRemovedConventionalHorror || startupAddedAtMigrated || startupRatedAtMigrated || startupRetiredWatchlist) saveLocalState({preserveUpdatedAt:true});
+  if (startupRemovedHindiShows || startupClearedHorrorExclusions || startupAddedAtMigrated || startupRatedAtMigrated || startupRetiredWatchlist) saveLocalState({preserveUpdatedAt:true});
   startupInitialLibraryPresent = libraryRecordCount() > 0;
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   // A Drive-enabled device must not treat a catalogue-only cache as a usable
@@ -2613,27 +2613,6 @@ function isHindiShowRecord(movie) {
   return !!movie?.format && String(movie.language || '').trim().toLowerCase() === 'hindi';
 }
 
-function horrorSourceText(movie) {
-  return [
-    movie?.leadText,
-    movie?.categoryText,
-    movie?.storyText,
-    ...(movie?.genres || []),
-    ...(movie?.tags || []),
-    ...(movie?.plotTags || [])
-  ].join(' ').toLowerCase();
-}
-
-function isConventionalHorrorTitle(movie) {
-  const source = horrorSourceText(movie);
-  // Monster/creature adventure is not horror by itself. Exclude only titles
-  // whose metadata or narrative carries an actual conventional-horror signal.
-  const explicitHorror = /\b(?:horror|slasher|splatter|gore|haunted|haunting|possession|exorcism|demon(?:ic)?|ghost|paranormal)\b/.test(source);
-  if (!explicitHorror) return false;
-  const hybridHorror = /\b(?:psychological|science[ -]?fiction|sci[ -]?fi|comedy|satirical|dark comedy)\s+(?:horror|thriller)\b|\b(?:horror[- ]comedy|psychological-horror|science-fiction-horror)\b/.test(source);
-  return !hybridHorror;
-}
-
 function excludeStoredTitles(predicate, reason) {
   let removed = 0;
   const stamp = nowStamp();
@@ -2673,8 +2652,22 @@ function purgeDisallowedHindiShows() {
   return excludeStoredTitles(isHindiShowRecord, 'hindi-show-excluded');
 }
 
-function purgeDisallowedConventionalHorror() {
-  return excludeStoredTitles(isConventionalHorrorTitle, 'conventional-horror-excluded');
+// The conventional-horror gate is retired: ratings and manual removal decide
+// which titles stay. Titles the old gate auto-removed are released from the
+// blocklist so discovery can surface them again.
+function clearConventionalHorrorExclusions() {
+  let cleared = 0;
+  Object.entries(state.wrongPicks || {}).forEach(([key, item]) => {
+    if (item?.reason !== 'conventional-horror-excluded') return;
+    delete state.wrongPicks[key];
+    cleared++;
+  });
+  Object.entries(state.deletedMovieRecords || {}).forEach(([id, item]) => {
+    if (item?.reason !== 'conventional-horror-excluded') return;
+    delete state.deletedMovieRecords[id];
+    cleared++;
+  });
+  return cleared;
 }
 
 function unblockTitleForManualSearch(value) {
@@ -4521,7 +4514,6 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
     tagged: false, rating: 0, source: 'wikipedia', wikiPageId, wikiUrl: wikiUrlFromTitle(pageTitle), wikiTitle: pageTitle, pageTitle, thumbnailUrl, storyText, leadText, reception, wikiVerified: true, retagStatus: 'needs-ai-tags', retagMessage: 'AI tags pending',
     wikiParserVersion: WIKI_PARSER_VERSION
   };
-  if (isConventionalHorrorTitle(candidate)) return rejectWikiParse(diagnostics, 'conventional horror is excluded');
   return candidate;
 }
 
@@ -9689,7 +9681,7 @@ async function loadFromDrive(opts={}) {
     const migratedAliases=migrateLegacyTagAliases();
     migrateLegacyPoolItems();
     const removedHindiShows = purgeDisallowedHindiShows();
-    const removedConventionalHorror = purgeDisallowedConventionalHorror();
+    const clearedHorrorExclusions = clearConventionalHorrorExclusions();
     const addedAtMigrated = ensureAddedAtMetadata();
     const retiredWatchlist = retireWatchlistForRecentlyAdded();
     const cleaned=cleanContaminatedTags(true);
@@ -9699,7 +9691,7 @@ async function loadFromDrive(opts={}) {
     render();
     state.drive.connected=true;
     setDriveStatus('connected');
-    if (marked || cleaned || migratedAliases.rewrites || removedHindiShows || removedConventionalHorror || addedAtMigrated || retiredWatchlist) await uploadDriveData();
+    if (marked || cleaned || migratedAliases.rewrites || removedHindiShows || clearedHorrorExclusions || addedAtMigrated || retiredWatchlist) await uploadDriveData();
     scheduleTagCloudNormalization(1600);
     return true;
   } catch(error) {
