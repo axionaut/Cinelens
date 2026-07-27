@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 71;
+const APP_VERSION = 72;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -2032,6 +2032,11 @@ function movieIdentityKeys(movie) {
   const pageId = wikiPageIdFromMovie(movie);
   if (pageId) keys.add(`page:${pageId}`);
   const format = movie.format || 'movie';
+  const tmdbId = String(movie.tmdbId || '').trim();
+  if (tmdbId) {
+    const tmdbType = movie.tmdbMediaType === 'tv' || format !== 'movie' ? 'tv' : 'movie';
+    keys.add(`tmdb:${tmdbType}:${tmdbId}`);
+  }
   const year = movie.year || '';
   [movie.title, movie.wikiTitle, movie.pageTitle].forEach(title => {
     const key = normaliseTitleKey(title);
@@ -2065,9 +2070,16 @@ function findExistingMovieByIdentity(movie, collection=state.movies) {
 
 function mergeUserState(target, source) {
   if (!target || !source) return target;
-  if (!Number(target.rating || 0) && Number(source.rating || 0)) {
+  const targetRating = Number(target.rating || 0);
+  const sourceRating = Number(source.rating || 0);
+  const targetRatedAt = Date.parse(target.ratedAt || '') || 0;
+  const sourceRatedAt = Date.parse(source.ratedAt || '') || 0;
+  if (
+    sourceRatedAt > targetRatedAt ||
+    (!targetRatedAt && !targetRating && sourceRating > 0)
+  ) {
     target.rating = Number(source.rating || 0);
-    if (source.ratedAt && !target.ratedAt) target.ratedAt = source.ratedAt;
+    target.ratedAt = source.ratedAt || target.ratedAt || '';
   }
   if (source.watchlist) target.watchlist = true;
   if (source.manualAdded) target.manualAdded = true;
@@ -9348,10 +9360,12 @@ async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
   state.meta.driveProfileReadyAt=nowStamp();
   state.meta.driveManifestFileId=state.drive.manifestFileId || state.meta.driveManifestFileId || '';
   Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
+  const duplicatesCollapsed = collapseDuplicateMovies(state.movies);
   invalidateTagCaches();
   rebuildTagBrain();
   computeTagWeights();
   saveLocalState({preserveUpdatedAt:true});
+  if (duplicatesCollapsed) queueDriveSync(0);
   render();
   return {changedKeys,profileChanged};
 }
@@ -9459,6 +9473,11 @@ async function syncChunkedDrive(manual=false) {
   state.meta.driveManifestFileId=manifestFile.id;
   state.meta.driveChunkHashes=Object.fromEntries(Object.entries(nextChunks).map(([key,info])=>[key,info.hash]));
   state.meta.driveProfileHash=manifest.profile?.hash || driveHash(exportDriveProfile());
+  const duplicatesCollapsed = collapseDuplicateMovies(state.movies);
+  if (duplicatesCollapsed) {
+    pulledRemote = true;
+    driveSyncQueued = true;
+  }
   if (pulledRemote) {
     if (manual) {
       rebuildTagBrain();

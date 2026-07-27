@@ -3094,6 +3094,20 @@ must not resize, reorder or reflow surrounding cards.
   rendering. Tag-brain rebuilding, recommendation-weight computation and the
   foreground render happen once after the requested run completes.
 
+### 30.35 Imported-rating identity convergence (v72)
+
+- TMDB media type plus TMDB ID is a first-class title identity alongside
+  Wikipedia page ID and canonical title/year/format.
+- When an older imported record and a newer Wikipedia record identify the same
+  title, duplicate collapse retains the richer Wikipedia record and transfers
+  the newest explicit rating state, including its `ratedAt` timestamp.
+- Chunked Drive restore must collapse cross-ID duplicates after applying the
+  personal-rating profile and before rendering. The corrected catalogue/profile
+  is queued back to Drive so the obsolete imported ID does not return on the
+  next session.
+- Background Drive convergence applies the same collapse and schedules one
+  follow-up sync when remote chunks reintroduce a duplicate identity.
+
 ## 26. Rejected Title Refresh Lane
 
 Rejected Wikipedia titles are not permanent dead ends. Pool expansion keeps a persisted count of successful new additions and, after every 500 additions, runs a bounded rejected-title refresh lane.
