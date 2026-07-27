@@ -3082,12 +3082,13 @@ must not resize, reorder or reflow surrounding cards.
 ### 30.34 Fast manual AI-tag refresh (v71)
 
 - The explicit **Retry pending AI tags** action resolves title narrative data
-  in bounded groups of ten instead of awaiting one Wikipedia title at a time.
+  in bounded concurrent groups instead of awaiting one Wikipedia title at a
+  time; v74 supersedes the original group size with 30.
 - Narrative-only resolution must pass `tmdb:false`; poster, provider and TMDB
   metadata maintenance is independent and must not delay AI-tag repair.
-- Manual Gemini requests accept up to ten titles per batch and use a controlled
-  4.5-second request interval. Automatic background tagging retains its smaller,
-  more conservative batch and pacing.
+- Manual Gemini requests accept up to ten titles per batch. As of v74 they use
+  a controlled 1.2-second request interval and one continuation pass; automatic
+  background tagging retains its smaller, more conservative batch and pacing.
 - A failed or blank multi-title response retains the per-title isolation
   fallback so one problematic title cannot strand the rest of the queue.
 - Each completed batch is saved as a scoped IndexedDB checkpoint without
@@ -3906,3 +3907,23 @@ their dirty year/language/format chunks. Automatic sync must not download the
 manifest or hash every catalogue chunk after each foreground action. Startup,
 reconnect, manual sync, missing-cache recovery, and unscoped catalogue changes
 retain the full remote reconciliation path.
+
+### 31.6 One-pass Wikipedia ingestion and accelerated AI repair (v74)
+
+Every newly discovered Wikipedia title is parsed completely from its original
+article response. Narrative, identity, metadata, thumbnail when available, and
+Reception/critical-response data are captured together. An explicit current
+empty Reception record means the page had no usable section; a missing
+thumbnail must not cause the same article to be fetched again.
+
+The remaining Wikipedia repair worker is exclusively a compatibility migration
+for stored titles created by older parsers or imports. Its UI must call this
+`legacy Wiki repair`, not imply that Reception is routinely fetched through an
+independent product pipeline.
+
+Manual pending-tag repair resolves up to 30 legacy title identities/narratives
+concurrently, then feeds every resolved title through bounded Gemini
+sub-batches of ten. Requests use a 1.2-second minimum interval and at most one
+automatic continuation pass. A blank batch is isolated in pairs rather than
+falling immediately to one request per title. Pending counts in Library
+maintenance and on the retry action use the same eligibility definition.

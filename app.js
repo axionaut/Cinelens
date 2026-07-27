@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 73;
+const APP_VERSION = 74;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -36,8 +36,9 @@ const AI_TAG_MAX_COUNT = 20;
 const AI_TAG_MIGRATION_VERSION = 1;
 const AI_TAG_BATCH_SIZE = 3;
 const AI_MANUAL_TAG_BATCH_SIZE = 10;
-const AI_MANUAL_RESOLVE_CONCURRENCY = 10;
-const AI_MANUAL_REQUEST_DELAY_MS = 4500;
+const AI_MANUAL_RESOLVE_CONCURRENCY = 30;
+const AI_MANUAL_REQUEST_DELAY_MS = 1200;
+const AI_MANUAL_RETRY_LIMIT = 1;
 const AI_TAG_RETRY_LIMIT = 3;
 const AI_VOCABULARY_SAMPLE_SIZE = 240;
 const AI_TAG_CLOUD_NORMALIZE_EVERY = 100;
@@ -1753,7 +1754,8 @@ async function requestAiTags(movies, opts={}) {
       failed++;
     }
   });
-  if (retryItems.length && Number(opts.retry || 0) < AI_TAG_RETRY_LIMIT) {
+  const retryLimit=Math.max(0,Number(opts.retryLimit ?? AI_TAG_RETRY_LIMIT));
+  if (retryItems.length && Number(opts.retry || 0) < retryLimit) {
     const retryResult = await requestAiTags(retryItems, {
       ...opts,
       retry:Number(opts.retry || 0) + 1,
@@ -4073,8 +4075,10 @@ async function fetchWikiMovieByPageId(pageId, mode='all', opts={}) {
 function needsReceptionBackfill(movie) {
   if (!movie || movie.source !== 'wikipedia') return false;
   if (!movie.storyText || (!movie.wikiPageId && !movie.wikiTitle && !movie.pageTitle)) return false;
-  const needsThumbnail = !movie.thumbnailUrl && !movie.thumbnailBackfillAttemptedAt;
-  return needsThumbnail || !movie.reception || Number(movie.reception.version || 0) < RECEPTION_VERSION;
+  // Every newly parsed Wiki page already carries a current reception record,
+  // including an explicit "no Reception section" result. Missing thumbnails
+  // are not a reason to download that same article again.
+  return !movie.reception || Number(movie.reception.version || 0) < RECEPTION_VERSION;
 }
 
 // Escalating backoff so a title that keeps failing to yield reception data
@@ -4147,9 +4151,9 @@ function receptionBackfillPendingCount() {
 function receptionBackfillStatusText() {
   const remaining = receptionBackfillPendingCount();
   if (!remaining) return '';
-  if (receptionBackfillInProgress) return `reception refresh running · ${remaining} pending`;
-  if (poolExpansionInProgress || backgroundAiTaggingInProgress) return `reception refresh waiting · ${remaining} pending (behind other background work)`;
-  return `${remaining} titles need quality data`;
+  if (receptionBackfillInProgress) return `legacy Wiki repair running · ${remaining} pending`;
+  if (poolExpansionInProgress || backgroundAiTaggingInProgress) return `legacy Wiki repair waiting · ${remaining} pending`;
+  return `${remaining} legacy titles need Wiki repair`;
 }
 
 function scheduleReceptionBackfill(delay=3500) {
@@ -4200,7 +4204,7 @@ async function runReceptionBackfill() {
       if (autoFetchPaused || poolExpansionInProgress || backgroundAiTaggingInProgress) break;
       index++;
       showFetchProgress(
-        `Reception data refresh · ${index}/${batch.length}`,
+        `Repairing legacy Wiki data · ${index}/${batch.length}`,
         Math.round((index / batch.length) * 100),
         movie.title
       );
@@ -5207,6 +5211,17 @@ function aiTagCandidates() {
     });
 }
 
+function aiTagCandidateCount() {
+  const now=Date.now();
+  let count=0;
+  const countIfPending=movie => {
+    if (movie?.title && !hasCurrentAiTags(movie) && aiBackgroundRetryReady(movie,now)) count++;
+  };
+  Object.values(state.movies || {}).forEach(countIfPending);
+  Object.values(state.hiddenTitles || {}).filter(movie => movie.storyText).forEach(countIfPending);
+  return count;
+}
+
 async function enrichLegacyTitleForAi(movie) {
   if (!movie || hasCurrentAiTags(movie)) return movie;
   if (movie.storyText) return movie;
@@ -5226,7 +5241,7 @@ async function enrichLegacyTitleForAi(movie) {
 function updateAiTagButton() {
   const btn = document.getElementById('tagUntaggedBtn');
   if (!btn) return;
-  const remaining = aiTagCandidates().length;
+  const remaining = aiTagCandidateCount();
   btn.style.display = remaining ? 'inline-flex' : 'none';
   btn.textContent = remaining ? `Retry ${remaining} pending AI tags` : 'AI tags complete';
 }
@@ -5299,58 +5314,66 @@ async function tagAllUntagged() {
         if (enriched?.storyText && !hasCurrentAiTags(enriched)) batch.push(enriched);
       });
 
-      if (!batch.length) continue;
+      for (let batchStart=0; batchStart < batch.length && !fetchAbortRequested; batchStart += AI_MANUAL_TAG_BATCH_SIZE) {
+        const tagBatch=batch.slice(batchStart,batchStart + AI_MANUAL_TAG_BATCH_SIZE);
+        showFetchProgress(
+          `AI tagging batch · ${Math.min(index,queue.length)}/${queue.length}`,
+          Math.round((index / queue.length) * 100),
+          tagBatch.map(movie => movie.title).join(' · ')
+        );
 
-      showFetchProgress(
-        `AI tagging batch · ${index}/${queue.length}`,
-        Math.round((index / queue.length) * 100),
-        batch.map(movie => movie.title).join(' · ')
-      );
+        // Tag exactly this resolved sub-batch. Wikipedia resolution is wider
+        // than the Gemini payload so network lookup happens in far fewer waves
+        // without silently dropping titles beyond the first ten.
+        let result;
+        try {
+          result = await requestAiTags(tagBatch, {
+            batchSize:AI_MANUAL_TAG_BATCH_SIZE,
+            requestDelayMs:AI_MANUAL_REQUEST_DELAY_MS,
+            retryLimit:AI_MANUAL_RETRY_LIMIT
+          });
+        } catch (batchError) {
+          if (isExternalRateLimitError(batchError)) throw batchError;
 
-      // Tag exactly this queue batch. Do not append unrelated titles from Pool.
-      // A blocked or empty Gemini response must not strand the rest of the queue.
-      let result;
-      try {
-        result = await requestAiTags(batch, {
-          batchSize:AI_MANUAL_TAG_BATCH_SIZE,
-          requestDelayMs:AI_MANUAL_REQUEST_DELAY_MS
-        });
-      } catch (batchError) {
-        if (isExternalRateLimitError(batchError)) throw batchError;
-
-        result = {tagged:0, failed:0};
-        if (batch.length > 1 && isBlankGeminiResponseError(batchError)) {
-          showFetchProgress(
-            `AI response was empty · retrying titles individually`,
-            Math.round((index / queue.length) * 100),
-            batch.map(movie => movie.title).join(' · ')
-          );
-          for (const movie of batch) {
-            if (fetchAbortRequested) break;
-            try {
-              const single = await requestAiTags([movie], {requestDelayMs:AI_MANUAL_REQUEST_DELAY_MS});
-              result.tagged += Number(single?.tagged || 0);
-              result.failed += Number(single?.failed || 0);
-            } catch (singleError) {
-              if (isExternalRateLimitError(singleError)) throw singleError;
-              markAiBatchRetryFailure(movie, singleError);
-              result.failed++;
+          result = {tagged:0, failed:0};
+          if (tagBatch.length > 1 && isBlankGeminiResponseError(batchError)) {
+            showFetchProgress(
+              `AI response was empty · isolating small groups`,
+              Math.round((index / queue.length) * 100),
+              tagBatch.map(movie => movie.title).join(' · ')
+            );
+            for (let fallbackStart=0; fallbackStart < tagBatch.length; fallbackStart += 2) {
+              if (fetchAbortRequested) break;
+              const fallbackBatch=tagBatch.slice(fallbackStart,fallbackStart + 2);
+              try {
+                const fallback = await requestAiTags(fallbackBatch, {
+                  batchSize:2,
+                  requestDelayMs:AI_MANUAL_REQUEST_DELAY_MS,
+                  retryLimit:0
+                });
+                result.tagged += Number(fallback?.tagged || 0);
+                result.failed += Number(fallback?.failed || 0);
+              } catch (fallbackError) {
+                if (isExternalRateLimitError(fallbackError)) throw fallbackError;
+                fallbackBatch.forEach(movie => markAiBatchRetryFailure(movie, fallbackError));
+                result.failed += fallbackBatch.length;
+              }
             }
+          } else {
+            tagBatch.forEach(movie => markAiBatchRetryFailure(movie, batchError));
+            result.failed = tagBatch.length;
           }
-        } else {
-          batch.forEach(movie => markAiBatchRetryFailure(movie, batchError));
-          result.failed = batch.length;
         }
-      }
-      tagged += Number(result?.tagged || 0);
-      failed += Number(result?.failed || 0);
+        tagged += Number(result?.tagged || 0);
+        failed += Number(result?.failed || 0);
 
-      saveLocalState({
-        preserveUpdatedAt:true,
-        changedMovieIds:batch.map(movie => String(movie.id)),
-        silentUi:true
-      });
-      await nextPaint();
+        saveLocalState({
+          preserveUpdatedAt:true,
+          changedMovieIds:tagBatch.map(movie => String(movie.id)),
+          silentUi:true
+        });
+        await nextPaint();
+      }
     }
 
     rebuildTagBrain();
@@ -5839,7 +5862,7 @@ function collectionHealth() {
   if (collectionHealthCache && now - collectionHealthCacheAt < COLLECTION_HEALTH_TTL_MS) return collectionHealthCache;
   const status = recommendationFetchStatus();
   const taggedUnseen = taggedUnseenPoolCount();
-  const pendingTags = pendingBackgroundAiMovies().length;
+  const pendingTags = aiTagCandidateCount();
   const personalized = personalizedEnough();
 
   collectionHealthCache = {
