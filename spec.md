@@ -3884,3 +3884,25 @@ include a hide action.
 Film/show tag chips use palette variables rather than hardcoded fixed colors.
 The palette validator checks both film and show chip text/background pairs so
 random themes keep the two card types distinct without sacrificing readability.
+
+### 31.5 Seamless foreground actions and scoped Drive writes (v73)
+
+Foreground actions must feel immediate. Rating or unrating a title updates the
+visible card/modal in the current frame; it must not synchronously collapse the
+whole library, recalibrate reception models, recompute tag weights, or rebuild
+every card grid. Recommendation derivation is invalidated and coalesced for an
+idle period after the browser has had an opportunity to paint. Reception
+calibration is likewise delayed until idle and reuses one trained taste model
+per format instead of training a leave-one-out model for every rated title.
+
+Local persistence accepts a changed-title scope and does not walk unrelated
+movie, hidden, deletion, unblock, or wrong-pick records for a one-title rating.
+IndexedDB continues to persist only the changed record plus the profile.
+
+After startup has reconciled the Drive manifest, ordinary automatic syncs use
+that manifest as a local baseline. A rating or settings edit uploads only the
+personal profile and patched manifest; catalogue edits rebuild and upload only
+their dirty year/language/format chunks. Automatic sync must not download the
+manifest or hash every catalogue chunk after each foreground action. Startup,
+reconnect, manual sync, missing-cache recovery, and unscoped catalogue changes
+retain the full remote reconciliation path.

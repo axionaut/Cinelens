@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 72;
+const APP_VERSION = 73;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -648,7 +648,15 @@ function scheduleRecommendationRefresh() {
   recRefreshDirty = true;
   if (recRefreshScheduled) return;
   recRefreshScheduled = true;
-  setTimeout(runRecommendationRefresh, 0);
+  const scheduleIdle = () => {
+    if (!recRefreshScheduled) return;
+    if ('requestIdleCallback' in window) requestIdleCallback(runRecommendationRefresh, {timeout:1000});
+    else setTimeout(runRecommendationRefresh, 32);
+  };
+  // Guarantee at least one paint after the user action before recommendation
+  // derivation and grid replacement begin.
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(scheduleIdle);
+  else setTimeout(scheduleIdle, 0);
 }
 function deferRecommendationRefresh() {
   // Background maintenance marks derived data stale without scheduling heavy
@@ -6994,9 +7002,12 @@ function fitReceptionCoefficient(samples=[]) {
 
 function updateReceptionCalibration() {
   const samples = [];
+  const models = new Map();
   Object.values(state.movies || {}).forEach(movie => {
     if (Number(movie?.rating || 0) <= 0 || !usableReception(movie)) return;
-    const model = getTasteModel(movie.id, formatClass(movie));
+    const format=formatClass(movie);
+    if (!models.has(format)) models.set(format,getTasteModel('',format));
+    const model = models.get(format);
     const tasteOnly = predictTasteFit(movie, model, {tasteOnly:true});
     const reception = normaliseReceptionRecord(movie.reception);
     const signal = Number(reception.qualitySignal || 0) * Number(reception.strength || 0);
@@ -7025,11 +7036,15 @@ function updateReceptionCalibration() {
 function scheduleReceptionCalibrationUpdate() {
   clearTimeout(receptionCalibrationTimer);
   receptionCalibrationTimer = setTimeout(() => {
-    receptionCalibrationTimer = null;
-    updateReceptionCalibration();
-    saveLocalState({preserveUpdatedAt:true});
-    queueDriveSync();
-  }, 300);
+    const run=() => {
+      receptionCalibrationTimer = null;
+      updateReceptionCalibration();
+      saveLocalState({preserveUpdatedAt:true,driveProfileOnly:true});
+      queueDriveSync();
+    };
+    if ('requestIdleCallback' in window) requestIdleCallback(run,{timeout:3000});
+    else setTimeout(run,32);
+  }, 1500);
 }
 
 function predictTasteFit(movie, model=null, opts={}) {
@@ -7166,16 +7181,21 @@ function rateMovie(id, rating) {
   if (ratingChanged) movie.ratedAt = nowStamp();
   if (nextRating > 0) movie.watchlist = false;
   touchRecord(movie);
-  collapseDuplicateMovies(state.movies);
   invalidateTasteModel();
-  computeTagWeights();
-  scheduleReceptionCalibrationUpdate();
   if (nextRating > 0 && String(id) === pendingSearchResetAfterRatingId) {
     pendingSearchResetAfterRatingId = '';
     clearUnifiedTitleSearch();
   }
-  saveLocalState({changedMovieIds:[id]}); queueDriveSync(); render();
+  saveLocalState({changedMovieIds:[id], driveProfileOnly:true});
+  queueDriveSync();
+  closeMovieCardModal();
+  const recommendationView = activeTab === 'all' || activeTab === 'movie' || activeTab === 'show' || activeTab === 'pool';
+  const leavesCurrentView = (nextRating > 0 && recommendationView) || (nextRating === 0 && activeTab === 'rated');
+  if (leavesCurrentView) {
+    document.querySelectorAll(`#card-${CSS.escape(String(id))}`).forEach(card => card.remove());
+  }
   scheduleTasteStoryUpdate();
+  scheduleReceptionCalibrationUpdate();
   showToast(nextRating ? `"${movie.title}" → ${nextRating}/5` : `Removed rating from "${movie.title}"`, nextRating ? 'success' : '');
 }
 
@@ -8315,32 +8335,38 @@ function queueSettingsSync() {
 
 function saveSettingsState() {
   touchSettings();
-  saveLocalState();
+  saveLocalState({driveProfileOnly:true});
   queueSettingsSync();
 }
 
 function saveViewState() {
   touchSettings();
-  saveLocalState();
+  saveLocalState({localOnly:true});
 }
 
-function ensureSyncMetadata({touchDataset=false}={}) {
+function ensureSyncMetadata({touchDataset=false,changedMovieIds=null}={}) {
   const stamp = nowStamp();
-  Object.values(state.movies || {}).forEach(movie => {
+  const scopedIds=Array.isArray(changedMovieIds) ? new Set(changedMovieIds.map(String)) : null;
+  const movies=scopedIds
+    ? [...scopedIds].map(id => state.movies?.[id]).filter(Boolean)
+    : Object.values(state.movies || {});
+  movies.forEach(movie => {
     if (!movie._updatedAt) touchRecord(movie, stamp);
   });
-  Object.values(state.hiddenTitles || {}).forEach(movie => {
-    if (!movie._updatedAt) touchRecord(movie, movie.hiddenAt || stamp);
-  });
-  Object.values(state.deletedMovieRecords || {}).forEach(record => {
-    if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
-  });
-  Object.values(state.unblockedTitleRecords || {}).forEach(record => {
-    if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
-  });
-  Object.values(state.wrongPicks || {}).forEach(record => {
-    if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
-  });
+  if (!scopedIds) {
+    Object.values(state.hiddenTitles || {}).forEach(movie => {
+      if (!movie._updatedAt) touchRecord(movie, movie.hiddenAt || stamp);
+    });
+    Object.values(state.deletedMovieRecords || {}).forEach(record => {
+      if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
+    });
+    Object.values(state.unblockedTitleRecords || {}).forEach(record => {
+      if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
+    });
+    Object.values(state.wrongPicks || {}).forEach(record => {
+      if (record && typeof record === 'object' && !record.updatedAt) record.updatedAt = record.at || stamp;
+    });
+  }
   if (!state.meta) state.meta = {};
   if (touchDataset || !state.meta.updatedAt) state.meta.updatedAt = stamp;
   if (!state.settings) state.settings = {};
@@ -8604,7 +8630,8 @@ function stampCanonicalDriveFile(fileId) {
 }
 
 function saveLocalState(opts={}) {
-  ensureSyncMetadata({touchDataset:!opts.preserveUpdatedAt});
+  ensureSyncMetadata({touchDataset:!opts.preserveUpdatedAt,changedMovieIds:opts.changedMovieIds});
+  if (!opts.localOnly && !opts.skipDriveDirty) markDriveDirty(opts);
   // localStorage now carries only the tiny bootstrap needed before IndexedDB opens.
   // The title library itself is record-based IndexedDB, so a rating does not rewrite
   // a multi-megabyte JSON string or silently fail on mobile storage limits.
@@ -8700,6 +8727,10 @@ let driveSyncDeferredSince=0;
 let driveSyncPending=false;
 let driveSyncRetryTimer=null;
 let driveSyncRetryBackoffMs=0;
+let driveManifestCache=null;
+let driveProfileDirty=false;
+let driveAllChunksDirty=false;
+const driveDirtyChunkKeys=new Set();
 const DRIVE_SYNC_RETRY_MIN_MS=15000;
 const DRIVE_SYNC_RETRY_MAX_MS=5*60*1000;
 const DRIVE_SYNC_DEBOUNCE_MS=1200;
@@ -8952,7 +8983,7 @@ async function connectDrive() {
     connected = true;
     setSilentDriveRenewalBlockUntil(0);
     state.drive.lastConnectedAt=Date.now();
-    saveLocalState({preserveUpdatedAt:true});
+    saveLocalState({preserveUpdatedAt:true,skipDriveDirty:true});
     setDriveStatus('connected');
     if (!startupFinalized || !libraryWritesUnlocked) {
       startupFinalized = false;
@@ -8997,7 +9028,7 @@ async function restoreDriveSession(showFailure=false, opts={}) {
     }
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
-    saveLocalState({preserveUpdatedAt:true});
+    saveLocalState({preserveUpdatedAt:true,skipDriveDirty:true});
     setDriveStatus('connected');
     return true;
   } catch(e) {
@@ -9148,6 +9179,27 @@ function driveChunkKey(movie) {
   const language=String(movie?.language || 'Unknown').replace(/[^A-Za-z0-9]+/g,'_');
   const format=movie?.format ? 'show' : 'movie';
   return `${range}_${language}_${format}`;
+}
+
+function markDriveDirty(opts={}) {
+  driveProfileDirty=true;
+  if (opts.driveProfileOnly) return;
+  const ids=Array.isArray(opts.changedMovieIds) ? opts.changedMovieIds : null;
+  if (!ids) {
+    driveAllChunksDirty=true;
+    return;
+  }
+  ids.forEach(id => {
+    const movie=state.movies?.[String(id)];
+    if (movie) driveDirtyChunkKeys.add(driveChunkKey(movie));
+    else driveAllChunksDirty=true;
+  });
+}
+
+function clearDriveDirtyState() {
+  driveProfileDirty=false;
+  driveAllChunksDirty=false;
+  driveDirtyChunkKeys.clear();
 }
 
 function driveHash(value) {
@@ -9326,10 +9378,13 @@ async function migrateLegacyDriveToChunked() {
   state.meta.driveManifestFileId=manifestFile.id;
   state.meta.driveChunkHashes=Object.fromEntries(Object.entries(manifest.chunks).map(([key,info])=>[key,info.hash]));
   state.meta.driveProfileHash=manifest.profile.hash;
+  driveManifestCache=JSON.parse(JSON.stringify(manifest));
+  clearDriveDirtyState();
   return manifest;
 }
 
 async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
+  driveManifestCache=JSON.parse(JSON.stringify(manifest));
   const localHashes=state.meta?.driveChunkHashes || {};
   const localProfileHash=state.meta?.driveProfileHash || '';
   const remoteChunks=manifest.chunks || {};
@@ -9364,10 +9419,62 @@ async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
   invalidateTagCaches();
   rebuildTagBrain();
   computeTagWeights();
-  saveLocalState({preserveUpdatedAt:true});
+  clearDriveDirtyState();
+  saveLocalState({preserveUpdatedAt:true,skipDriveDirty:!duplicatesCollapsed});
   if (duplicatesCollapsed) queueDriveSync(0);
   render();
   return {changedKeys,profileChanged};
+}
+
+function buildDriveChunkPayload(key) {
+  const movies={};
+  Object.values(state.movies || {}).forEach(movie => {
+    if (driveChunkKey(movie) === key) movies[String(movie.id)]=catalogueMovieForDrive(movie);
+  });
+  return {schema:DRIVE_SYNC_MODEL_V2,chunk:key,movies};
+}
+
+// Normal local edits do not need reconciliation: startup already loaded the
+// authoritative manifest. Persist only the changed profile/chunks, then patch
+// the cached manifest. Manual sync and startup retain the full merge path.
+async function syncDirtyDrive() {
+  if (!driveManifestCache?.profile?.id || !state.drive.manifestFileId || driveAllChunksDirty) return null;
+  const manifest=JSON.parse(JSON.stringify(driveManifestCache));
+  let changed=false;
+  for (const key of driveDirtyChunkKeys) {
+    const payload=buildDriveChunkPayload(key);
+    const hash=driveHash(payload);
+    const remote=manifest.chunks?.[key];
+    if (!remote) {
+      const file=await createDriveJson(`${DRIVE_CHUNK_PREFIX}${key}.json`,payload);
+      manifest.chunks=manifest.chunks || {};
+      manifest.chunks[key]={id:file.id,hash,updatedAt:nowStamp(),count:Object.keys(payload.movies).length};
+      changed=true;
+    } else if (remote.hash !== hash) {
+      await uploadDriveJson(remote.id,payload);
+      manifest.chunks[key]={...remote,hash,updatedAt:nowStamp(),count:Object.keys(payload.movies).length};
+      changed=true;
+    }
+  }
+  if (driveProfileDirty) {
+    const profile=exportDriveProfile();
+    const hash=driveHash(profile);
+    if (manifest.profile.hash !== hash) {
+      await uploadDriveJson(manifest.profile.id,profile);
+      manifest.profile={...manifest.profile,hash,updatedAt:nowStamp()};
+      changed=true;
+    }
+  }
+  if (changed) {
+    manifest.updatedAt=nowStamp();
+    await uploadDriveJson(state.drive.manifestFileId,manifest);
+  }
+  state.meta=state.meta || {};
+  state.meta.driveChunkHashes=Object.fromEntries(Object.entries(manifest.chunks || {}).map(([key,info])=>[key,info.hash]));
+  state.meta.driveProfileHash=manifest.profile?.hash || '';
+  driveManifestCache=manifest;
+  clearDriveDirtyState();
+  return false;
 }
 
 // Hand the main thread back to the browser so queued input/paint can run.
@@ -9387,6 +9494,7 @@ async function syncChunkedDrive(manual=false) {
   state.drive.manifestFileId=manifestFile.id;
   let manifest=await readDriveJson(manifestFile.id);
   if (manifest.schema !== DRIVE_SYNC_MODEL_V2) throw new Error('Unsupported CineLens Drive manifest');
+  driveManifestCache=JSON.parse(JSON.stringify(manifest));
   const chunks=buildDriveChunks();
   const cachedHashes=state.meta?.driveChunkHashes || {};
   const remoteChunks=manifest.chunks || {};
@@ -9473,6 +9581,8 @@ async function syncChunkedDrive(manual=false) {
   state.meta.driveManifestFileId=manifestFile.id;
   state.meta.driveChunkHashes=Object.fromEntries(Object.entries(nextChunks).map(([key,info])=>[key,info.hash]));
   state.meta.driveProfileHash=manifest.profile?.hash || driveHash(exportDriveProfile());
+  driveManifestCache=JSON.parse(JSON.stringify(manifest));
+  clearDriveDirtyState();
   const duplicatesCollapsed = collapseDuplicateMovies(state.movies);
   if (duplicatesCollapsed) {
     pulledRemote = true;
@@ -9486,7 +9596,7 @@ async function syncChunkedDrive(manual=false) {
       deferRecommendationRefresh();
     }
   }
-  saveLocalState({preserveUpdatedAt:true, silentUi:!manual});
+  saveLocalState({preserveUpdatedAt:true, silentUi:!manual, skipDriveDirty:true});
   if (manual) showToast('Drive synchronized.', 'success');
   return pulledRemote;
 }
@@ -9562,7 +9672,7 @@ async function loadFromDrive(opts={}) {
     const cleaned=cleanContaminatedTags(true);
     rebuildTagBrain();
     computeTagWeights();
-    saveLocalState({preserveUpdatedAt:true});
+    saveLocalState({preserveUpdatedAt:true,skipDriveDirty:true});
     render();
     state.drive.connected=true;
     setDriveStatus('connected');
@@ -9598,7 +9708,7 @@ async function createDriveFile() {
     state.drive.fileId=d.id;
     stampCanonicalDriveFile(d.id);
     await uploadDriveData();
-    saveLocalState({preserveUpdatedAt:true});
+    saveLocalState({preserveUpdatedAt:true,skipDriveDirty:true});
   } catch(e){showToast('Drive file create failed','error');}
 }
 async function syncDrive(manual=false) {
@@ -9632,7 +9742,8 @@ async function syncDrive(manual=false) {
     // The first sync after installing v2 performs a one-time split from the
     // legacy file. All later syncs read one tiny manifest and transfer only the
     // profile and catalogue chunks whose hashes changed.
-    await syncChunkedDrive(manual);
+    const fastResult=!manual ? await syncDirtyDrive() : null;
+    if (fastResult === null) await syncChunkedDrive(manual);
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
     // Local changes are now confirmed on Drive — clear the pending flag and
@@ -9641,7 +9752,7 @@ async function syncDrive(manual=false) {
     driveSyncRetryBackoffMs=0;
     clearTimeout(driveSyncRetryTimer);
     driveSyncRetryTimer=null;
-    saveLocalState({preserveUpdatedAt:true, silentUi:!manual});
+    saveLocalState({preserveUpdatedAt:true, silentUi:!manual, skipDriveDirty:true});
     if (manual) render();
     setDriveStatus('connected');
   } catch(error) {
