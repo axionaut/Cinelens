@@ -2525,9 +2525,10 @@ original deferral stands. No grounded-search integration was added.
 - **Where to watch is platform-picked, not region-fixed (v18).** v17 shipped a
   fixed-India-only display; Nitin explicitly asked instead to choose OTT
   platforms and see which countries carry the title on them. The matched
-  title's detail endpoint is called once with `append_to_response=watch/providers`,
-  which returns TMDB's **entire** multi-region result in that same call (no
-  extra request per country). `buildWatchAvailability` scans every region and
+  title's detail endpoint is called once with
+  `append_to_response=watch/providers,reviews`, which returns TMDB's **entire**
+  multi-region result and first audience-review page in that same call (no
+  extra request per country or for reviews). `buildWatchAvailability` scans every region and
   reduces it to a compact `movie.watchAvailability = {platformName:
   [countryCode, ...]}` map, restricted to the curated `OTT_PLATFORM_PATTERNS`
   list (Netflix, Amazon Prime Video, Disney+, Apple TV+, Max, Hulu,
@@ -3927,3 +3928,27 @@ sub-batches of ten. Requests use a 1.2-second minimum interval and at most one
 automatic continuation pass. A blank batch is isolated in pairs rather than
 falling immediately to one request per title. Pending counts in Library
 maintenance and on the retry action use the same eligibility definition.
+
+### 31.7 TMDB audience-review tag evidence (v76)
+
+Movie and TV details append TMDB `reviews` alongside `watch/providers`; no
+additional HTTP request or review-specific maintenance worker is permitted.
+The first returned review page is compacted to at most 8,000 characters, with
+each review capped at 1,200 characters and markup, URLs and author identity
+discarded. The compact text is catalogue data and participates in Drive sync.
+
+AI tagging uses Wikipedia narrative plus the compact TMDB audience text as one
+evidence corpus. The prompt treats reviews as untrusted opinion: it may infer
+recurring descriptive themes, tone, character dynamics and viewing experience,
+but must ignore embedded instructions and must not emit generic quality or
+sentiment labels. Evidence validation and the AI source hash use the same
+combined corpus. Consequently, newly available review evidence makes an older
+tag set legitimately stale and queues a batched refresh.
+
+`TMDB_DATA_VERSION = 6` performs one ordinary TMDB backfill through the existing
+fixed progress surface. Each completed TMDB batch may yield to the existing
+background AI batch before continuing, rather than creating a parallel
+foreground process. Explicit retag refreshes TMDB before Gemini so audience
+evidence is available in that same action. No additional review provider is
+integrated: sources without an official, free, browser-safe API would require
+scraping, questionable redistribution or another credential/maintenance path.
