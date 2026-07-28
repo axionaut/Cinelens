@@ -3966,3 +3966,33 @@ Persisted failed-attempt metadata still places attempted titles behind untouched
 work across sessions. Within either tier, Best match remains the primary order;
 rated and unranked records follow, with recency rather than title spelling as
 their fallback.
+
+### 31.9 TMDB reviews only enrich tags (v78)
+
+TMDB audience-review evidence is additive, not a replacement source. When a
+review corpus first arrives or changes, reconciliation preserves every existing
+non-suppressed tag and its evidence, then appends review-supported tags up to
+the normal title-tag cap. Exact and semantically similar tags collapse to the
+existing tag instead of creating duplicates. A changed review hash must never
+be interpreted as a changed Wikipedia narrative or erase prior tags. Genuine
+Wikipedia narrative replacement retains its separate obsolete-tag replacement
+behaviour.
+
+Per-title refresh is a two-stage fan-out/fan-in pipeline. Wikipedia and TMDB
+requests start concurrently because neither depends on the other. Their results
+are consolidated into one in-memory title snapshot, then AI tagging runs
+against that completed snapshot because it depends on both sources. The action
+performs one final save, Drive-sync enqueue and render; individual source
+responses must not produce intermediate commits or UI refreshes.
+
+Background maintenance uses the same dependency graph across batches rather
+than a single global worker lock. A title becomes Gemini-eligible only after
+its required Wikipedia and TMDB stages are current (or a failed source has
+entered its persisted cooldown). While Gemini processes that ready batch,
+Wikipedia and TMDB workers may fetch different pending titles concurrently;
+neither worker pauses merely because another source is awaiting a network
+response. Pool expansion remains exclusive because it already fans out through
+both source systems. Background persistence remains incremental and debounced,
+and Drive sync waits for a consolidated checkpoint. The fixed progress surface
+shows the currently active source stages together instead of competing
+per-worker bars.

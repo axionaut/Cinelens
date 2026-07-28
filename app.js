@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 77;
+const APP_VERSION = 78;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -1391,7 +1391,13 @@ function reconcileAiTagSet(movie, cleaned) {
   const sourceText=aiTagSourceText(movie);
   const sameStory = movie?.aiTagging?.storyHash === aiStoryHash(sourceText);
   const existingEvidence = movie?.aiTagEvidence || {};
-  if (!sameStory || !Object.keys(existingEvidence).length) {
+  const reviewText=String(movie?.tmdbReviewText || '').trim();
+  const reviewHash=aiStoryHash(reviewText);
+  // Review evidence is additive. A new/changed TMDB review corpus changes the
+  // combined source hash, but that is not equivalent to Wikipedia replacing
+  // the title's narrative and must never discard the already-grounded set.
+  const reviewEnrichment=!!reviewText && movie?.aiTagging?.tmdbReviewHash !== reviewHash;
+  if ((!sameStory && !reviewEnrichment) || !Object.keys(existingEvidence).length) {
     return {tags:incomingTags, evidence:Object.fromEntries(incomingTags.map(tag => [tag, incomingEvidence[tag]]).filter(([, evidence]) => evidence))};
   }
   const suppressedTags = suppressedTagSet(movie);
@@ -1399,7 +1405,10 @@ function reconcileAiTagSet(movie, cleaned) {
   const keepers = cleanTagArray(movie.tags || [], movie, false).filter(tag => {
     const normalised = normaliseTagName(tag);
     const stored = existingEvidence[normalised] || existingEvidence[tag];
-    return normalised && !suppressedTags.has(normalised) && !suppressedRawTags.has(normalised) && evidenceSupportedByStory(stored?.evidence || '', sourceText);
+    return normalised
+      && !suppressedTags.has(normalised)
+      && !suppressedRawTags.has(normalised)
+      && (reviewEnrichment || evidenceSupportedByStory(stored?.evidence || '', sourceText));
   });
   // Stability guarantee: once the existing grounded set is already complete
   // (enough tags, all still supported by the unchanged story), a retag must
@@ -1408,12 +1417,16 @@ function reconcileAiTagSet(movie, cleaned) {
   // (a 92% match sliding to 88% for no real reason). Return the existing set
   // untouched so the match% is reproducible. Only an incomplete set (below
   // the minimum) falls through to a merge that genuinely completes it.
-  if (keepers.length >= aiTagMinimumForStory(sourceText)) {
+  if (!reviewEnrichment && keepers.length >= aiTagMinimumForStory(sourceText)) {
     const keeperEvidence = {};
     keepers.forEach(tag => { if (existingEvidence[tag]) keeperEvidence[tag] = existingEvidence[tag]; });
     return {tags:keepers, evidence:keeperEvidence};
   }
-  const mergedTags = [...new Set([...keepers, ...incomingTags])].slice(0, AI_TAG_MAX_COUNT);
+  const mergedTags=[];
+  [...keepers,...incomingTags].forEach(tag => {
+    if (mergedTags.length >= AI_TAG_MAX_COUNT) return;
+    if (!mergedTags.some(existing => tagsAreSimilar(existing,tag))) mergedTags.push(tag);
+  });
   const mergedEvidence = {};
   mergedTags.forEach(tag => {
     const existing = existingEvidence[tag];
@@ -1517,6 +1530,8 @@ function commitAiTagSet(movie, cleaned, model='', opts={}) {
     model:String(model || ''),
     promptVersion:AI_TAG_PROMPT_VERSION,
     storyHash:aiStoryHash(sourceText),
+    narrativeHash:aiStoryHash(movie.storyText || ''),
+    tmdbReviewHash:aiStoryHash(movie.tmdbReviewText || ''),
     completedTagCount:reconciled.tags.length,
     taggedAt:new Date().toISOString()
   };
@@ -4187,7 +4202,7 @@ function receptionBackfillStatusText() {
   const remaining = receptionBackfillPendingCount();
   if (!remaining) return '';
   if (receptionBackfillInProgress) return `legacy Wiki repair running · ${remaining} pending`;
-  if (poolExpansionInProgress || backgroundAiTaggingInProgress) return `legacy Wiki repair waiting · ${remaining} pending`;
+  if (poolExpansionInProgress) return `legacy Wiki repair waiting · ${remaining} pending`;
   return `${remaining} legacy titles need Wiki repair`;
 }
 
@@ -4211,13 +4226,10 @@ function scheduleReceptionBackfill(delay=3500) {
 }
 
 async function runReceptionBackfill() {
-  // Pool expansion and AI tagging outrank this; TMDB backfill is lower
-  // priority than this (see runTmdbBackfill's own guard) so the two never
-  // run at the same time either — exactly one background fetch loop owns
-  // the shared progress bar at any moment. autoFetchPaused ("Pause
-  // collection") halts this loop too but keeps polling so it resumes
-  // automatically once collection resumes.
-  if (autoFetchPaused || !libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || tmdbBackfillInProgress) {
+  // Source workers overlap each other and Gemini across different titles.
+  // Pool expansion remains exclusive because it already fans out through the
+  // same sources. autoFetchPaused still halts every background stage.
+  if (autoFetchPaused || !libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress) {
     scheduleReceptionBackfill(3000);
     return;
   }
@@ -4236,13 +4248,9 @@ async function runReceptionBackfill() {
     for (const movie of batch) {
       // Per-title pause check so "Pause collection" stops this within one
       // title instead of finishing the whole batch first.
-      if (autoFetchPaused || poolExpansionInProgress || backgroundAiTaggingInProgress) break;
+      if (autoFetchPaused || poolExpansionInProgress) break;
       index++;
-      showFetchProgress(
-        `Repairing legacy Wiki data · ${index}/${batch.length}`,
-        Math.round((index / batch.length) * 100),
-        movie.title
-      );
+      showBackgroundPipelineProgress('Wikipedia', `${index}/${batch.length} · ${movie.title}`);
       try {
         const mode = movie.format ? 'shows' : 'movies';
         const fresh = movie.wikiPageId
@@ -4301,7 +4309,7 @@ async function runReceptionBackfill() {
     console.warn('Reception backfill paused', error);
   } finally {
     receptionBackfillInProgress = false;
-    hideFetchProgress(receptionBackfillPendingCount() ? 10000 : 0);
+    settleBackgroundPipelineProgress(receptionBackfillPendingCount() ? 10000 : 0);
     scheduleReceptionBackfill(9000);
   }
 }
@@ -4362,7 +4370,7 @@ function tmdbBackfillStatusText() {
   if (paused) return remaining ? `TMDB refresh paused · ${remaining} pending (posters/genres/availability/audience evidence)` : 'TMDB refresh paused';
   if (!remaining) return '';
   if (tmdbBackfillInProgress) return `TMDB refresh running · ${remaining} pending`;
-  if (poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) return `TMDB refresh waiting · ${remaining} pending (behind other background work)`;
+  if (poolExpansionInProgress) return `TMDB refresh waiting · ${remaining} pending (behind collection expansion)`;
   return `TMDB refresh queued · ${remaining} pending`;
 }
 
@@ -4404,7 +4412,7 @@ async function runTmdbBackfill() {
   // polling so it resumes by itself the moment collection is resumed —
   // pausing collection should quiet ALL background fetching, not leave the
   // progress bar reappearing seconds later for a different loop.
-  if (autoFetchPaused || !libraryWritesUnlocked || tmdbBackfillInProgress || poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) {
+  if (autoFetchPaused || !libraryWritesUnlocked || tmdbBackfillInProgress || poolExpansionInProgress) {
     scheduleTmdbBackfill(3000);
     return;
   }
@@ -4422,13 +4430,9 @@ async function runTmdbBackfill() {
       // Checked per title, not just at batch start — clicking Pause takes
       // effect within the current title instead of after the whole batch.
       if (state.settings.tmdbBackfillPaused || autoFetchPaused) break;
-      if (poolExpansionInProgress || backgroundAiTaggingInProgress || receptionBackfillInProgress) break;
+      if (poolExpansionInProgress) break;
       index++;
-      showFetchProgress(
-        `TMDB refresh · ${index}/${batch.length}`,
-        Math.round((index / batch.length) * 100),
-        `${movie.title} · posters, genres, availability, audience evidence`
-      );
+      showBackgroundPipelineProgress('TMDB', `${index}/${batch.length} · ${movie.title} · posters, genres, availability, audience evidence`);
       try {
         const versionBefore = Number(movie.tmdbDataVersion || 0);
         const tmdbIdBefore = String(movie.tmdbId || '');
@@ -4465,7 +4469,7 @@ async function runTmdbBackfill() {
     console.warn('TMDB backfill paused', error);
   } finally {
     tmdbBackfillInProgress = false;
-    hideFetchProgress(tmdbBackfillPendingCount() ? 10000 : 0);
+    settleBackgroundPipelineProgress(tmdbBackfillPendingCount() ? 10000 : 0);
     if (pendingBackgroundAiCount()) scheduleBackgroundAiQueue(700);
     scheduleTmdbBackfill(6000);
   }
@@ -5229,6 +5233,43 @@ function hideFetchProgress(delay=0) {
   else hide();
 }
 
+function backgroundPipelineStages(extra='') {
+  const stages=[];
+  if (receptionBackfillInProgress) stages.push('Wikipedia');
+  if (tmdbBackfillInProgress) stages.push('TMDB');
+  if (backgroundAiTaggingInProgress) stages.push('Gemini');
+  if (extra && !stages.includes(extra)) stages.push(extra);
+  return stages;
+}
+
+function showBackgroundPipelineProgress(stage, detail='') {
+  const stages=backgroundPipelineStages(stage);
+  showFetchProgress(
+    stages.length > 1 ? `Updating library in parallel · ${stages.join(' + ')}` : `${stage} update`,
+    stages.length > 1 ? 55 : 45,
+    detail
+  );
+}
+
+function settleBackgroundPipelineProgress(delay=10000) {
+  const stages=backgroundPipelineStages();
+  if (stages.length) {
+    showFetchProgress(
+      stages.length > 1 ? `Updating library in parallel · ${stages.join(' + ')}` : `${stages[0]} update`,
+      stages.length > 1 ? 55 : 45,
+      ''
+    );
+    return;
+  }
+  hideFetchProgress(delay);
+}
+
+function aiSourceDataReady(movie, now=Date.now()) {
+  const wikiReady = !needsReceptionBackfill(movie) || receptionBackfillRecentlyAttempted(movie,now);
+  const tmdbReady = !needsTmdbBackfill(movie) || tmdbBackfillRecentlyAttempted(movie,now);
+  return wikiReady && tmdbReady;
+}
+
 function aiTagCandidates() {
   const now = Date.now();
   const recommendationRank = new Map(scoreMovies().map((item, index) => [String(item.movie.id), index]));
@@ -5237,6 +5278,7 @@ function aiTagCandidates() {
     ...Object.values(state.hiddenTitles || {}).filter(movie => movie.storyText)
   ]
     .filter(movie => movie.title && !hasCurrentAiTags(movie))
+    .filter(aiSourceDataReady)
     .filter(movie => aiBackgroundRetryReady(movie, now))
     .sort((a,b) => {
       const aAttempt = Date.parse(a.aiTagging?.attemptedAt || '') || 0;
@@ -5324,7 +5366,7 @@ async function tagAllUntagged() {
 
   const queue = aiTagCandidates();
   if (!queue.length) {
-    showToast('All eligible titles have AI tags', '');
+    showToast(aiTagCandidateCount() ? 'Pending titles are still completing their source refresh' : 'All eligible titles have AI tags', '');
     return;
   }
 
@@ -5879,6 +5921,7 @@ function pendingBackgroundAiMovies() {
   const recommendationRank = new Map(scoreMovies().map((item, index) => [String(item.movie.id), index]));
   return Object.values(state.movies || {})
     .filter(movie => movie?.storyText && !hasCurrentAiTags(movie) && !movie.hidden)
+    .filter(movie => aiSourceDataReady(movie,now))
     .filter(movie => aiBackgroundRetryReady(movie, now))
     .sort((a, b) => {
       const aTime = Date.parse(a.aiTagging?.attemptedAt || '') || 0;
@@ -5898,7 +5941,7 @@ function pendingBackgroundAiCount() {
   const now=Date.now();
   let count=0;
   Object.values(state.movies || {}).forEach(movie => {
-    if (movie?.storyText && !movie.hidden && !hasCurrentAiTags(movie) && aiBackgroundRetryReady(movie,now)) count++;
+    if (movie?.storyText && !movie.hidden && !hasCurrentAiTags(movie) && aiSourceDataReady(movie,now) && aiBackgroundRetryReady(movie,now)) count++;
   });
   return count;
 }
@@ -6049,11 +6092,7 @@ async function runBackgroundAiQueue() {
 
   backgroundAiTaggingInProgress = true;
   try {
-    showFetchProgress(
-      'AI tagging pending titles…',
-      45,
-      `${batch.length} titles queued · ${batch.map(movie => movie.title).join(' · ')}`
-    );
+    showBackgroundPipelineProgress('Gemini', `${batch.length} titles queued · ${batch.map(movie => movie.title).join(' · ')}`);
     const result = await requestAiTags(batch, {deferUi:true});
     if (Number(result?.tagged || 0)) deferRecommendationRefresh();
     saveLocalState({silentUi:true});
@@ -6089,7 +6128,7 @@ async function runBackgroundAiQueue() {
   } finally {
     backgroundAiTaggingInProgress = false;
     const moreBackgroundAi = pendingBackgroundAiCount();
-    hideFetchProgress(moreBackgroundAi ? 10000 : 0);
+    settleBackgroundPipelineProgress(moreBackgroundAi ? 10000 : 0);
     if (moreBackgroundAi) scheduleBackgroundAiQueue(1200);
     else if (backgroundChangesSinceRender) checkpointBackgroundUi(0, true);
   }
@@ -7509,40 +7548,29 @@ async function retagFromStoredData(id, opts={}) {
   const movie = state.movies[id];
   if (!movie) return null;
   const beforeTags = new Set(scoringTags(movie));
-  showFetchProgress(opts.progressLabel || 'Refreshing AI tags...', 20, movie.wikiTitle || movie.pageTitle || movie.title);
+  showFetchProgress(opts.progressLabel || 'Refreshing title sources...', 20, movie.wikiTitle || movie.pageTitle || movie.title);
   try {
-    let updated = movie;
-    if (!movie.thumbnailUrl) {
-      const fresh = await refreshTitleFromWikipedia(movie, {ai:false,tmdb:false});
-      if (fresh?.thumbnailUrl) updated = applyFreshWikiMovie(id, fresh, movie);
+    // Wikipedia and TMDB are independent sources: start both together, then
+    // consolidate their results once. AI remains the second stage because its
+    // evidence corpus depends on the completed Wiki + TMDB snapshot.
+    const [fresh,tmdb] = await Promise.all([
+      refreshTitleFromWikipedia(movie, {ai:false,tmdb:false}).catch(() => null),
+      fetchTmdbDetails(movie.title, movie.year, movie.format).catch(() => null)
+    ]);
+    let updated = fresh ? applyFreshWikiMovie(id, fresh, movie) : movie;
+    applyTmdbDetails(updated,tmdb);
+    if (!updated.storyText || Number(updated.wikiParserVersion || 0) < WIKI_PARSER_VERSION) {
+      throw new Error('Stored Wikipedia page could not be refreshed');
     }
-    // Audience reviews share the existing TMDB details request and are tag
-    // evidence, so fetch them before asking Gemini to build the tag set.
-    await attachTmdbDetails(updated);
+    showFetchProgress(opts.progressLabel || 'Refreshing AI tags...', 65, updated.title);
     // A manual retag runs the two-pass consensus (confidence); an automatic
     // >90% re-verify passes consensus:false to stay single-pass.
     const consensus = opts.consensus !== false;
-    if (updated.storyText && Number(updated.wikiParserVersion || 0) >= WIKI_PARSER_VERSION) {
-      try {
-        await applyAiTags(updated, {force:true, consensus});
-      } catch(firstError) {
-        if (/daily cinelens tagging limit reached/i.test(String(firstError?.message || firstError))) throw firstError;
-        const fresh = await refreshTitleFromWikipedia(updated, {ai:false,tmdb:false});
-        if (!fresh) throw firstError;
-        updated = applyFreshWikiMovie(id, fresh, updated);
-        await applyAiTags(updated, {force:true, consensus});
-      }
-    } else {
-      const fresh = await refreshTitleFromWikipedia(movie, {ai:false,tmdb:false});
-      if (!fresh) throw new Error('Stored Wikipedia page could not be refreshed');
-      updated = applyFreshWikiMovie(id, fresh, movie);
-      await applyAiTags(updated, {force:true, consensus});
-    }
+    await applyAiTags(updated, {force:true, consensus});
     updated.needsManualUrl = false;
     updated.retagStatus = 'verified';
     updated.retagMessage = '';
-    // TMDB was refreshed before tag generation so poster/provider corrections
-    // and audience evidence are committed with this same foreground action.
+    // Both source results and AI output are committed in this single checkpoint.
     rebuildTagBrain();
     computeTagWeights();
     saveLocalState();
