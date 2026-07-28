@@ -2574,8 +2574,11 @@ original deferral stands. No grounded-search integration was added.
   deliberately separate from the slower reception backfill: it needs only a
   TMDB lookup against already-stored title/year/format, never a Wikipedia
   refetch, so it can move through the existing library much faster. It
-  prioritizes rated titles, then current recommendation candidates by score,
-  then the rest (`sortByBackfillPriority`, shared with the reception backfill).
+  prioritizes untouched current recommendation candidates in the exact
+  **Best match** order, then rated and otherwise unranked titles
+  (`sortByBackfillPriority`, shared with the reception backfill). A failed
+  title remains behind untouched work according to its persisted attempt
+  metadata; titles within each attempt tier remain ordered by Best match.
   A no-match or failure stamps `movie.posterBackfillAttemptedAt` with a
   cooldown (`TMDB_BACKFILL_RETRY_COOLDOWN_MS`) so it does not retry every idle
   tick. It steps aside while pool expansion, AI tagging or reception backfill
@@ -3952,3 +3955,14 @@ foreground process. Explicit retag refreshes TMDB before Gemini so audience
 evidence is available in that same action. No additional review provider is
 integrated: sources without an official, free, browser-safe API would require
 scraping, questionable redistribution or another credential/maintenance path.
+
+### 31.8 Best-match maintenance ordering (v77)
+
+Automatic Wikipedia repair, TMDB refresh and AI-tag queues select untouched
+titles in the same recommendation order used by the **Best match** view. Queue
+selection must build that ranking when the score cache is empty; it must never
+fall back to alphabetical order merely because the page has just loaded.
+Persisted failed-attempt metadata still places attempted titles behind untouched
+work across sessions. Within either tier, Best match remains the primary order;
+rated and unranked records follow, with recency rather than title spelling as
+their fallback.

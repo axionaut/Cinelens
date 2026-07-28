@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 76;
+const APP_VERSION = 77;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -4134,9 +4134,10 @@ function receptionBackfillRecentlyAttempted(movie, now=Date.now()) {
 }
 
 function sortByBackfillPriority(candidates) {
-  // Maintenance ordering may reuse an already-built score cache, but must not
-  // train and score the whole library merely to choose its next few records.
-  const scored = new Map((scoredMovieCache || []).map(item => [String(item.movie.id), item]));
+  // A fresh load has no score cache yet. Reusing only an existing cache made
+  // this silently fall through to alphabetical order, so maintenance now
+  // builds the same ranking that powers "Best match" when selecting a batch.
+  const recommendationRank = new Map(scoreMovies().map((item, index) => [String(item.movie.id), index]));
   return candidates.sort((a,b) => {
     const aAttempt = Math.max(
       Date.parse(a.receptionBackfillAttemptedAt || '') || 0,
@@ -4147,18 +4148,18 @@ function sortByBackfillPriority(candidates) {
       Date.parse(b.posterBackfillAttemptedAt || '') || 0
     );
     if (!!aAttempt !== !!bAttempt) return aAttempt ? 1 : -1;
+    const aRank = recommendationRank.get(String(a.id));
+    const bRank = recommendationRank.get(String(b.id));
+    const aRecommended = Number.isInteger(aRank);
+    const bRecommended = Number.isInteger(bRank);
+    if (aRecommended !== bRecommended) return aRecommended ? -1 : 1;
+    if (aRecommended && bRecommended && aRank !== bRank) return aRank - bRank;
     if (aAttempt !== bAttempt) return aAttempt - bAttempt;
     const aRated = Number(a.rating || 0) > 0;
     const bRated = Number(b.rating || 0) > 0;
     if (aRated !== bRated) return aRated ? -1 : 1;
-    if (aRated && bRated) return Number(b.rating || 0) - Number(a.rating || 0) || titleSortKey(a).localeCompare(titleSortKey(b));
-    const aScore = Number(scored.get(String(a.id))?.matchScore || -1);
-    const bScore = Number(scored.get(String(b.id))?.matchScore || -1);
-    const aRecommended = aScore >= 0;
-    const bRecommended = bScore >= 0;
-    if (aRecommended !== bRecommended) return aRecommended ? -1 : 1;
-    if (aRecommended && bRecommended) return bScore - aScore || titleSortKey(a).localeCompare(titleSortKey(b));
-    return titleSortKey(a).localeCompare(titleSortKey(b));
+    if (aRated && bRated) return Number(b.rating || 0) - Number(a.rating || 0) || movieAddedTime(b) - movieAddedTime(a);
+    return movieAddedTime(b) - movieAddedTime(a) || movieTime(b) - movieTime(a) || String(a.id).localeCompare(String(b.id));
   });
 }
 
@@ -4465,7 +4466,7 @@ async function runTmdbBackfill() {
   } finally {
     tmdbBackfillInProgress = false;
     hideFetchProgress(tmdbBackfillPendingCount() ? 10000 : 0);
-    if (pendingBackgroundAiMovies().length) scheduleBackgroundAiQueue(700);
+    if (pendingBackgroundAiCount()) scheduleBackgroundAiQueue(700);
     scheduleTmdbBackfill(6000);
   }
 }
@@ -5230,6 +5231,7 @@ function hideFetchProgress(delay=0) {
 
 function aiTagCandidates() {
   const now = Date.now();
+  const recommendationRank = new Map(scoreMovies().map((item, index) => [String(item.movie.id), index]));
   return [
     ...Object.values(state.movies || {}),
     ...Object.values(state.hiddenTitles || {}).filter(movie => movie.storyText)
@@ -5239,9 +5241,14 @@ function aiTagCandidates() {
     .sort((a,b) => {
       const aAttempt = Date.parse(a.aiTagging?.attemptedAt || '') || 0;
       const bAttempt = Date.parse(b.aiTagging?.attemptedAt || '') || 0;
-      return aAttempt - bAttempt
+      const aRank = recommendationRank.get(String(a.id));
+      const bRank = recommendationRank.get(String(b.id));
+      return Number(!!aAttempt) - Number(!!bAttempt)
+        || (Number.isInteger(aRank) ? aRank : Number.MAX_SAFE_INTEGER) - (Number.isInteger(bRank) ? bRank : Number.MAX_SAFE_INTEGER)
+        || aAttempt - bAttempt
         || Number(b.rating || 0) - Number(a.rating || 0)
-        || String(a.title || '').localeCompare(String(b.title || ''));
+        || movieAddedTime(b) - movieAddedTime(a)
+        || String(a.id).localeCompare(String(b.id));
     });
 }
 
@@ -5869,14 +5876,31 @@ function aiBackgroundRetryReady(movie, now) {
 
 function pendingBackgroundAiMovies() {
   const now = Date.now();
+  const recommendationRank = new Map(scoreMovies().map((item, index) => [String(item.movie.id), index]));
   return Object.values(state.movies || {})
     .filter(movie => movie?.storyText && !hasCurrentAiTags(movie) && !movie.hidden)
     .filter(movie => aiBackgroundRetryReady(movie, now))
     .sort((a, b) => {
       const aTime = Date.parse(a.aiTagging?.attemptedAt || '') || 0;
       const bTime = Date.parse(b.aiTagging?.attemptedAt || '') || 0;
-      return aTime - bTime || String(a.title || '').localeCompare(String(b.title || ''));
+      const aRank = recommendationRank.get(String(a.id));
+      const bRank = recommendationRank.get(String(b.id));
+      return Number(!!aTime) - Number(!!bTime)
+        || (Number.isInteger(aRank) ? aRank : Number.MAX_SAFE_INTEGER) - (Number.isInteger(bRank) ? bRank : Number.MAX_SAFE_INTEGER)
+        || aTime - bTime
+        || Number(b.rating || 0) - Number(a.rating || 0)
+        || movieAddedTime(b) - movieAddedTime(a)
+        || String(a.id).localeCompare(String(b.id));
     });
+}
+
+function pendingBackgroundAiCount() {
+  const now=Date.now();
+  let count=0;
+  Object.values(state.movies || {}).forEach(movie => {
+    if (movie?.storyText && !movie.hidden && !hasCurrentAiTags(movie) && aiBackgroundRetryReady(movie,now)) count++;
+  });
+  return count;
 }
 
 // Short-lived cache: collectionHealth is a read-only status roll-up but each
@@ -6007,7 +6031,7 @@ function scheduleBackgroundAiQueue(delay = 700) {
     backgroundAiTaggingInProgress ||
     backgroundAiTimer ||
     poolExpansionInProgress ||
-    !pendingBackgroundAiMovies().length
+    !pendingBackgroundAiCount()
   ) {
     return;
   }
@@ -6064,7 +6088,7 @@ async function runBackgroundAiQueue() {
     }
   } finally {
     backgroundAiTaggingInProgress = false;
-    const moreBackgroundAi = pendingBackgroundAiMovies().length;
+    const moreBackgroundAi = pendingBackgroundAiCount();
     hideFetchProgress(moreBackgroundAi ? 10000 : 0);
     if (moreBackgroundAi) scheduleBackgroundAiQueue(1200);
     else if (backgroundChangesSinceRender) checkpointBackgroundUi(0, true);
@@ -6085,7 +6109,7 @@ function maybeAutoExpandPool() {
     return;
   }
 
-  if (pendingBackgroundAiMovies().length) {
+  if (pendingBackgroundAiCount()) {
     scheduleBackgroundAiQueue();
     updateLibraryHealth();
     return;
