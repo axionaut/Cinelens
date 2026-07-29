@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 78;
+const APP_VERSION = 79;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -399,6 +399,8 @@ const TASTE_STORY_POSITIVE_TAG_LIMIT = 42;
 const TASTE_STORY_NEGATIVE_TAG_LIMIT = 28;
 const TASTE_STORY_TITLE_HISTORY_LIMIT = 3;
 let recVisibleLimit = 10;
+let ratedVisibleLimit = 40;
+let recentVisibleLimit = 40;
 let currentWikiAbortController = null;
 let currentAiTagAbortController = null;
 let currentTmdbAbortController = null;
@@ -5486,7 +5488,10 @@ async function tagAllUntagged() {
 // ─────────────────────────────────────────────
 function setTab(tab, btn) {
   if (tab === 'hidden') tab = 'all';
+  const previousTab = activeTab;
   activeTab = tab;
+  if (tab === 'rated' && previousTab !== 'rated') ratedVisibleLimit = 40;
+  if (tab === 'recent' && previousTab !== 'recent') recentVisibleLimit = 40;
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   btn?.classList.add('active');
   document.querySelector('.tab-bar')?.classList.remove('open');
@@ -6089,13 +6094,14 @@ async function runBackgroundAiQueue() {
   if (backgroundAiTaggingInProgress || poolExpansionInProgress || autoFetchPaused) return;
   const batch = pendingBackgroundAiMovies().slice(0, AI_TAG_BATCH_SIZE);
   if (!batch.length) return;
+  const changedMovieIds=batch.map(movie => String(movie.id));
 
   backgroundAiTaggingInProgress = true;
   try {
     showBackgroundPipelineProgress('Gemini', `${batch.length} titles queued · ${batch.map(movie => movie.title).join(' · ')}`);
     const result = await requestAiTags(batch, {deferUi:true});
     if (Number(result?.tagged || 0)) deferRecommendationRefresh();
-    saveLocalState({silentUi:true});
+    saveLocalState({silentUi:true,preserveUpdatedAt:true,changedMovieIds});
     queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
     checkpointBackgroundUi(Number(result?.tagged || 0));
     if (Number(result?.failed || 0)) {
@@ -6117,7 +6123,7 @@ async function runBackgroundAiQueue() {
       movie.retagMessage = 'AI retry pending';
       touchRecord(movie);
     });
-    saveLocalState({silentUi:true});
+    saveLocalState({silentUi:true,preserveUpdatedAt:true,changedMovieIds});
     queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
     if (isExternalRateLimitError(error)) {
       autoFetchPaused = true;
@@ -6375,13 +6381,13 @@ function renderRatedGrid() {
   const rated = (state.settings.sortMode || 'recommended') === 'recommended'
     ? filtered.sort((a,b) => (ratingTimestamp(b) || recordTimestamp(b) || movieAddedTime(b)) - (ratingTimestamp(a) || recordTimestamp(a) || movieAddedTime(a)) || titleSortKey(a).localeCompare(titleSortKey(b)))
     : sortMovies(filtered, 'title-asc');
-  updateAiTagButton();
+  const visible = rated.slice(0,ratedVisibleLimit);
   const count = document.getElementById('ratedCount');
-  if (count) count.textContent = rated.length ? `${rated.length} titles` : 'none yet';
+  if (count) count.textContent = rated.length ? `showing ${visible.length} of ${rated.length} titles` : 'none yet';
   grid.innerHTML = '';
   if (!rated.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">★</div><h3>Nothing Rated Yet</h3></div>`; return; }
   const fragment = document.createDocumentFragment();
-  rated.forEach(m => fragment.appendChild(buildCard(m, { showEdit:true })));
+  visible.forEach(m => fragment.appendChild(buildCard(m, { showEdit:true, suppressMatch:true })));
   grid.appendChild(fragment);
 }
 
@@ -6397,12 +6403,13 @@ function renderRecentlyAdded() {
   const recent = sortIsDefault
     ? filtered.sort((a, b) => movieAddedTime(b) - movieAddedTime(a) || movieTime(b) - movieTime(a) || titleSortKey(a).localeCompare(titleSortKey(b)))
     : sortMovies(filtered, 'title-asc');
+  const visible=recent.slice(0,recentVisibleLimit);
   const count = document.getElementById('recentCount');
-  if (count) count.textContent = recent.length ? `${recent.length} titles${sortIsDefault ? ' · newest first' : ''}` : 'nothing added yet';
+  if (count) count.textContent = recent.length ? `showing ${visible.length} of ${recent.length} titles${sortIsDefault ? ' · newest first' : ''}` : 'nothing added yet';
   grid.innerHTML = '';
   if (!recent.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">+</div><h3>Nothing Added Yet</h3></div>`; return; }
   const fragment = document.createDocumentFragment();
-  recent.forEach(m => fragment.appendChild(buildCard(m, { showEdit:Number(m.rating || 0) > 0, poolView:Number(m.rating || 0) === 0, contextLabel:'Added' })));
+  visible.forEach(m => fragment.appendChild(buildCard(m, { showEdit:Number(m.rating || 0) > 0, poolView:Number(m.rating || 0) === 0, contextLabel:'Added', suppressMatch:Number(m.rating || 0) > 0 })));
   grid.appendChild(fragment);
 }
 
@@ -6432,21 +6439,21 @@ function showAuditSection(ids) {
   ids.forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
-    if (el.classList.contains('movies-grid')) el.style.display = 'grid';
-    else if (el.classList.contains('section-header')) el.style.display = 'flex';
-    else el.style.display = 'block';
+    const display=el.classList.contains('movies-grid') ? 'grid' : el.classList.contains('section-header') ? 'flex' : 'block';
+    if (el.style.display !== display) el.style.display = display;
   });
 }
 
 function setSectionVisibility(selector, visible) {
   document.querySelectorAll(selector).forEach(el => {
-    if (!visible) {
-      el.style.display = 'none';
-      return;
-    }
-    if (el.classList.contains('movies-grid')) el.style.display = 'grid';
-    else if (el.classList.contains('section-header') || el.classList.contains('tag-brain-controls')) el.style.display = 'flex';
-    else el.style.display = 'block';
+    const display=!visible
+      ? 'none'
+      : el.classList.contains('movies-grid')
+        ? 'grid'
+        : el.classList.contains('section-header') || el.classList.contains('tag-brain-controls')
+          ? 'flex'
+          : 'block';
+    if (el.style.display !== display) el.style.display = display;
   });
 }
 
@@ -6568,12 +6575,14 @@ function formatReceptionEffect(effect) {
 }
 
 function buildCard(movie, opts={}) {
-  const { score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, predictedRating, receptionEffect, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag } = opts;
+  const { score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, predictedRating, receptionEffect, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag, suppressMatch } = opts;
   const hasSuppliedMatch = Number.isFinite(Number(matchScore)) || Number.isFinite(Number(tasteFit));
-  const automaticMatch = hasSuppliedMatch ? null : cardMatchData(movie);
-  const resolvedMatch = hasSuppliedMatch
-    ? { matchScore:Number(matchScore ?? tasteFit) || 0, tasteFit:Number(tasteFit ?? matchScore) || 0, predictedRating:Number(predictedRating || 0), receptionEffect:Number(receptionEffect || 0), posOverlap:Number(posOverlap || 0), genreOverlap:Number(genreOverlap || 0), negativeOverlap:Number(negativeOverlap || 0), matchedTags:matchedTags || new Set(), matchedGenres:matchedGenres || new Set() }
-    : automaticMatch;
+  const automaticMatch = hasSuppliedMatch || suppressMatch ? null : cardMatchData(movie);
+  const resolvedMatch = suppressMatch
+    ? null
+    : hasSuppliedMatch
+      ? { matchScore:Number(matchScore ?? tasteFit) || 0, tasteFit:Number(tasteFit ?? matchScore) || 0, predictedRating:Number(predictedRating || 0), receptionEffect:Number(receptionEffect || 0), posOverlap:Number(posOverlap || 0), genreOverlap:Number(genreOverlap || 0), negativeOverlap:Number(negativeOverlap || 0), matchedTags:matchedTags || new Set(), matchedGenres:matchedGenres || new Set() }
+      : automaticMatch;
   const showMatch = !!resolvedMatch;
   const resolvedMatchScore = Number(resolvedMatch?.matchScore ?? resolvedMatch?.tasteFit ?? 0) || 0;
   const resolvedPosOverlap = Number(resolvedMatch?.posOverlap || 0);
@@ -9948,6 +9957,22 @@ function onResizeEvent() {
 function handleScroll() {
   const btn = document.getElementById('goTopBtn');
   if (btn) btn.classList.toggle('visible', window.scrollY > 520);
+  if (activeTab === 'rated') {
+    if (window.innerHeight + window.scrollY < document.documentElement.scrollHeight - 700) return;
+    const total=Object.values(state.movies || {}).filter(movie => Number(movie.rating || 0) > 0 && matchesGlobalFilters(movie)).length;
+    if (ratedVisibleLimit >= total) return;
+    ratedVisibleLimit=Math.min(total,ratedVisibleLimit + 40);
+    renderRatedGrid();
+    return;
+  }
+  if (activeTab === 'recent') {
+    if (window.innerHeight + window.scrollY < document.documentElement.scrollHeight - 700) return;
+    const total=Object.values(state.movies || {}).filter(matchesGlobalFilters).length;
+    if (recentVisibleLimit >= total) return;
+    recentVisibleLimit=Math.min(total,recentVisibleLimit + 40);
+    renderRecentlyAdded();
+    return;
+  }
   if (!recommendationPageActive()) return;
   if (window.innerHeight + window.scrollY < document.documentElement.scrollHeight - 700) return;
   const total = similarTitleActive()

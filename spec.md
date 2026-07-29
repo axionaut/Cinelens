@@ -3996,3 +3996,30 @@ both source systems. Background persistence remains incremental and debounced,
 and Drive sync waits for a consolidated checkpoint. The fixed progress surface
 shows the currently active source stages together instead of competing
 per-worker bars.
+
+### 31.10 Rated-tab bounded rendering (v79)
+
+The Rated tab must not synchronously construct the entire rating history.
+It renders 40 newest-rated cards initially and adds 40 more near the bottom of
+the page. Leaving and re-entering Rated resets the window to 40. The section
+count reports `showing N of total`.
+
+Rated cards do not calculate leave-one-out predicted-match models: the user has
+already supplied the title's actual rating, and calculating a prediction there
+adds no decision value. This removes both the large live-DOM cost and the
+per-card whole-library model multiplier. Rating interactions keep their
+incremental IndexedDB write and deferred recommendation refresh.
+
+The same 40-card incremental window applies to Recently Added, which can be
+larger than Rated. Already-rated cards in that mixed view also skip prediction;
+unrated cards retain it because match guidance remains useful there. Pool and
+tag-detail views retain their existing bounded windows.
+
+Ordinary renders only write section `display` styles when the value actually
+changes. Background Gemini checkpoints pass their exact changed-title IDs to
+local persistence, so a batch neither scans every record for sync metadata nor
+marks every Drive catalogue chunk dirty. Together these rules keep foreground
+clicks independent of ongoing metadata and AI maintenance. All movie cards use
+browser rendering containment (`content-visibility:auto` with an intrinsic-size
+placeholder), so off-screen cards in every incremental grid avoid unnecessary
+layout and paint work.

@@ -863,6 +863,7 @@ body{background:var(--page-bg, linear-gradient(180deg,#101010 0%,#080808 48%,#05
 header{background:var(--header-bg, rgba(8,8,8,.9));color:var(--text);border-bottom-color:var(--control-border, rgba(var(--accent-rgb),.13))}
 .control-deck{background:var(--control-bg, linear-gradient(180deg,#191919,#111));border-color:var(--control-border, #303030);color:var(--text)}
 .movie-card,.movie-card.rated{color:var(--card-text, var(--text))}
+.movie-card{content-visibility:auto;contain-intrinsic-size:auto 360px}
 .movie-card.film-card{background:var(--film-card-bg, linear-gradient(180deg,rgba(28,20,20,.93),rgba(16,16,16,.96))) !important}
 .movie-card.show-card{background:var(--show-card-bg, linear-gradient(180deg,rgba(20,27,34,.94),rgba(14,19,24,.97))) !important}
 .card-title,.card-title-button,.movie-card .card-title,.movie-card .card-title-button,.section-title,.empty-state h3,.library-health-label{color:var(--card-text, var(--text))}
