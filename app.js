@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 82;
+const APP_VERSION = 81;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const REPRESENTATION_TAG_VERSION = 1;
 const AI_TAG_MIN_CONFIDENCE = 0.55;
@@ -985,6 +985,7 @@ function hasCurrentAiTags(movie) {
   return !!(
     movie?.aiTagging?.status === 'verified' &&
     movie.aiTagging.promptVersion === AI_TAG_PROMPT_VERSION &&
+    Number(movie.aiTagging.representationVersion || 0) >= REPRESENTATION_TAG_VERSION &&
     movie.aiTagging.storyHash === aiStoryHash(aiTagSourceText(movie)) &&
     Array.isArray(movie.tags) &&
     movie.tags.length > 0

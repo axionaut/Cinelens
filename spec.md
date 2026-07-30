@@ -4045,12 +4045,9 @@ These tags are neutral recommendation signals. They do not automatically imply
 their stricter requirement for explicit agenda, propaganda, culture-war,
 didactic or message-driven framing.
 
-`REPRESENTATION_TAG_VERSION = 1` records which tagging prompt produced a title,
-but it does not invalidate existing tags or create a whole-library migration
-queue. The representation audit is pipelined into new-title tagging and the
-next normal tag refresh caused by changed source evidence or an explicit user
-refresh. All existing non-suppressed tags and evidence remain intact, with
-capacity raised from 20 to 24 so representation tags do not displace a complete
+`REPRESENTATION_TAG_VERSION = 1` creates a one-time additive enrichment pass.
+All existing non-suppressed tags and evidence remain intact, with capacity
+raised from 20 to 24 so the representation audit does not displace a complete
 older set. Browser-side evidence rules provide a deterministic backstop if the
 deployed Apps Script omits an explicitly supported canonical tag. Exact and
 semantically equivalent tags still collapse.
@@ -4066,12 +4063,3 @@ fallback.
 The `Best match` order is keyed first by the same `matchScore` displayed on each
 card. A lower displayed match therefore cannot appear ahead of a higher one,
 including while a library-wide tag audit is in progress.
-
-### 31.13 Opportunistic representation enrichment (v82)
-
-Adding a tag category must not schedule a library-wide AI rebuild. Tag
-freshness depends on the tagging prompt and the source-evidence hash, not on
-whether an optional enrichment category has previously been audited. Existing
-titles receive representation tags only when their ordinary source/tag
-pipeline next runs; newly discovered titles receive them in their initial
-pipeline.
