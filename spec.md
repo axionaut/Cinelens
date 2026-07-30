@@ -4023,3 +4023,22 @@ clicks independent of ongoing metadata and AI maintenance. All movie cards use
 browser rendering containment (`content-visibility:auto` with an intrinsic-size
 placeholder), so off-screen cards in every incremental grid avoid unnecessary
 layout and paint work.
+
+### 31.11 Representation tags inside the existing pipeline (v83)
+
+Representation tagging is an additive part of the established per-title AI
+pipeline, not a library migration. It introduces no tag-version freshness
+gate, no startup audit, no whole-library queue, and no automatic refresh.
+
+Newly discovered titles and titles already entering the normal refresh pipeline
+may add `black-representation`, `lgbtq-representation`, `feminist-themes`, or
+`diversity-inclusion-themes` when the combined Wikipedia and TMDB audience
+evidence explicitly supports them. Existing tags remain intact and equivalent
+or duplicate tags consolidate normally. A direct user-requested retag may also
+add a missing supported representation tag.
+
+These are neutral descriptive recommendation signals. `political-agenda` and
+`preachy-social-message` still require explicit evidence of agenda, propaganda,
+culture-war, didactic, or message-driven framing. Representation must not be
+inferred from names, posters, performers, casting alone, or merely the presence
+of a woman or minority character.
