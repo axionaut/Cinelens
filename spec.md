@@ -3721,12 +3721,16 @@ manual card URL repair, local fallback tagging, streaming availability or old
 reset behavior are obsolete and must not be implemented.
 
 
-### 30.12 Recommendation reserve and quiet orchestration
+### 30.12 Continuous recommendation collection and quiet orchestration
 
-CineLens maintains a reserve of strong unseen recommendations, not a raw count of unseen titles.
+CineLens continuously improves its unseen recommendations while the browser is
+idle.
 
-- A strong candidate must meet the active taste model’s minimum positive-overlap and match-score thresholds.
-- Background collection begins when the strong reserve falls below 20 and continues until it reaches 40.
+- A strong candidate is one whose displayed match score is at least 95%.
+- Background collection does not stop at a recommendation-count target. It
+  schedules another bounded collection run whenever the app is idle, unless
+  the user explicitly pauses collection or a safety/availability gate blocks
+  writes.
 - Before the user has enough rated/tagged titles for personalization, the app may build a modest tagged starter pool; once personalized, raw pool size does not satisfy collection health.
 - Newly fetched titles are not recommendation stock until AI tagging completes.
 - Pending AI tags are retried automatically with backoff. A Gemini rate-limit response pauses background collection rather than generating a user task.

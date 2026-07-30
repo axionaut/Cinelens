@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 86;
+const APP_VERSION = 87;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -257,15 +257,12 @@ const BACKGROUND_SYNC_DEBOUNCE_MS = 30 * 1000;
 let backgroundChangesSinceRender = 0;
 const WIKI_PARSER_VERSION = 7;
 const REC_INFINITE_PAGE_SIZE = 20;
-const STRONG_REC_TARGET = 40;
+const STRONG_REC_MIN_MATCH_SCORE = 0.95;
 
-// "138/40 strong matches" reads like a broken fraction once the count passes
-// target — a manual "Expand now" run deliberately keeps going past target
-// (unlike automatic collection, which stops there), so this isn't rare.
-function formatStrongMatchCount(strongCount, target) {
+// Keep the label tied to the same absolute score shown on recommendation cards.
+function formatStrongMatchCount(strongCount) {
   const count = Number(strongCount || 0);
-  const goal = Number(target || 0);
-  return count >= goal ? `${count} strong matches (past the ${goal} target)` : `${count}/${goal} strong matches`;
+  return `${count} strong matches (≥95%)`;
 }
 
 function checkpointBackgroundUi(changedCount=0, force=false) {
@@ -276,9 +273,6 @@ function checkpointBackgroundUi(changedCount=0, force=false) {
   updateLibraryHealth();
   return false;
 }
-const STRONG_REC_REFILL_THRESHOLD = 20;
-const STRONG_REC_MIN_OVERLAP = 3;
-const STRONG_REC_MIN_MATCH_SCORE = 0.55;
 const INITIAL_TAGGED_POOL_FLOOR = 80;
 const AI_BACKGROUND_RETRY_MS = 2 * 60 * 1000;
 const FETCH_AUTO_ATTEMPT_BUDGET = 55;
@@ -463,7 +457,7 @@ let state = {
 let pendingManualRatingId = '';
 let manualTagMovieId = '';
 let manualTagSelections = new Set();
-const PERFECT_REC_TARGET = STRONG_REC_TARGET;
+const PERFECT_REC_TARGET = 40;
 const PERFECT_REC_MIN_RATIO = 0.995;
 const MAX_STORY_TAGS = 34;
 const MIN_STORY_SECTION_CHARS = 140;
@@ -3447,7 +3441,7 @@ async function expandPool(manual=true) {
     showFetchProgress(
       label,
       pct,
-      `${attempts}/${attemptBudget} checked · ${added} fetched · ${added} kept · ${formatStrongMatchCount(health.strongCount, health.target)}${jy ? ` · fetching ${jy}` : ''}${title ? ` · ${title}` : ''}`
+      `${attempts}/${attemptBudget} checked · ${added} fetched · ${added} kept · ${formatStrongMatchCount(health.strongCount)}${jy ? ` · fetching ${jy}` : ''}${title ? ` · ${title}` : ''}`
     );
   };
 
@@ -3649,6 +3643,7 @@ async function expandPool(manual=true) {
     } else {
       deferRecommendationRefresh();
       checkpointBackgroundUi(added, true);
+      maybeAutoExpandPool();
     }
 
     const outcomeSummary = `parser ${outcomes.parser}, duplicate ${outcomes.duplicate}, hidden ${outcomes.hidden}, filters ${outcomes.filtered}, AI pending ${outcomes.ai}`;
@@ -5974,15 +5969,11 @@ function recommendationReserveCandidates() {
 
 function recommendationFetchStatus(scored=recommendationReserveCandidates()) {
   const strong = scored.filter(item =>
-    Number(item.posOverlap || 0) >= STRONG_REC_MIN_OVERLAP &&
-    Number(item.matchScore || 0) >= STRONG_REC_MIN_MATCH_SCORE &&
-    Number(item.positiveScore || 0) > 0
+    Number(item.matchScore || 0) >= STRONG_REC_MIN_MATCH_SCORE
   );
 
   return {
     strongCount: strong.length,
-    target: STRONG_REC_TARGET,
-    refillThreshold: STRONG_REC_REFILL_THRESHOLD,
     bestOverlap: scored[0]?.posOverlap || 0,
     total: scored.length
   };
@@ -6080,21 +6071,11 @@ function collectionHealth() {
 
 function shouldRunBackgroundCollection() {
   state.meta = state.meta || {};
-  const health = collectionHealth();
-
-  if (!health.personalized) {
-    state.meta.collectionActive = health.taggedUnseen < INITIAL_TAGGED_POOL_FLOOR;
-    return state.meta.collectionActive;
-  }
-
-  let active = !!state.meta.collectionActive;
-  if (!active && health.strongCount < STRONG_REC_REFILL_THRESHOLD) active = true;
-  if (active && health.strongCount >= STRONG_REC_TARGET) active = false;
-  state.meta.collectionActive = active;
-  return active;
+  state.meta.collectionActive = true;
+  return true;
 }
 
-function needsMoreStrongRecommendations(target=STRONG_REC_TARGET) {
+function needsMoreStrongRecommendations(target=40) {
   if (!personalizedEnough()) return taggedUnseenPoolCount() < INITIAL_TAGGED_POOL_FLOOR;
   return recommendationFetchStatus().strongCount < target;
 }
@@ -6116,13 +6097,12 @@ function updateLibraryHealth() {
   let text;
   if (autoFetchPaused) text = 'Collection paused';
   else if (legacyTagRecoveryInProgress) text = 'Recovering pre-v80 tag sets from Drive history';
-  else if (poolExpansionInProgress) { const jy = discoveryJourneyYear(); text = `Collecting ${formatStrongMatchCount(health.strongCount, health.target)}${jy ? ` · fetching ${jy}` : ''}`; }
+  else if (poolExpansionInProgress) { const jy = discoveryJourneyYear(); text = `Collecting ${formatStrongMatchCount(health.strongCount)}${jy ? ` · fetching ${jy}` : ''}`; }
   else if (backgroundAiTaggingInProgress) text = `Tagging ${health.pendingTags} pending titles`;
   else if (aiRateLimitRemaining()) text = 'Gemini cooling down · other maintenance continues';
   else if (!libraryWritesUnlocked && state.drive?.enabled) text = 'Collection waiting for Drive reconnect';
-  else if (health.personalized && health.strongCount >= STRONG_REC_TARGET) text = `Collection paused at ${health.strongCount} strong matches · refills below ${STRONG_REC_REFILL_THRESHOLD}`;
   else if (!health.personalized) text = `Building starter pool · ${health.taggedUnseen}/${INITIAL_TAGGED_POOL_FLOOR}`;
-  else text = `Refilling strong matches · ${formatStrongMatchCount(health.strongCount, health.target)}`;
+  else text = `Collecting while idle · ${formatStrongMatchCount(health.strongCount)}`;
 
   if (label) label.textContent = text;
   if (maintenance) {
@@ -6295,9 +6275,11 @@ function scheduleAutoExpand(delay = 2500) {
 
   autoExpandTimer = setTimeout(() => {
     autoExpandTimer = null;
-    if (!autoFetchPaused && !poolExpansionInProgress && shouldRunBackgroundCollection()) {
-      expandPool(false);
-    }
+    const run = () => {
+      if (!autoFetchPaused && !poolExpansionInProgress && shouldRunBackgroundCollection()) expandPool(false);
+    };
+    if ('requestIdleCallback' in window) requestIdleCallback(run, {timeout:1500});
+    else run();
   }, delay);
 }
 
@@ -6326,9 +6308,8 @@ function renderRecs() {
       const top = ordered.slice(0, visibleLimit);
     const fetchStatus = recommendationFetchStatus(scored);
     if (top.length) {
-      document.getElementById('recCount').textContent = fetchStatus.strongCount < STRONG_REC_TARGET
-        ? `improving recommendations · ${fetchStatus.strongCount}/${STRONG_REC_TARGET} strong · showing ${top.length} of ${scored.length}`
-        : `showing ${top.length} of ${scored.length} matches`;
+      document.getElementById('recCount').textContent =
+        `${fetchStatus.strongCount} strong (≥95%) · showing ${top.length} of ${scored.length} matches`;
       const fragment = document.createDocumentFragment();
       top.forEach(item => fragment.appendChild(buildCard(item.movie, { score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating, receptionEffect:item.receptionEffect })));
       grid.appendChild(fragment);
