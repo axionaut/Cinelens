@@ -4023,3 +4023,31 @@ clicks independent of ongoing metadata and AI maintenance. All movie cards use
 browser rendering containment (`content-visibility:auto` with an intrinsic-size
 placeholder), so off-screen cards in every incremental grid avoid unnecessary
 layout and paint work.
+
+### 31.11 Evidence-based representation tags (v80)
+
+Every AI tagging request performs a representation audit. When the combined
+Wikipedia narrative and TMDB audience evidence explicitly supports it, the
+title receives one or more canonical tags:
+
+- `black-representation`
+- `lgbtq-representation`
+- `feminist-themes`
+- `diversity-inclusion-themes`
+
+At least one applicable representation tag is required, but none is fabricated
+when the evidence does not support one. Race, sexuality, gender identity,
+ideology or representation must not be inferred from names, posters, performers,
+casting alone, or simply the presence of a woman or minority character.
+
+These tags are neutral recommendation signals. They do not automatically imply
+`political-agenda` or `preachy-social-message`; those avoidance tags retain
+their stricter requirement for explicit agenda, propaganda, culture-war,
+didactic or message-driven framing.
+
+`REPRESENTATION_TAG_VERSION = 1` creates a one-time additive enrichment pass.
+All existing non-suppressed tags and evidence remain intact, with capacity
+raised from 20 to 24 so the representation audit does not displace a complete
+older set. Browser-side evidence rules provide a deterministic backstop if the
+deployed Apps Script omits an explicitly supported canonical tag. Exact and
+semantically equivalent tags still collapse.
