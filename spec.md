@@ -4042,3 +4042,16 @@ These are neutral descriptive recommendation signals. `political-agenda` and
 culture-war, didactic, or message-driven framing. Representation must not be
 inferred from names, posters, performers, casting alone, or merely the presence
 of a woman or minority character.
+
+### 31.12 Tags-only recovery after the v80 migration fault (v84)
+
+On the first connected startup after this release, CineLens reads its preserved
+legacy monolithic Drive backup once and restores only missing tag data for an
+exact matching title ID. A set is accepted only when it was produced by the
+current AI prompt, its stored source hash still matches the title's current
+Wikipedia-plus-TMDB evidence, and its evidence remains grounded.
+
+Recovery never replaces a non-empty current tag set and never imports ratings,
+watch state, exclusions, removals, metadata, titles, or other personal state.
+Restored tag fields are written through the normal chunked Drive pipeline, and
+a profile marker prevents the recovery pass from repeating.
