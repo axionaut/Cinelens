@@ -4072,3 +4072,25 @@ escalation. It does not increment per-title failure counts, move titles through
 the retry queue, pause unrelated maintenance sources, or immediately retry.
 The unobtrusive health line reports the cooldown and processing resumes
 automatically when it expires.
+
+### 31.14 Exact pre-v80 recovery from Drive revisions (v86)
+
+The v80 fault incorrectly made representation-audit freshness part of general
+tag validity. Startup cleanup consequently cleared pre-existing tag sets and
+the normal Drive sync persisted those empty catalogue records. The reduced For
+You result count is the number of currently tagged unseen candidates with
+positive learned overlap, not a new display limit.
+
+Recovery version 2 first checks the preserved monolithic backup, then inspects
+up to ten prior revisions of every affected chunked catalogue file with three
+bounded readers. It selects nothing by title text or approximate identity:
+only the exact current record ID is eligible. It restores a tag only when the
+old set used the current AI prompt, its story hash matches the current combined
+source evidence, and that tag's stored evidence is still grounded in the
+current source.
+
+Current non-empty tag sets, ratings, exclusions, removals, watch state,
+metadata, and all other fields are never replaced. Recovered chunks sync
+through the normal current writer. Gemini waits until revision recovery has
+finished or been attempted, then processes only records that could not be
+safely restored.

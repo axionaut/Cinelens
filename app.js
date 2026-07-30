@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 85;
+const APP_VERSION = 86;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -6115,6 +6115,7 @@ function updateLibraryHealth() {
 
   let text;
   if (autoFetchPaused) text = 'Collection paused';
+  else if (legacyTagRecoveryInProgress) text = 'Recovering pre-v80 tag sets from Drive history';
   else if (poolExpansionInProgress) { const jy = discoveryJourneyYear(); text = `Collecting ${formatStrongMatchCount(health.strongCount, health.target)}${jy ? ` · fetching ${jy}` : ''}`; }
   else if (backgroundAiTaggingInProgress) text = `Tagging ${health.pendingTags} pending titles`;
   else if (aiRateLimitRemaining()) text = 'Gemini cooling down · other maintenance continues';
@@ -8947,7 +8948,9 @@ const DRIVE_MANIFEST_FILE='cinelens_manifest_v2.json';
 const DRIVE_PROFILE_FILE='cinelens_profile_v2.json';
 const DRIVE_CHUNK_PREFIX='cinelens_catalog_v2_';
 const DRIVE_SYNC_MODEL_V2='chunked-drive-v2';
-const LEGACY_TAG_RECOVERY_VERSION=1;
+const LEGACY_TAG_RECOVERY_VERSION=2;
+const DRIVE_TAG_RECOVERY_MAX_REVISIONS=10;
+const DRIVE_TAG_RECOVERY_CONCURRENCY=3;
 const DRIVE_CHUNK_SPAN_YEARS=5;
 const GOOGLE_CLIENT_ID='984899607223-h5oadg1cfb7o7ksfb4400vhidknk9soc.apps.googleusercontent.com';
 const DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
@@ -9851,70 +9854,129 @@ async function readDriveDataset(fileId) {
   return normaliseIncomingData(await response.json());
 }
 
+async function listDriveFileRevisions(fileId) {
+  const response=await driveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/revisions?pageSize=100&fields=revisions(id,modifiedTime,size,keepForever)`);
+  if (!response.ok) throw new Error(`Drive revision listing failed (${response.status})`);
+  const revisions=(await response.json()).revisions || [];
+  return revisions
+    .sort((a,b)=>(Date.parse(b.modifiedTime || '') || 0) - (Date.parse(a.modifiedTime || '') || 0))
+    .slice(0,DRIVE_TAG_RECOVERY_MAX_REVISIONS);
+}
+
+async function readDriveFileRevision(fileId,revisionId) {
+  const response=await driveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/revisions/${encodeURIComponent(revisionId)}?alt=media`);
+  if (!response.ok) throw new Error(`Drive revision read failed (${response.status})`);
+  return response.json();
+}
+
+function restoreMissingTagSet(current,previous) {
+  if (!current || scoringTags(current).length || !previous?.tags?.length) return false;
+  if (previous.aiTagging?.status !== 'verified' || previous.aiTagging?.promptVersion !== AI_TAG_PROMPT_VERSION) return false;
+  const sourceText=aiTagSourceText(current);
+  if (previous.aiTagging?.storyHash !== aiStoryHash(sourceText)) return false;
+  const previousEvidence=previous.aiTagEvidence || {};
+  const evidence={};
+  const restored=cleanTagArray(previous.tags,current,false)
+    .filter(tag => !tagIsSuppressed(current,tag) && rawTagAllowed(current,tag))
+    .filter(tag => {
+      const item=previousEvidence[tag];
+      if (!item || !evidenceSupportedByStory(item.evidence || '',sourceText)) return false;
+      evidence[tag]=copyRecord(item);
+      return true;
+    })
+    .slice(0,AI_TAG_MAX_COUNT);
+  if (!restored.length) return false;
+  current.tags=restored;
+  current.coreTags=[...restored];
+  current.plotTags=[...restored];
+  current.descriptorTags=[...restored];
+  current.rawDescriptors=[];
+  current.aiTagEvidence=evidence;
+  current.aiTagging=copyRecord(previous.aiTagging);
+  current.tagged=true;
+  current.retagStatus='verified';
+  current.retagMessage='';
+  touchRecord(current);
+  return true;
+}
+
+async function recoverTagsFromDriveRevisions(opts={},recoveredIds=new Set()) {
+  const manifest=opts.manifest || driveManifestCache;
+  const fixtureRevisions=opts.revisionDatasets || null;
+  if (!manifest?.chunks && !fixtureRevisions) return recoveredIds;
+  const entries=fixtureRevisions
+    ? Object.entries(fixtureRevisions).map(([key,revisions]) => [key,{id:`fixture-${key}`,revisions}])
+    : Object.entries(manifest.chunks || {}).map(([key,info]) => [key,{...info,revisions:null}]);
+  const relevant=entries.filter(([key]) =>
+    Object.values(state.movies || {}).some(movie => driveChunkKey(movie) === key && !scoringTags(movie).length)
+  );
+  let cursor=0;
+  const worker=async () => {
+    while (cursor < relevant.length) {
+      const [key,info]=relevant[cursor++];
+      try {
+        const revisionPayloads=info.revisions || [];
+        if (!info.revisions) {
+          const revisions=await listDriveFileRevisions(info.id);
+          for (const revision of revisions) {
+            try { revisionPayloads.push(await readDriveFileRevision(info.id,revision.id)); }
+            catch(error) { console.warn('Skipping unreadable Drive tag revision',info.id,revision.id,error); }
+          }
+        }
+        for (const payload of revisionPayloads) {
+          const previousMovies=payload?.movies || payload || {};
+          Object.entries(previousMovies).forEach(([id,previous]) => {
+            const current=state.movies?.[id];
+            if (current && driveChunkKey(current) === key && restoreMissingTagSet(current,previous)) recoveredIds.add(id);
+          });
+          const stillMissing=Object.values(state.movies || {}).some(movie => driveChunkKey(movie) === key && !scoringTags(movie).length);
+          if (!stillMissing) break;
+        }
+      } catch(error) {
+        console.warn('Drive tag revision recovery skipped a chunk',key,error);
+      }
+    }
+  };
+  await Promise.all(Array.from({length:Math.min(DRIVE_TAG_RECOVERY_CONCURRENCY,Math.max(1,relevant.length))},worker));
+  return recoveredIds;
+}
+
 async function recoverMissingTagsFromLegacyBackup(opts={}) {
   if (legacyTagRecoveryInProgress || Number(state.meta?.legacyTagRecoveryVersion || 0) >= LEGACY_TAG_RECOVERY_VERSION) return 0;
   legacyTagRecoveryInProgress=true;
   legacyTagRecoveryAttemptedThisSession=true;
   try {
+    const recoveredIds=new Set();
     const fileId=opts.fileId || state.drive.fileId || await findDriveFile();
-    if (!fileId && !opts.dataset) {
-      state.meta=state.meta || {};
-      state.meta.legacyTagRecoveryVersion=LEGACY_TAG_RECOVERY_VERSION;
-      state.meta.legacyTagRecoveryAt=nowStamp();
-      state.meta.legacyTagRecoveryCount=0;
-      if (opts.persist !== false) saveLocalState({driveProfileOnly:true});
-      return 0;
+    if (fileId || opts.dataset) {
+      try {
+        const backup=opts.dataset ? normaliseIncomingData(opts.dataset) : await readDriveDataset(fileId);
+        Object.entries(state.movies || {}).forEach(([id,current]) => {
+          if (restoreMissingTagSet(current,backup.movies?.[id])) recoveredIds.add(id);
+        });
+      } catch(error) {
+        console.warn('Preserved monolithic tag recovery unavailable; checking chunk history',error);
+      }
     }
-    const backup=opts.dataset ? normaliseIncomingData(opts.dataset) : await readDriveDataset(fileId);
-    const recoveredIds=[];
-    Object.entries(state.movies || {}).forEach(([id,current]) => {
-      if (scoringTags(current).length) return;
-      const previous=backup.movies?.[id];
-      if (!previous || !Array.isArray(previous.tags) || !previous.tags.length) return;
-      if (previous.aiTagging?.status !== 'verified' || previous.aiTagging?.promptVersion !== AI_TAG_PROMPT_VERSION) return;
-      if (previous.aiTagging?.storyHash !== aiStoryHash(aiTagSourceText(current))) return;
-      const restored=cleanTagArray(previous.tags,current,false)
-        .filter(tag => !tagIsSuppressed(current,tag) && rawTagAllowed(current,tag))
-        .slice(0,AI_TAG_MAX_COUNT);
-      if (!restored.length) return;
-      const previousEvidence=previous.aiTagEvidence || {};
-      const evidence={};
-      restored.forEach(tag => {
-        const item=previousEvidence[tag];
-        if (item && evidenceSupportedByStory(item.evidence || '',aiTagSourceText(current))) evidence[tag]=copyRecord(item);
-      });
-      if (!Object.keys(evidence).length) return;
-      current.tags=restored;
-      current.coreTags=[...restored];
-      current.plotTags=[...restored];
-      current.descriptorTags=[...restored];
-      current.rawDescriptors=[];
-      current.aiTagEvidence=evidence;
-      current.aiTagging=copyRecord(previous.aiTagging);
-      current.tagged=true;
-      current.retagStatus='verified';
-      current.retagMessage='';
-      touchRecord(current);
-      recoveredIds.push(id);
-    });
+    await recoverTagsFromDriveRevisions(opts,recoveredIds);
     state.meta=state.meta || {};
     state.meta.legacyTagRecoveryVersion=LEGACY_TAG_RECOVERY_VERSION;
     state.meta.legacyTagRecoveryAt=nowStamp();
-    state.meta.legacyTagRecoveryCount=recoveredIds.length;
-    if (recoveredIds.length) {
+    state.meta.legacyTagRecoveryCount=recoveredIds.size;
+    if (recoveredIds.size) {
       invalidateTagCaches();
       rebuildTagBrain();
       computeTagWeights();
       if (opts.persist !== false) {
-        saveLocalState({changedMovieIds:recoveredIds});
+        saveLocalState({changedMovieIds:[...recoveredIds]});
         queueDriveSync(0);
         render();
-        showToast(`Recovered tags for ${recoveredIds.length} titles from the preserved Drive backup.`,'success');
+        showToast(`Recovered pre-v80 tags for ${recoveredIds.size} titles from Drive history.`,'success');
       }
     } else if (opts.persist !== false) {
       saveLocalState({driveProfileOnly:true});
     }
-    return recoveredIds.length;
+    return recoveredIds.size;
   } catch(error) {
     console.warn('Legacy tag recovery failed',error);
     return 0;
