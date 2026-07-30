@@ -4051,3 +4051,15 @@ raised from 20 to 24 so the representation audit does not displace a complete
 older set. Browser-side evidence rules provide a deterministic backstop if the
 deployed Apps Script omits an explicitly supported canonical tag. Exact and
 semantically equivalent tags still collapse.
+
+### 31.12 Stable best-match ordering during tag audits (v81)
+
+Tag-schema and evidence audits are additive background enrichment. Existing
+grounded tags remain usable for personalization until a replacement tag set has
+been completed and consolidated atomically; an audit version mismatch must
+never clear tags or force the For You view into its alphabetical cold-start
+fallback.
+
+The `Best match` order is keyed first by the same `matchScore` displayed on each
+card. A lower displayed match therefore cannot appear ahead of a higher one,
+including while a library-wide tag audit is in progress.

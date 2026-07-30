@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 80;
+const APP_VERSION = 81;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const REPRESENTATION_TAG_VERSION = 1;
 const AI_TAG_MIN_CONFIDENCE = 0.55;
@@ -992,6 +992,10 @@ function hasCurrentAiTags(movie) {
   );
 }
 
+function hasUsableTags(movie) {
+  return !!movie && scoringTags(movie).length > 0;
+}
+
 function clearGeneratedTags(movie) {
   if (!movie) return;
   const suppressedTags = [...new Set((movie.suppressedTags || []).map(normaliseTagName).filter(Boolean))];
@@ -1888,7 +1892,14 @@ function rebuildDescriptorBrain() {
       if (!m.wikiTitle && m.pageTitle) m.wikiTitle = m.pageTitle;
       if (!m.pageTitle && m.wikiTitle) m.pageTitle = m.wikiTitle;
     } else if (m.source === 'wikipedia' && m.storyText) {
-      clearGeneratedTags(m);
+      // A prompt/evidence audit is an enrichment queue, not an invalidation
+      // event. Keep the last grounded tag set usable until its replacement is
+      // ready, otherwise every schema bump destroys personalization at startup.
+      m.tags = cleanTagArray(m.tags || [], m, false);
+      m.coreTags = cleanTagArray(m.coreTags || m.tags, m, false);
+      m.plotTags = cleanTagArray(m.plotTags || m.tags, m, false);
+      m.descriptorTags = cleanTagArray(m.descriptorTags || m.tags, m, false);
+      m.tagged = hasUsableTags(m);
     } else if (m.source !== 'wikipedia') {
       m.source = 'legacy';
       clearGeneratedTags(m);
@@ -5886,7 +5897,7 @@ function recommendableTitle(movie) {
 }
 
 function personalizedEnough() {
-  return Object.values(state.movies).filter(m => m.rating > 0 && m.tagged).length >= 3;
+  return Object.values(state.movies).filter(m => m.rating > 0 && hasUsableTags(m)).length >= 3;
 }
 
 function recommendationCandidates() {
@@ -6226,7 +6237,7 @@ function renderRecs() {
     renderGlobalTitleSearch(grid);
     return;
   }
-  const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
+  const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && hasUsableTags(m));
   grid.innerHTML = '';
 
   if (ratedTagged.length >= 3) {
@@ -7303,6 +7314,7 @@ function scoreMovies() {
     .filter(item => item.posOverlap > 0 && item.predictedRating > Number(getTasteModel('', formatClass(item.movie)).baseline || 3));
 
   ranked.sort((a, b) =>
+    b.matchScore - a.matchScore ||
     b.predictedRating - a.predictedRating ||
     b.positiveScore - a.positiveScore ||
     a.negativePenalty - b.negativePenalty ||
@@ -7472,7 +7484,10 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
 
 function refreshMovieTags(movie, opts={}) {
   if (!movie?.storyText) return movie;
-  if (!hasCurrentAiTags(movie)) clearGeneratedTags(movie);
+  // Retain the current tag set while a refresh is pending. The completed
+  // response is reconciled atomically, so cards never lose their ranking data
+  // merely because a background request has started.
+  movie.tagged = hasUsableTags(movie);
   touchRecord(movie);
   return movie;
 }
@@ -7684,7 +7699,10 @@ function runHousekeeping(manual=true, deferCanonical=false) {
       m.descriptorTags = [...m.tags];
       m.rawDescriptors = [];
     } else {
-      clearGeneratedTags(m);
+      m.tags = cleanTagArray(m.tags || [], m, false);
+      m.coreTags = cleanTagArray(m.coreTags || m.tags, m, false);
+      m.plotTags = cleanTagArray(m.plotTags || m.tags, m, false);
+      m.descriptorTags = cleanTagArray(m.descriptorTags || m.tags, m, false);
     }
     m.tagged = !!(m.tags.length || m.coreTags.length || m.plotTags.length || (m.descriptorTags && m.descriptorTags.length));
   });
