@@ -4055,3 +4055,20 @@ Recovery never replaces a non-empty current tag set and never imports ratings,
 watch state, exclusions, removals, metadata, titles, or other personal state.
 Restored tag fields are written through the normal chunked Drive pipeline, and
 a profile marker prevents the recovery pass from repeating.
+
+### 31.13 Quota-safe Gemini backlog processing (v85)
+
+The preserved-backup recovery pass gets first access to missing-tag records;
+background Gemini tagging cannot start until that pass has completed or been
+attempted. This prevents recoverable records from consuming AI quota.
+
+All Gemini features reserve requests through one shared start-time lane, so
+independent pipelines cannot wake together and burst the endpoint. Automatic
+tagging uses eight-title batches spaced by at least 20 seconds, reducing request
+count while increasing recovered titles per request.
+
+A rate-limit response creates a shared persisted cooldown with bounded
+escalation. It does not increment per-title failure counts, move titles through
+the retry queue, pause unrelated maintenance sources, or immediately retry.
+The unobtrusive health line reports the cooldown and processing resumes
+automatically when it expires.

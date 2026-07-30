@@ -28,16 +28,18 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 84;
+const APP_VERSION = 85;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
 const AI_TAG_MAX_COUNT = 24;
 const AI_TAG_MIGRATION_VERSION = 1;
 const AI_TAG_BATCH_SIZE = 3;
+const AI_BACKGROUND_BATCH_SIZE = 8;
+const AI_BACKGROUND_REQUEST_DELAY_MS = 20000;
 const AI_MANUAL_TAG_BATCH_SIZE = 10;
 const AI_MANUAL_RESOLVE_CONCURRENCY = 30;
-const AI_MANUAL_REQUEST_DELAY_MS = 1200;
+const AI_MANUAL_REQUEST_DELAY_MS = 6000;
 const AI_MANUAL_RETRY_LIMIT = 1;
 const AI_TAG_RETRY_LIMIT = 3;
 const AI_VOCABULARY_SAMPLE_SIZE = 240;
@@ -406,6 +408,7 @@ let currentAiTagAbortController = null;
 let currentTmdbAbortController = null;
 let currentSleepCancel = null;
 let lastAiRequestAt = 0;
+let aiRequestReservation = Promise.resolve();
 let autoFetchPaused = false;
 let autoExpandTimer = null;
 let receptionBackfillTimer = null;
@@ -1271,10 +1274,8 @@ async function normalizeTagCloudWithAi(opts={}) {
   if (!rawCount) return false;
   tagCloudNormalizationInProgress = true;
   tagCloudNormalizationAttemptedCount = rawCount;
-  const wait = Math.max(0, AI_REQUEST_DELAY_MS - (Date.now() - lastAiRequestAt));
-  if (wait) await abortableSleep(wait);
-  lastAiRequestAt = Date.now();
   try {
+    await reserveAiRequest(AI_REQUEST_DELAY_MS);
     const response = await fetchWithTimeout(AI_TAGGER_URL, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
@@ -1296,7 +1297,14 @@ async function normalizeTagCloudWithAi(opts={}) {
         ].join(' ')
       })
     }, AI_TAGGER_TIMEOUT_MS);
-    if (!response.ok) throw new Error(`AI tag normalization HTTP ${response.status}`);
+    if (!response.ok) {
+      const error=new Error(`AI tag normalization HTTP ${response.status}`);
+      if (response.status === 429) {
+        error.cinelensRateLimited=true;
+        registerAiRateLimit();
+      }
+      throw error;
+    }
     const payload = await response.json();
     if (payload.ok === false) throw new Error(payload.error || 'AI tag normalization failed');
     const groups = payload.rewriteGroups || payload.tagRewrites || {};
@@ -1656,10 +1664,7 @@ function purgeAiSensitiveContentExclusions() {
 
 async function postAiTaggerBatch(items, partials, opts={}) {
   const requestDelay = Math.max(0, Number(opts.requestDelayMs ?? AI_REQUEST_DELAY_MS));
-  const wait = Math.max(0, requestDelay - (Date.now() - lastAiRequestAt));
-  if (wait) await abortableSleep(wait);
-  if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
-  lastAiRequestAt = Date.now();
+  await reserveAiRequest(requestDelay);
   const controller = new AbortController();
   currentAiTagAbortController = controller;
   let timedOut = false;
@@ -1714,7 +1719,14 @@ async function postAiTaggerBatch(items, partials, opts={}) {
     clearTimeout(timeout);
     if (currentAiTagAbortController === controller) currentAiTagAbortController = null;
   }
-  if (!response.ok) throw new Error(`AI tagger HTTP ${response.status}`);
+  if (!response.ok) {
+    const error=new Error(`AI tagger HTTP ${response.status}`);
+    if (response.status === 429) {
+      error.cinelensRateLimited=true;
+      registerAiRateLimit();
+    }
+    throw error;
+  }
   return response.json();
 }
 
@@ -1734,7 +1746,12 @@ async function requestAiTags(movies, opts={}) {
   const payload = await postAiTaggerBatch(items, partials, opts);
   if (payload.ok && consensusPasses >= 2 && !fetchAbortRequested) {
     let second = null;
-    try { second = await postAiTaggerBatch(items, partials, opts); } catch(_) { second = null; }
+    try {
+      second = await postAiTaggerBatch(items, partials, opts);
+    } catch(error) {
+      if (isExternalRateLimitError(error)) throw error;
+      second = null;
+    }
     if (second?.ok) {
       const secondById = new Map((second.results || []).map(result => [String(result.id), result]));
       payload.results = (payload.results || []).map(result => consensusTagResult(result, secondById.get(String(result.id))));
@@ -1743,6 +1760,10 @@ async function requestAiTags(movies, opts={}) {
   }
   if (!payload.ok) {
     const error = new Error(payload.error || 'AI tagging failed');
+    if (isExternalRateLimitError(error)) {
+      error.cinelensRateLimited=true;
+      registerAiRateLimit();
+    }
     if (String(payload.code || '').toUpperCase() === 'PROHIBITED_CONTENT' || isAiSensitiveContentBlock(error)) {
       error.cinelensSensitiveContentBlock = true;
       if (items.length > 1) {
@@ -1765,6 +1786,7 @@ async function requestAiTags(movies, opts={}) {
     }
     throw error;
   }
+  clearAiRateLimitAfterSuccess();
   const byId = new Map((payload.results || []).map(result => [String(result.id), result]));
   let tagged = 0;
   let failed = 0;
@@ -3312,7 +3334,7 @@ async function fetchWikiSourceTitles(mode, pagesPerCategory=4) {
 function isExternalRateLimitError(error) {
   const message = String(error?.message || error || '').toLowerCase();
 
-  return (
+  return !!error?.cinelensRateLimited || (
     /\b429\b/.test(message) ||
     /too many requests/.test(message) ||
     /resource exhausted/.test(message) ||
@@ -3320,6 +3342,49 @@ function isExternalRateLimitError(error) {
     /quota exceeded/.test(message) ||
     /quota exhausted/.test(message)
   );
+}
+
+function aiRateLimitRemaining(now=Date.now()) {
+  return Math.max(0,(Number(state.meta?.aiRateLimitUntil || 0) || 0) - now);
+}
+
+function aiRateLimitError() {
+  const error=new Error('Gemini rate-limit cooldown active');
+  error.cinelensRateLimited=true;
+  return error;
+}
+
+function registerAiRateLimit() {
+  state.meta=state.meta || {};
+  const failures=Math.max(0,Number(state.meta.aiRateLimitCount || 0)) + 1;
+  const cooldown=Math.min(60 * 60 * 1000,5 * 60 * 1000 * Math.pow(3,Math.min(2,failures - 1)));
+  state.meta.aiRateLimitCount=failures;
+  state.meta.aiRateLimitUntil=Date.now() + cooldown;
+  state.meta.aiRateLimitedAt=nowStamp();
+  return cooldown;
+}
+
+function clearAiRateLimitAfterSuccess() {
+  if (!state.meta) return;
+  state.meta.aiRateLimitUntil=0;
+  state.meta.aiRateLimitCount=0;
+}
+
+async function reserveAiRequest(requestDelay=AI_REQUEST_DELAY_MS) {
+  let release;
+  const previous=aiRequestReservation;
+  aiRequestReservation=new Promise(resolve => { release=resolve; });
+  await previous;
+  try {
+    if (aiRateLimitRemaining()) throw aiRateLimitError();
+    const wait=Math.max(0,Math.max(0,Number(requestDelay)||0) - (Date.now() - lastAiRequestAt));
+    if (wait) await abortableSleep(wait);
+    if (fetchAbortRequested) throw new DOMException('Aborted','AbortError');
+    if (aiRateLimitRemaining()) throw aiRateLimitError();
+    lastAiRequestAt=Date.now();
+  } finally {
+    release();
+  }
 }
 
 async function expandPool(manual=true) {
@@ -3412,6 +3477,15 @@ async function expandPool(manual=true) {
     } catch (error) {
       const message = String(error?.message || error);
       outcomes.ai += movies.length;
+      if (isExternalRateLimitError(error)) {
+        if (!aiRateLimitRemaining()) registerAiRateLimit();
+        saveLocalState({silentUi:true,preserveUpdatedAt:true,driveProfileOnly:true});
+        queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
+        aiFailure = message;
+        collectionSatisfied = true;
+        return;
+      }
+
       movies.forEach(movie => {
         movie.aiTagging = {
           ...(movie.aiTagging || {}),
@@ -3427,14 +3501,6 @@ async function expandPool(manual=true) {
         touchRecord(movie);
       });
       saveCollectionState();
-
-      if (isExternalRateLimitError(error)) {
-        aiFailure = message;
-        autoFetchPaused = true;
-        collectionSatisfied = true;
-        return;
-      }
-
       console.warn('Background AI tagging deferred for this batch:', message);
       if (manual) aiFailure = message;
     }
@@ -6051,6 +6117,7 @@ function updateLibraryHealth() {
   if (autoFetchPaused) text = 'Collection paused';
   else if (poolExpansionInProgress) { const jy = discoveryJourneyYear(); text = `Collecting ${formatStrongMatchCount(health.strongCount, health.target)}${jy ? ` · fetching ${jy}` : ''}`; }
   else if (backgroundAiTaggingInProgress) text = `Tagging ${health.pendingTags} pending titles`;
+  else if (aiRateLimitRemaining()) text = 'Gemini cooling down · other maintenance continues';
   else if (!libraryWritesUnlocked && state.drive?.enabled) text = 'Collection waiting for Drive reconnect';
   else if (health.personalized && health.strongCount >= STRONG_REC_TARGET) text = `Collection paused at ${health.strongCount} strong matches · refills below ${STRONG_REC_REFILL_THRESHOLD}`;
   else if (!health.personalized) text = `Building starter pool · ${health.taggedUnseen}/${INITIAL_TAGGED_POOL_FLOOR}`;
@@ -6104,8 +6171,10 @@ function syncMaintenancePanelPlacement() {
 }
 
 function scheduleBackgroundAiQueue(delay = 700) {
+  const cooldown=aiRateLimitRemaining();
   if (
     autoFetchPaused ||
+    legacyTagRecoveryPending() ||
     backgroundAiTaggingInProgress ||
     backgroundAiTimer ||
     poolExpansionInProgress ||
@@ -6117,19 +6186,27 @@ function scheduleBackgroundAiQueue(delay = 700) {
   backgroundAiTimer = setTimeout(() => {
     backgroundAiTimer = null;
     runBackgroundAiQueue();
-  }, delay);
+  }, Math.max(delay,cooldown));
 }
 
 async function runBackgroundAiQueue() {
-  if (backgroundAiTaggingInProgress || poolExpansionInProgress || autoFetchPaused) return;
-  const batch = pendingBackgroundAiMovies().slice(0, AI_TAG_BATCH_SIZE);
+  if (backgroundAiTaggingInProgress || poolExpansionInProgress || autoFetchPaused || legacyTagRecoveryPending()) return;
+  if (aiRateLimitRemaining()) {
+    scheduleBackgroundAiQueue(aiRateLimitRemaining());
+    return;
+  }
+  const batch = pendingBackgroundAiMovies().slice(0, AI_BACKGROUND_BATCH_SIZE);
   if (!batch.length) return;
   const changedMovieIds=batch.map(movie => String(movie.id));
 
   backgroundAiTaggingInProgress = true;
   try {
     showBackgroundPipelineProgress('Gemini', `${batch.length} titles queued · ${batch.map(movie => movie.title).join(' · ')}`);
-    const result = await requestAiTags(batch, {deferUi:true});
+    const result = await requestAiTags(batch, {
+      deferUi:true,
+      batchSize:AI_BACKGROUND_BATCH_SIZE,
+      requestDelayMs:AI_BACKGROUND_REQUEST_DELAY_MS
+    });
     if (Number(result?.tagged || 0)) deferRecommendationRefresh();
     saveLocalState({silentUi:true,preserveUpdatedAt:true,changedMovieIds});
     queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
@@ -6139,33 +6216,35 @@ async function runBackgroundAiQueue() {
     }
   } catch (error) {
     const message = String(error?.message || error);
-    batch.forEach(movie => {
-      movie.aiTagging = {
-        ...(movie.aiTagging || {}),
-        status: 'building',
-        promptVersion: AI_TAG_PROMPT_VERSION,
-        storyHash: aiStoryHash(aiTagSourceText(movie)),
-        error: message,
-        failCount: Number(movie.aiTagging?.failCount || 0) + 1,
-        attemptedAt: nowStamp()
-      };
-      movie.retagStatus = 'needs-ai-tags';
-      movie.retagMessage = 'AI retry pending';
-      touchRecord(movie);
-    });
-    saveLocalState({silentUi:true,preserveUpdatedAt:true,changedMovieIds});
-    queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
     if (isExternalRateLimitError(error)) {
-      autoFetchPaused = true;
-      showToast('Background collection paused by Gemini rate limit. It will resume when you reopen or resume collection.', 'error');
+      if (!aiRateLimitRemaining()) registerAiRateLimit();
+      saveLocalState({silentUi:true,preserveUpdatedAt:true,driveProfileOnly:true});
+      queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
+      showToast('Gemini is cooling down; Wikipedia and TMDB work can continue.', '');
     } else {
+      batch.forEach(movie => {
+        movie.aiTagging = {
+          ...(movie.aiTagging || {}),
+          status:'building',
+          promptVersion:AI_TAG_PROMPT_VERSION,
+          storyHash:aiStoryHash(aiTagSourceText(movie)),
+          error:message,
+          failCount:Number(movie.aiTagging?.failCount || 0) + 1,
+          attemptedAt:nowStamp()
+        };
+        movie.retagStatus='needs-ai-tags';
+        movie.retagMessage='AI retry pending';
+        touchRecord(movie);
+      });
+      saveLocalState({silentUi:true,preserveUpdatedAt:true,changedMovieIds});
+      queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
       console.warn('Background AI tagging deferred:', message);
     }
   } finally {
     backgroundAiTaggingInProgress = false;
     const moreBackgroundAi = pendingBackgroundAiCount();
     settleBackgroundPipelineProgress(moreBackgroundAi ? 10000 : 0);
-    if (moreBackgroundAi) scheduleBackgroundAiQueue(1200);
+    if (moreBackgroundAi) scheduleBackgroundAiQueue(Math.max(1200,aiRateLimitRemaining()));
     else if (backgroundChangesSinceRender) checkpointBackgroundUi(0, true);
   }
 }
@@ -7875,10 +7954,8 @@ async function generateTasteStory({force=false, rng=Math.random, variationSeed='
   tasteStoryInProgress=true;
   state.tasteStory={...existing, version:TASTE_STORY_VERSION, profileHash:profile.profileHash, status:'writing', error:'', ratingCount:profile.ratingCount};
   renderTasteStoryCard();
-  const wait=Math.max(0, AI_REQUEST_DELAY_MS - (Date.now() - lastAiRequestAt));
-  if (wait) await abortableSleep(wait);
-  lastAiRequestAt=Date.now();
   try {
+    await reserveAiRequest(AI_REQUEST_DELAY_MS);
     const response=await fetchWithTimeout(AI_TAGGER_URL, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
@@ -7888,7 +7965,14 @@ async function generateTasteStory({force=false, rng=Math.random, variationSeed='
         previousStoryTitles:tasteStoryTitleHistory(existing)
       }})
     }, AI_TAGGER_TIMEOUT_MS);
-    if (!response.ok) throw new Error(`Taste story HTTP ${response.status}`);
+    if (!response.ok) {
+      const error=new Error(`Taste story HTTP ${response.status}`);
+      if (response.status === 429) {
+        error.cinelensRateLimited=true;
+        registerAiRateLimit();
+      }
+      throw error;
+    }
     const payload=await response.json();
     if (!payload.ok) throw new Error(payload.error || 'Taste story generation failed');
     const title=String(payload.title || '').trim();
@@ -8887,6 +8971,7 @@ let driveManifestCache=null;
 let driveProfileDirty=false;
 let driveAllChunksDirty=false;
 let legacyTagRecoveryInProgress=false;
+let legacyTagRecoveryAttemptedThisSession=false;
 const driveDirtyChunkKeys=new Set();
 const DRIVE_SYNC_RETRY_MIN_MS=15000;
 const DRIVE_SYNC_RETRY_MAX_MS=5*60*1000;
@@ -9769,9 +9854,17 @@ async function readDriveDataset(fileId) {
 async function recoverMissingTagsFromLegacyBackup(opts={}) {
   if (legacyTagRecoveryInProgress || Number(state.meta?.legacyTagRecoveryVersion || 0) >= LEGACY_TAG_RECOVERY_VERSION) return 0;
   legacyTagRecoveryInProgress=true;
+  legacyTagRecoveryAttemptedThisSession=true;
   try {
     const fileId=opts.fileId || state.drive.fileId || await findDriveFile();
-    if (!fileId && !opts.dataset) return 0;
+    if (!fileId && !opts.dataset) {
+      state.meta=state.meta || {};
+      state.meta.legacyTagRecoveryVersion=LEGACY_TAG_RECOVERY_VERSION;
+      state.meta.legacyTagRecoveryAt=nowStamp();
+      state.meta.legacyTagRecoveryCount=0;
+      if (opts.persist !== false) saveLocalState({driveProfileOnly:true});
+      return 0;
+    }
     const backup=opts.dataset ? normaliseIncomingData(opts.dataset) : await readDriveDataset(fileId);
     const recoveredIds=[];
     Object.entries(state.movies || {}).forEach(([id,current]) => {
@@ -9827,7 +9920,15 @@ async function recoverMissingTagsFromLegacyBackup(opts={}) {
     return 0;
   } finally {
     legacyTagRecoveryInProgress=false;
+    if (opts.persist !== false) scheduleBackgroundAiQueue(500);
   }
+}
+
+function legacyTagRecoveryPending() {
+  return legacyTagRecoveryInProgress || (
+    !legacyTagRecoveryAttemptedThisSession &&
+    Number(state.meta?.legacyTagRecoveryVersion || 0) < LEGACY_TAG_RECOVERY_VERSION
+  );
 }
 
 function scheduleLegacyTagRecovery(delay=1200) {
