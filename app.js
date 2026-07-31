@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 87;
+const APP_VERSION = 88;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -258,11 +258,44 @@ let backgroundChangesSinceRender = 0;
 const WIKI_PARSER_VERSION = 7;
 const REC_INFINITE_PAGE_SIZE = 20;
 const STRONG_REC_MIN_MATCH_SCORE = 0.95;
+// The displayed percentage is relative: 100% is the best title the library can
+// currently offer, not a predicted 5★. predictTasteFit's calibrated star
+// prediction deliberately regresses toward the rating mean, so on an absolute
+// scale even a perfect tag match tops out around 80% and nothing ever reads
+// 100%. Ordering, the card detail line and the collection thresholds still use
+// the absolute predicted rating — only the badge is rescaled.
+const MATCH_DISPLAY_MIN_REFERENCE = 0.4;
+const MATCH_DISPLAY_STRONG_MIN_RATIO = 0.95;
+let matchDisplayReferenceCache = null;
 
-// Keep the label tied to the same absolute score shown on recommendation cards.
+function matchDisplayReference() {
+  if (matchDisplayReferenceCache != null) return matchDisplayReferenceCache;
+  const best = Number(scoreMovies()[0]?.matchScore || 0);
+  matchDisplayReferenceCache = Math.max(best, MATCH_DISPLAY_MIN_REFERENCE);
+  return matchDisplayReferenceCache;
+}
+
+function displayMatchRatio(matchScore) {
+  const value = Number(matchScore) || 0;
+  if (value <= 0) return 0;
+  return clamp(value / matchDisplayReference(), 0, 1);
+}
+
+function displayMatchPercent(matchScore) {
+  return Math.round(displayMatchRatio(matchScore) * 100);
+}
+
+// Keep the label tied to the same relative score shown on recommendation cards.
 function formatStrongMatchCount(strongCount) {
   const count = Number(strongCount || 0);
   return `${count} strong matches (≥95%)`;
+}
+
+// Status objects that predate the relative display scale (or that a caller
+// builds by hand) only carry the absolute count; fall back to it rather than
+// silently reporting zero.
+function strongMatchCountForDisplay(status) {
+  return Number(status?.displayStrongCount ?? status?.strongCount ?? 0);
 }
 
 function checkpointBackgroundUi(changedCount=0, force=false) {
@@ -674,6 +707,7 @@ function runRecommendationRefresh() {
   tagVocabularyCache = null;
   cardMatchCache = null;
   scoredMovieCache = null;
+  matchDisplayReferenceCache = null;
   tasteModelCache = new Map();
   render();
 }
@@ -686,6 +720,7 @@ function flushRecommendationRefresh() {
   tagVocabularyCache = null;
   cardMatchCache = null;
   scoredMovieCache = null;
+  matchDisplayReferenceCache = null;
   tasteModelCache = new Map();
 }
 
@@ -3441,7 +3476,7 @@ async function expandPool(manual=true) {
     showFetchProgress(
       label,
       pct,
-      `${attempts}/${attemptBudget} checked · ${added} fetched · ${added} kept · ${formatStrongMatchCount(health.strongCount)}${jy ? ` · fetching ${jy}` : ''}${title ? ` · ${title}` : ''}`
+      `${attempts}/${attemptBudget} checked · ${added} fetched · ${added} kept · ${formatStrongMatchCount(strongMatchCountForDisplay(health))}${jy ? ` · fetching ${jy}` : ''}${title ? ` · ${title}` : ''}`
     );
   };
 
@@ -5971,9 +6006,16 @@ function recommendationFetchStatus(scored=recommendationReserveCandidates()) {
   const strong = scored.filter(item =>
     Number(item.matchScore || 0) >= STRONG_REC_MIN_MATCH_SCORE
   );
+  // Two counts, deliberately: collection keeps deciding on the absolute
+  // predicted rating (so background fetching behaves exactly as before), while
+  // the on-screen count matches the relative percentages the cards now show.
+  const displayStrong = scored.filter(item =>
+    displayMatchRatio(item.matchScore) >= MATCH_DISPLAY_STRONG_MIN_RATIO
+  );
 
   return {
     strongCount: strong.length,
+    displayStrongCount: displayStrong.length,
     bestOverlap: scored[0]?.posOverlap || 0,
     total: scored.length
   };
@@ -6097,12 +6139,12 @@ function updateLibraryHealth() {
   let text;
   if (autoFetchPaused) text = 'Collection paused';
   else if (legacyTagRecoveryInProgress) text = 'Recovering pre-v80 tag sets from Drive history';
-  else if (poolExpansionInProgress) { const jy = discoveryJourneyYear(); text = `Collecting ${formatStrongMatchCount(health.strongCount)}${jy ? ` · fetching ${jy}` : ''}`; }
+  else if (poolExpansionInProgress) { const jy = discoveryJourneyYear(); text = `Collecting ${formatStrongMatchCount(strongMatchCountForDisplay(health))}${jy ? ` · fetching ${jy}` : ''}`; }
   else if (backgroundAiTaggingInProgress) text = `Tagging ${health.pendingTags} pending titles`;
   else if (aiRateLimitRemaining()) text = 'Gemini cooling down · other maintenance continues';
   else if (!libraryWritesUnlocked && state.drive?.enabled) text = 'Collection waiting for Drive reconnect';
   else if (!health.personalized) text = `Building starter pool · ${health.taggedUnseen}/${INITIAL_TAGGED_POOL_FLOOR}`;
-  else text = `Collecting while idle · ${formatStrongMatchCount(health.strongCount)}`;
+  else text = `Collecting while idle · ${formatStrongMatchCount(strongMatchCountForDisplay(health))}`;
 
   if (label) label.textContent = text;
   if (maintenance) {
@@ -6309,7 +6351,7 @@ function renderRecs() {
     const fetchStatus = recommendationFetchStatus(scored);
     if (top.length) {
       document.getElementById('recCount').textContent =
-        `${fetchStatus.strongCount} strong (≥95%) · showing ${top.length} of ${scored.length} matches`;
+        `${strongMatchCountForDisplay(fetchStatus)} strong (≥95%) · showing ${top.length} of ${scored.length} matches`;
       const fragment = document.createDocumentFragment();
       top.forEach(item => fragment.appendChild(buildCard(item.movie, { score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating, receptionEffect:item.receptionEffect })));
       grid.appendChild(fragment);
@@ -6454,6 +6496,7 @@ function renderSimilarTitles(grid) {
     genreOverlap:item.matchedGenres.size,
     tasteFit:Math.max(0, Math.min(1, item.similarity)),
     matchScore:Math.max(0, Math.min(1, item.similarity)),
+    absoluteMatch:true,
     contextLabel:`Similar to ${source.title}`
   })));
   grid.appendChild(fragment);
@@ -6666,7 +6709,7 @@ function formatReceptionEffect(effect) {
 }
 
 function buildCard(movie, opts={}) {
-  const { score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, predictedRating, receptionEffect, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag, suppressMatch } = opts;
+  const { score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, predictedRating, receptionEffect, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag, suppressMatch, absoluteMatch } = opts;
   const hasSuppliedMatch = Number.isFinite(Number(matchScore)) || Number.isFinite(Number(tasteFit));
   const automaticMatch = hasSuppliedMatch || suppressMatch ? null : cardMatchData(movie);
   const resolvedMatch = suppressMatch
@@ -6691,10 +6734,12 @@ function buildCard(movie, opts={}) {
   card.setAttribute('aria-label', `Open details for ${movie.title}`);
   card.setAttribute('onclick', 'toggleCardReveal(event,this)');
   card.setAttribute('onkeydown', "if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCardReveal(event,this)}");
-  const matchPct = Math.round(resolvedMatchScore * 100);
+  // Similarity cards carry their own 0–1 ratio, which already reaches 100% on
+  // its own terms and must not be rescaled against the taste-fit reference.
+  const matchPct = absoluteMatch ? Math.round(resolvedMatchScore * 100) : displayMatchPercent(resolvedMatchScore);
   const receptionHint = usableReception(movie) ? ` · reception ${formatReceptionEffect(resolvedReceptionEffect)}` : '';
   const matchSummary = resolvedPosOverlap
-    ? `${resolvedPosOverlap} learned tag signal${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre signal${resolvedGenreOverlap===1?'':'s'}`:''} · ${matchPct}% predicted fit${resolvedPredictedRating?` · model ${resolvedPredictedRating.toFixed(1)}★`:''}${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} negative`:''}${receptionHint}`
+    ? `${resolvedPosOverlap} learned tag signal${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre signal${resolvedGenreOverlap===1?'':'s'}`:''} · ${matchPct}%${absoluteMatch ? ' similar' : ' of your best match'}${resolvedPredictedRating?` · model ${resolvedPredictedRating.toFixed(1)}★`:''}${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} negative`:''}${receptionHint}`
     : 'no current positive taste overlap';
   const safeId = movie.id.replace(/'/g,"\\'");
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';

@@ -50,7 +50,7 @@
   .logo{font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:3px;color:var(--accent);line-height:1}
   .logo span{color:var(--muted);font-size:12px;font-family:'DM Mono',monospace;letter-spacing:1px;margin-left:8px;vertical-align:middle}
   .app-version{display:inline-flex;align-items:center;height:22px;padding:0 7px;border:1px solid rgba(var(--accent-rgb),.18);border-radius:4px;background:rgba(var(--accent-rgb),.08);color:var(--muted);font:500 11px/1 'DM Mono',monospace;white-space:nowrap}
-  .header-right{display:flex;align-items:center;gap:8px}
+  .header-right{display:flex;align-items:center;gap:8px;min-width:0}
 
   .tab-bar{display:flex;gap:3px;background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:3px}
   .tab-btn{padding:4px 14px;border-radius:3px;font-size:14px;font-family:'DM Mono',monospace;cursor:pointer;border:none;background:transparent;color:var(--muted);transition:all .15s;letter-spacing:.5px}
@@ -466,12 +466,17 @@
     .stats-bar{grid-row:1 / span 2;display:grid;grid-template-columns:repeat(5,auto);gap:22px;align-items:center;border-bottom:0;margin:0;padding:0 18px 0 0;border-right:1px solid rgba(var(--accent-rgb),.13)}
     .stat-val{font-size:26px}
     .stat-label{font-size:9px}
-    .settings-bar{grid-column:2;display:flex;align-items:center;flex-wrap:nowrap;gap:8px;margin:0!important;min-width:0}
+    /* The filter row holds fixed-width controls (year, genre, sort, search) that
+       together outgrow the grid column on narrower desktops. nowrap made the
+       tail — search box and its two buttons — overflow the deck and get clipped
+       by body{overflow-x:hidden}, so those controls became unreachable. Wrapping
+       keeps every control on screen at any width. */
+    .settings-bar{grid-column:2;display:flex;align-items:center;flex-wrap:wrap;gap:8px 8px;margin:0!important;min-width:0}
     .settings-bar label{font-size:10px;white-space:nowrap}
     .settings-bar .platform-select{min-width:110px;max-width:150px}
     .settings-bar .year-input{width:74px}
     .title-search-input{width:150px}
-    .platform-bar.manual-add-row{grid-column:2;display:flex;align-items:center;flex-wrap:nowrap;gap:8px;margin:0!important;padding-top:0;border-top:0;min-width:0}
+    .platform-bar.manual-add-row{grid-column:2;display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0!important;padding-top:0;border-top:0;min-width:0}
     .manual-title-input{width:min(360px,26vw)}
     .manual-add-row .platform-btn{white-space:nowrap}
   }
