@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 96;
+const APP_VERSION = 97;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -578,7 +578,20 @@ const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // field off the existing TMDB details response. v5: adds vote_average/
 // vote_count (the TMDB user score reception signal). v6 appends the first
 // TMDB audience-review page to that same details request for tag evidence.
-const TMDB_DATA_VERSION = 6;
+// Bumped to 7 in v96 so every stored title re-verifies its TMDB match against
+// the fixed matcher below. Records matched by the old popularity fallback are
+// carrying the wrong poster, genres, reception and review text, and only a
+// re-search can find that out.
+const TMDB_DATA_VERSION = 7;
+// Minimum title similarity (see tmdbTitleSimilarity) for a TMDB search result
+// to be accepted as the same title. Unrelated results sharing one common word
+// score 0.5, so this rejects them while tolerating subtitle and punctuation
+// differences between Wikipedia and TMDB naming.
+const TMDB_TITLE_MATCH_MIN = 0.6;
+// Non-narrative TV that should never enter the library. TMDB genre ids:
+// 10764 Reality, 10767 Talk, 10763 News. These have no plot for the tagger to
+// work with and are not what CineLens recommends.
+const TMDB_EXCLUDED_TV_GENRE_IDS = [10764, 10767, 10763];
 const TMDB_REVIEW_TEXT_MAX_CHARS = 8000;
 const TMDB_REVIEW_ITEM_MAX_CHARS = 1200;
 // JioHotstar's own pattern is checked before Disney+'s: Disney+'s pattern
@@ -2309,6 +2322,7 @@ function runStartupMaintenance() {
   const run = () => {
     try {
       const removedHindiShows = purgeDisallowedHindiShows();
+      const removedRealityShows = purgeNonNarrativeShows();
       const clearedHorrorExclusions = clearConventionalHorrorExclusions();
       const excludedSensitiveTitles = purgeAiSensitiveContentExclusions();
       const addedAtMigrated = ensureAddedAtMetadata();
@@ -2319,7 +2333,7 @@ function runStartupMaintenance() {
       const removedLegacyPoolExclusions = legacyDiscoveryExclusionsRemovedDuringLoad || Object.hasOwn(state, 'rollingPoolExclusions');
       legacyDiscoveryExclusionsRemovedDuringLoad = false;
       if (Object.hasOwn(state, 'rollingPoolExclusions')) delete state.rollingPoolExclusions;
-      if (removedHindiShows || clearedHorrorExclusions || excludedSensitiveTitles || addedAtMigrated || ratedAtMigrated || retiredWatchlist || changed || movedGenrePreferences || removedLegacyPoolExclusions) {
+      if (removedHindiShows || removedRealityShows || clearedHorrorExclusions || excludedSensitiveTitles || addedAtMigrated || ratedAtMigrated || retiredWatchlist || changed || movedGenrePreferences || removedLegacyPoolExclusions) {
         saveLocalState();
         queueDriveSync();
         render();
@@ -3128,6 +3142,24 @@ function purgeDisallowedHindiShows() {
   return excludeStoredTitles(isHindiShowRecord, 'hindi-show-excluded');
 }
 
+// v96: reality/competition/talk/game/news television has no plot for the
+// tagger to work with and is not what CineLens recommends. TMDB discovery now
+// excludes it at the source (without_genres), but a title can also arrive
+// through a Wikipedia lane or already be stored, and TMDB_GENRE_MAP drops the
+// Reality/Talk/News ids so movie.genres never records them — so detection here
+// reads the article text instead.
+const NON_NARRATIVE_SHOW_PATTERN = /\b(reality (?:television|tv|show|series|competition|program)|reality-(?:television|tv)|competition (?:series|show)|talent show|game show|quiz show|talk show|chat show|news (?:program|programme|series|broadcast)|dating show|cooking show|makeover show|docuseries|docu-series)\b/;
+
+function isNonNarrativeShowRecord(movie) {
+  if (!movie?.format) return false;
+  const text = `${movie.leadText || ''} ${movie.categoryText || ''}`.toLowerCase();
+  return NON_NARRATIVE_SHOW_PATTERN.test(text);
+}
+
+function purgeNonNarrativeShows() {
+  return excludeStoredTitles(isNonNarrativeShowRecord, 'reality-show-excluded');
+}
+
 // The conventional-horror gate is retired: ratings and manual removal decide
 // which titles stay. Titles the old gate auto-removed are released from the
 // blocklist so discovery can surface them again.
@@ -3620,9 +3652,19 @@ async function tmdbDiscover(mediaType, language, year, page) {
     page: String(Math.max(1, page))
   });
   params.set(yearParam, String(year));
+  // Excluded at the source so reality/talk/news series are never fetched,
+  // never hydrated from Wikipedia and never counted against the attempt
+  // budget — rather than being collected and filtered afterwards.
+  if (endpoint === 'tv') params.set('without_genres', TMDB_EXCLUDED_TV_GENRE_IDS.join(','));
   const data = await tmdbApiJson(`https://api.themoviedb.org/3/discover/${endpoint}?${params.toString()}`);
+  const results = Array.isArray(data?.results) ? data.results : [];
   return {
-    results: Array.isArray(data?.results) ? data.results : [],
+    // Belt and braces: without_genres is applied by TMDB, but a result whose
+    // genre_ids still carry an excluded id (stale index, combo genres) is
+    // dropped here too.
+    results: endpoint === 'tv'
+      ? results.filter(item => !(item?.genre_ids || []).some(id => TMDB_EXCLUDED_TV_GENRE_IDS.includes(Number(id))))
+      : results,
     totalPages: Math.max(1, Math.min(500, Number(data?.total_pages) || 1))
   };
 }
@@ -4651,6 +4693,27 @@ function tmdbCandidateYear(result, mediaType) {
   return Number.isFinite(year) ? year : null;
 }
 
+// Dice coefficient over title word tokens. 1 is an exact match after
+// normalisation; unrelated titles that merely share a common word ("Secret
+// Level" vs "Secret Invasion") land at 0.5 and are rejected.
+function tmdbTitleSimilarity(candidateTitle, wantedComparable) {
+  const value = tmdbComparableTitle(candidateTitle);
+  if (!value || !wantedComparable) return 0;
+  if (value === wantedComparable) return 1;
+  const candidateTokens = value.split(' ').filter(Boolean);
+  const wantedTokens = wantedComparable.split(' ').filter(Boolean);
+  if (!candidateTokens.length || !wantedTokens.length) return 0;
+  // Multiset intersection, so a repeated word cannot be matched twice.
+  const remaining = new Map();
+  wantedTokens.forEach(token => remaining.set(token, (remaining.get(token) || 0) + 1));
+  let shared = 0;
+  candidateTokens.forEach(token => {
+    const count = remaining.get(token) || 0;
+    if (count) { shared++; remaining.set(token, count - 1); }
+  });
+  return (2 * shared) / (candidateTokens.length + wantedTokens.length);
+}
+
 function tmdbComparableTitle(value) {
   return String(value || '').toLowerCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -4678,21 +4741,36 @@ async function tmdbSearchCandidate(title, year, mediaType) {
   });
   const pool = inYearWindow.length ? inYearWindow : (year ? [] : results);
   if (!pool.length) return null;
-  // Popularity alone routinely picked a more famous but WRONG title over the
-  // exact-named one the library actually holds (wrong posters/genres on
-  // cards). An exact title match — against the localized or original name —
-  // now always outranks popularity; popularity only breaks ties between
-  // exact matches, and only decides outright when nothing matches exactly.
+  // An exact title match outranks popularity. The previous version stopped
+  // there, and that was the bug behind widespread wrong posters: when NOTHING
+  // matched exactly it still returned pool[0] — the most popular title in the
+  // year window — with no similarity floor at all. "Secret Level" could come
+  // back as "Secret Invasion" purely because that was more popular in 2024.
+  //
+  // The damage was not limited to the poster: applyTmdbDetails also overwrites
+  // genres, tmdbId, reception AND tmdbReviewText from the same response, and
+  // review text feeds aiTagSourceText — so a mismatch quietly tagged a title
+  // using a different film's audience reviews.
+  //
+  // A candidate must now actually resemble the title we asked for. Below the
+  // floor we return nothing, because no poster is plainly better than a
+  // confidently wrong one.
   const wanted = tmdbComparableTitle(title);
-  const exactMatch = item => wanted && (
-    tmdbComparableTitle(item.title || item.name) === wanted ||
-    tmdbComparableTitle(item.original_title || item.original_name) === wanted
+  if (!wanted) return null;
+  const scored = pool.map(item => ({
+    item,
+    score:Math.max(
+      tmdbTitleSimilarity(item.title || item.name, wanted),
+      tmdbTitleSimilarity(item.original_title || item.original_name, wanted)
+    )
+  }));
+  scored.sort((a, b) =>
+    b.score - a.score ||
+    Number(b.item.popularity || 0) - Number(a.item.popularity || 0)
   );
-  pool.sort((a, b) =>
-    (exactMatch(b) - exactMatch(a)) ||
-    Number(b.popularity || 0) - Number(a.popularity || 0)
-  );
-  return pool[0];
+  const best = scored[0];
+  if (!best || best.score < TMDB_TITLE_MATCH_MIN) return null;
+  return {...best.item, cinelensMatchScore:best.score};
 }
 
 function matchOttPlatform(providerName) {
@@ -4776,6 +4854,9 @@ async function fetchTmdbDetails(title, year, format) {
     return {
       tmdbId: candidate.id,
       tmdbMediaType: mediaType,
+      // Recorded so a fuzzy (non-exact) match can be found later without
+      // re-querying — anything below 1 was matched on similarity, not identity.
+      tmdbMatchScore: Number(candidate.cinelensMatchScore || 0),
       posterUrl: details?.posterUrl || fallbackPoster || '',
       watchAvailability: details?.watchAvailability || null,
       genres: details?.genres || [],
@@ -4794,7 +4875,11 @@ function applyTmdbDetails(movie, tmdb) {
   if (!movie) return movie;
   if (tmdb) {
     if (tmdb.posterUrl) movie.posterUrl = tmdb.posterUrl;
-    if (tmdb.tmdbId) { movie.tmdbId = tmdb.tmdbId; movie.tmdbMediaType = tmdb.tmdbMediaType; }
+    if (tmdb.tmdbId) {
+      movie.tmdbId = tmdb.tmdbId;
+      movie.tmdbMediaType = tmdb.tmdbMediaType;
+      if (tmdb.tmdbMatchScore) movie.tmdbMatchScore = tmdb.tmdbMatchScore;
+    }
     movie.watchAvailability = tmdb.watchAvailability || null;
     // Real TMDB classification replaces the GENRE_RULES text-guessing
     // fallback whenever TMDB actually returns genres for this title.
@@ -4825,7 +4910,13 @@ async function attachTmdbDetailsWithDeadline(movie) {
       fetchTmdbDetails(movie.title, movie.year, movie.format),
       new Promise((_, reject) => {
         timer = setTimeout(() => {
-          currentTmdbAbortController?.abort();
+          // v96 fix: this used to call currentTmdbAbortController?.abort().
+          // That was safe when TMDB requests were serialised, but v91 made the
+          // backfill concurrent, so `current` is simply whichever request
+          // started most recently — a timeout on one title was aborting a
+          // DIFFERENT title's in-flight request, which then resolved null and
+          // looked like a TMDB miss. Each request already carries its own
+          // TMDB_FETCH_TIMEOUT_MS controller, so this only needs to reject.
           reject(new Error(`TMDB title refresh timed out after ${TMDB_TITLE_REFRESH_TIMEOUT_MS / 1000}s`));
         }, TMDB_TITLE_REFRESH_TIMEOUT_MS);
       })
@@ -5437,6 +5528,12 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   if (!mediaEvidence.film && !mediaEvidence.show && !preliminaryFormat.strong && !infoboxMedia && !trustedLane) return rejectWikiParse(diagnostics, 'no film/show evidence');
   const formatDecision = preliminaryFormat;
   const format = formatDecision.strong ? formatDecision.format : (infobox.type === 'show' ? 'series' : (trustedLane ? (trustedLane.mode === 'shows' ? 'series' : null) : formatDecision.format));
+  // Reality, competition, talk, game and news television never enters the
+  // library. Checked here, before the story text is even built, so it costs
+  // nothing and cannot be stored by any lane.
+  if (format && NON_NARRATIVE_SHOW_PATTERN.test(`${leadText} ${catText}`.toLowerCase())) {
+    return rejectWikiParse(diagnostics, 'reality or other non-narrative television');
+  }
   const storyText = buildStoryTextForFormat(extract, format, wikitext);
   if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return rejectWikiParse(diagnostics, 'no usable narrative section');
   const reception = parseReceptionFromExtract(extract);
