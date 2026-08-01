@@ -192,6 +192,9 @@
   .tb-tag.negative{border-color:rgba(224,82,82,.3);color:var(--danger);background:rgba(224,82,82,.04)}
   .tb-weight{font-size:9px;opacity:.7;background:rgba(255,255,255,.06);padding:1px 4px;border-radius:2px}
   .tb-pref{font-size:9px;background:rgba(var(--accent-rgb),.11);color:var(--accent);padding:1px 4px;border-radius:2px}
+  /* A deliberately neutralised tag is muted rather than accented — it is a
+     choice to record, not a preference to advertise. */
+  .tb-pref-neutral{background:rgba(255,255,255,.08);color:var(--muted)}
   .tb-count{font-size:9px;opacity:.5}
   .tag-search{width:min(280px,100%);padding:7px 9px}
   .tag-detail{margin-top:18px;padding-top:18px;border-top:1px solid rgba(var(--accent-rgb),.14)}
@@ -206,7 +209,8 @@
   /* Clear resets the preference rather than expressing one, so it sits apart
      from the four opinion buttons and stays visually quiet until needed. */
   .tag-pref-clear{margin-left:6px;padding-left:9px;border-color:transparent;color:var(--muted);border-left:1px solid rgba(255,255,255,.16);border-radius:0 999px 999px 0;opacity:.85}
-  .tag-pref-clear:hover{color:var(--danger);border-color:transparent;border-left-color:rgba(255,255,255,.16);opacity:1}
+  .tag-pref-clear:hover:not(:disabled){color:var(--danger);border-color:transparent;border-left-color:rgba(255,255,255,.16);opacity:1}
+  .tag-pref-clear:disabled{opacity:.3;cursor:default}
   .tag-status{display:inline-flex;margin-top:8px;padding:2px 6px;border-radius:999px;background:rgba(0,0,0,.72);border:1px solid rgba(255,255,255,.16);font-family:'DM Mono',monospace;font-size:9px;color:var(--text)}
   .tag-delete-mode.active{background:rgba(239,83,80,.14);border-color:var(--danger);color:#ff8a86}
 

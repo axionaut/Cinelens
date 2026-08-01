@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 92;
+const APP_VERSION = 93;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -7915,7 +7915,11 @@ function predictTasteFit(movie, model=null, opts={}) {
   const matchedGenres = new Set();
 
   tags.forEach(tag => {
-    const contribution = ((Number(activeModel?.tagEffects?.[tag] || 0) + manualTagPreferenceEffect(tag)) * tagFeatureValue(tag));
+    // An explicitly neutral tag contributes nothing at all — that is the whole
+    // point of the state: cancel what the ratings inferred.
+    const contribution = tagIsNeutralized(tag)
+      ? 0
+      : ((Number(activeModel?.tagEffects?.[tag] || 0) + manualTagPreferenceEffect(tag)) * tagFeatureValue(tag));
     rawRating += contribution;
     if (contribution > 0.015) {
       posOverlap++;
@@ -7934,8 +7938,10 @@ function predictTasteFit(movie, model=null, opts={}) {
     // horror" carries the same force as "Avoid" on a story tag — otherwise a
     // deliberate choice would land at a third of the strength the same click
     // has elsewhere, which is not what the control appears to promise.
-    const contribution = Number(activeModel?.genreEffects?.[genre] || 0) * GENRE_SCORE_FACTOR
-      + manualGenrePreferenceEffect(genre);
+    const contribution = genreIsNeutralized(genre)
+      ? 0
+      : Number(activeModel?.genreEffects?.[genre] || 0) * GENRE_SCORE_FACTOR
+        + manualGenrePreferenceEffect(genre);
     rawRating += contribution;
     if (contribution > 0.012) {
       genreOverlap++;
@@ -7987,7 +7993,7 @@ function computeTagWeights() {
   const weights = {};
   const genres = {};
   Object.entries(model.tagEffects || {}).forEach(([tag, effect]) => {
-    const value = Number(effect || 0) + manualTagPreferenceEffect(tag);
+    const value = tagIsNeutralized(tag) ? 0 : Number(effect || 0) + manualTagPreferenceEffect(tag);
     if (Math.abs(value) > 0.001) weights[tag] = value;
   });
   // Every genre the library actually uses gets an entry, not just those the
@@ -7999,7 +8005,9 @@ function computeTagWeights() {
     if (isGenreTagKey(key)) genreKeys.add(genreFromTagKey(key));
   });
   genreKeys.forEach(genre => {
-    const value = Number(model.genreEffects?.[genre] || 0) * GENRE_SCORE_FACTOR + manualGenrePreferenceEffect(genre);
+    const value = genreIsNeutralized(genre)
+      ? 0
+      : Number(model.genreEffects?.[genre] || 0) * GENRE_SCORE_FACTOR + manualGenrePreferenceEffect(genre);
     if (Math.abs(value) > 0.001) genres[genre] = value;
   });
   state.tagWeights = weights;
@@ -8690,7 +8698,7 @@ function renderTagBrain() {
     if (!m.tagged) return;
     if (!matchesGlobalFilters(m)) return;
     scoringTags(m).filter(tagIsPresentable).forEach(tag => {
-      if (!map[tag]) map[tag]={weight:state.tagWeights[tag]||0,preference:Number(state.settings.tagPreferences[tag]||0),movieCount:0,movies:[],isGenre:false};
+      if (!map[tag]) map[tag]={weight:state.tagWeights[tag]||0,preference:Number(state.settings.tagPreferences[tag]||0),stated:hasStatedPreference(tag),movieCount:0,movies:[],isGenre:false};
       map[tag].movieCount++; map[tag].movies.push(m);
     });
     // v92: genres join the same cloud as first-class entries. They are keyed
@@ -8700,7 +8708,7 @@ function renderTagBrain() {
     // keeps counts consistent with the tags beside it.
     movieGenres(m).forEach(genre => {
       const key=genreTagKey(genre);
-      if (!map[key]) map[key]={weight:state.genreWeights[genre]||0,preference:Number(state.settings.tagPreferences[key]||0),movieCount:0,movies:[],isGenre:true};
+      if (!map[key]) map[key]={weight:state.genreWeights[genre]||0,preference:Number(state.settings.tagPreferences[key]||0),stated:hasStatedPreference(key),movieCount:0,movies:[],isGenre:true};
       map[key].movieCount++; map[key].movies.push(m);
     });
   });
@@ -8717,7 +8725,12 @@ function renderTagBrain() {
   grid.innerHTML=entries.map(([tag,data])=>{
     const cls=data.weight>0?'positive':data.weight<0?'negative':'neutral';
     const ws=formatTagBrainWeight(data.weight);
-    const pref=data.preference ? `<span class="tb-pref">${data.preference > 0 ? 'pref +' : 'pref '}${data.preference}</span>` : '';
+    // A stated neutral is a real choice and must be visible in the cloud —
+    // otherwise a tag you deliberately switched off looks identical to one you
+    // have simply never touched.
+    const pref=!data.stated ? ''
+      : data.preference ? `<span class="tb-pref">${data.preference > 0 ? 'pref +' : 'pref '}${data.preference}</span>`
+      : `<span class="tb-pref tb-pref-neutral">neutral</span>`;
     const safe=tag.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     const name=tagDisplayName(tag);
     // Delete mode strips a tag off titles, which is meaningless for a genre —
@@ -8830,14 +8843,48 @@ function tagDisplayName(value) {
   return isGenreTagKey(value) ? genreFromTagKey(value) : String(value || '');
 }
 
+// v93: "no opinion" and "explicitly neutral" are now different states.
+//
+//   key ABSENT        -> no opinion. The weight learned from your ratings
+//                        applies in full.
+//   key PRESENT, 0    -> explicitly neutral. The learned weight is SUPPRESSED:
+//                        "this keeps showing up in films I rate highly, but it
+//                        is not why I like them — stop scoring it."
+//   key PRESENT, +/-N -> a stated bias added on top of the learned weight.
+//
+// Before v93 these first two collapsed together, because choosing Neutral
+// deleted the key — so the button did nothing except clear, and the learned
+// effect it was meant to cancel kept applying at full strength. Existing data
+// never stored a 0 (it was always deleted), so presence of a 0 is unambiguous
+// and no migration is needed.
+function preferenceKey(tag) {
+  return isGenreTagKey(tag) ? genreTagKey(genreFromTagKey(tag)) : normaliseTagName(tag);
+}
+
+function hasStatedPreference(tag) {
+  const key = preferenceKey(tag);
+  return !!key && Object.prototype.hasOwnProperty.call(state.settings?.tagPreferences || {}, key);
+}
+
+function isNeutralizedPreference(tag) {
+  return hasStatedPreference(tag) && Number(state.settings.tagPreferences[preferenceKey(tag)] || 0) === 0;
+}
+
+function tagIsNeutralized(tag) {
+  return isNeutralizedPreference(normaliseTagName(tag));
+}
+
+function genreIsNeutralized(genre) {
+  return isNeutralizedPreference(genreTagKey(genre));
+}
+
 function manualGenrePreferenceEffect(genre) {
   const preference = Number(state.settings?.tagPreferences?.[genreTagKey(genre)] || 0);
   return clamp(preference, -4, 4) * TASTE_MODEL_MANUAL_PREFERENCE_UNIT;
 }
 
 function tagPreferenceValue(tag) {
-  if (isGenreTagKey(tag)) return Number(state.settings?.tagPreferences?.[genreTagKey(genreFromTagKey(tag))] || 0);
-  return Number(state.settings?.tagPreferences?.[normaliseTagName(tag)] || 0);
+  return Number(state.settings?.tagPreferences?.[preferenceKey(tag)] || 0);
 }
 
 // Titles carrying a given cloud entry, for either kind of key.
@@ -8850,40 +8897,68 @@ function titlesForTagKey(key, collection) {
   return rows.filter(movie => movie.tagged && scoringTags(movie).includes(key));
 }
 
+// Stores the value, INCLUDING 0 — see the preference-state comment above.
+// Removing an opinion entirely is clearTagPreference().
 function setTagPreference(tag, value) {
   // A genre key keeps its "genre:" prefix as the storage key but is announced
   // by its plain name.
-  const normalised = isGenreTagKey(tag) ? genreTagKey(genreFromTagKey(tag)) : normaliseTagName(tag);
-  if (!normalised || normalised === GENRE_TAG_PREFIX) return;
+  const key = preferenceKey(tag);
+  if (!key || key === GENRE_TAG_PREFIX) return;
   if (!state.settings.tagPreferences) state.settings.tagPreferences = {};
-  const next = Math.max(-4, Math.min(4, Number(value || 0)));
-  if (next) state.settings.tagPreferences[normalised] = next;
-  else delete state.settings.tagPreferences[normalised];
+  const next = Math.max(-4, Math.min(4, Number(value) || 0));
+  state.settings.tagPreferences[key] = next;
+  applyPreferenceChange();
+  const label = tagDisplayName(key);
+  showToast(
+    next
+      ? `Set "${label}" preference to ${next > 0 ? '+' : ''}${next}`
+      : `"${label}" set to neutral — it no longer affects recommendations`,
+    'success'
+  );
+}
+
+// Removes the opinion entirely, so the weight learned from your ratings
+// applies again. This is NOT the same as setting neutral.
+function clearTagPreference(tag) {
+  const key = preferenceKey(tag);
+  if (!key || !hasStatedPreference(tag)) return;
+  delete state.settings.tagPreferences[key];
+  applyPreferenceChange();
+  showToast(`Cleared "${tagDisplayName(key)}" preference — back to learned weight`, '');
+}
+
+function applyPreferenceChange() {
   computeTagWeights();
   invalidateTasteModel();
   saveSettingsState();
   render();
   if (selectedTag) renderTagDetail();
-  const label = tagDisplayName(normalised);
-  showToast(next ? `Set "${label}" preference to ${next > 0 ? '+' : ''}${next}` : `Cleared "${label}" preference`, next ? 'success' : '');
 }
 
 function renderTagPreferenceControls(tag) {
+  const stated = hasStatedPreference(tag);
   const current = tagPreferenceValue(tag);
   const safe = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-  // "Neutral" used to sit here as a 0 option, but 0 IS the unset state — so it
-  // rendered as active on every tag that had never been touched, and there was
-  // no way to tell "I deliberately chose neutral" from "I never said". It is
-  // replaced by an explicit Clear that only appears once a preference exists.
-  const options = [[-4,'Avoid'],[-2,'Dislike'],[2,'Like'],[4,'Love']];
-  const clearBtn = current
-    ? `<button class="tb-filter-btn tag-pref-btn tag-pref-clear" title="Remove this preference" onclick="setTagPreference('${safe}',0)">Clear</button>`
-    : '';
+  const kind = isGenreTagKey(tag) ? 'genre' : 'tag';
+  const options = [
+    [-4,'Avoid',`Strongly steer away from this ${kind}`],
+    [-2,'Dislike',`Steer away from this ${kind}`],
+    [0,'Neutral',`Ignore this ${kind} entirely — cancel the weight learned from your ratings`],
+    [2,'Like',`Steer towards this ${kind}`],
+    [4,'Love',`Strongly steer towards this ${kind}`]
+  ];
+  // A button is only "active" when the preference was actually STATED, so an
+  // untouched tag shows nothing selected rather than falsely highlighting
+  // Neutral just because its stored value would be 0.
+  const buttons = options.map(([value,label,hint]) =>
+    `<button class="tb-filter-btn tag-pref-btn${stated && current===value?' active':''}" title="${hint}" onclick="setTagPreference('${safe}',${value})">${label}</button>`
+  ).join('');
+  // Always rendered, so it is discoverable rather than appearing only once a
+  // preference exists; disabled when there is nothing to clear.
+  const clearBtn = `<button class="tb-filter-btn tag-pref-btn tag-pref-clear"${stated ? '' : ' disabled'} title="${stated ? 'Remove this preference and go back to the weight learned from your ratings' : 'No preference set'}" onclick="clearTagPreference('${safe}')">Clear</button>`;
   return `<div class="tag-pref-panel">
-    <span class="tag-pref-label">${isGenreTagKey(tag) ? 'Genre' : 'Tag'} preference</span>
-    <div class="tag-pref-buttons">
-      ${options.map(([value,label]) => `<button class="tb-filter-btn tag-pref-btn${current===value?' active':''}" onclick="setTagPreference('${safe}',${value})">${label}</button>`).join('')}${clearBtn}
-    </div>
+    <span class="tag-pref-label">${kind} preference</span>
+    <div class="tag-pref-buttons">${buttons}${clearBtn}</div>
   </div>`;
 }
 
@@ -8900,8 +8975,18 @@ function renderTagDetail() {
   const all=activeMovies.map(movie=>({movie,status:movie.rating>0?'rated':'pool'}));
   const weight=(isGenre ? state.genreWeights[genreFromTagKey(selectedTag)] : state.tagWeights[selectedTag])||0;
   const preference=tagPreferenceValue(selectedTag);
-  const prefText=preference ? `, preference ${preference > 0 ? '+' : ''}${preference}` : '';
-  const ws=weight>0?`+${weight} (you like this${prefText})`:weight<0?`${weight} (you dislike this${prefText})`:`~ unweighted${prefText}`;
+  // Long floats read as noise in a status line; two decimals matches the
+  // precision the cloud chips already show.
+  const shown=Number(weight).toFixed(2).replace(/\.00$/,'');
+  let ws;
+  if (isNeutralizedPreference(selectedTag)) {
+    ws='~ neutral (you set this to neutral, so it is ignored when scoring)';
+  } else {
+    const prefText=hasStatedPreference(selectedTag) ? `, preference ${preference > 0 ? '+' : ''}${preference}` : '';
+    ws=weight>0?`+${shown} (you like this${prefText})`
+      :weight<0?`${shown} (you dislike this${prefText})`
+      :`~ unweighted${prefText}`;
+  }
   const counts={rated:all.filter(x=>x.status==='rated').length,pool:all.filter(x=>x.status==='pool').length};
   document.getElementById('tagDetailStat').textContent=`weight ${ws} - ${all.length} titles - ${counts.rated} rated - ${counts.pool} pool`;
   const prefSlot=document.getElementById('tagPreferenceControls');
