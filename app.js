@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 89;
+const APP_VERSION = 90;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -337,6 +337,14 @@ const TMDB_API_KEY = 'b807a738c939c5b8ef9d0c3f3b3ad662';
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
 const TMDB_REQUEST_DELAY_MS = 300;
 const TMDB_SEARCH_REGION = 'IN';
+// v90: TMDB /discover drives year-wise title discovery. Each page returns ~20
+// titles pre-validated for year, original language and media type, so almost
+// every fetch turns into a kept title instead of a rejected Wikipedia crawl
+// member. Wikipedia is then consulted only for the rich plot/episode text the
+// tagger needs.
+const TMDB_DISCOVER_VOTE_FLOOR = 12;   // enough notability to warrant a Wikipedia page + real reviews
+const TMDB_DISCOVER_PAGE_CAP = 5;      // up to ~100 titles per year per lane before walking to the prior year
+const TMDB_DISCOVERY_CURSOR_VERSION = 1;
 const TMDB_BACKFILL_BATCH_SIZE = 10;
 const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // v18: replaces the fixed-India where-to-watch display. Instead of one
@@ -486,6 +494,7 @@ let state = {
   tagNormalization: { version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:'' },
   tasteStory: { version:TASTE_STORY_VERSION, profileHash:'', title:'', story:'', generatedAt:'', status:'idle', error:'' },
   discoveryCursor: {},
+  tmdbDiscoveryCursor: {},
   discoveryLedger: {},
   meta: { updatedAt:'' },
   poolFetched: false
@@ -3008,7 +3017,12 @@ function collectionMaxYear() {
 // reached. Lanes walk newest→oldest independently; the furthest-back (min)
 // year is the honest "where are we now" for the whole sweep.
 function discoveryJourneyYear() {
-  const cursors = state.discoveryCursor;
+  // TMDB /discover now drives the year-by-year sweep, so its cursor is the
+  // authoritative "how far back have we reached"; fall back to the legacy
+  // Wikipedia cursor only if TMDB discovery hasn't run yet.
+  const cursors = (state.tmdbDiscoveryCursor && Object.keys(state.tmdbDiscoveryCursor).length)
+    ? state.tmdbDiscoveryCursor
+    : state.discoveryCursor;
   if (!cursors || typeof cursors !== 'object') return null;
   const years = Object.values(cursors).map(cursor => Number(cursor?.year)).filter(Number.isFinite);
   return years.length ? Math.min(...years) : null;
@@ -3039,6 +3053,12 @@ function resetYearBoundedDiscovery() {
   if (!state.discoveryCursor || typeof state.discoveryCursor !== 'object') state.discoveryCursor = {};
   COLLECTION_LANES.forEach(lane => {
     state.discoveryCursor[lane.key] = freshDiscoveryCursor();
+  });
+  // The active TMDB sweep restarts from the newest year too, so the min-year
+  // change takes effect immediately instead of after the current cycle.
+  state.tmdbDiscoveryCursor = {};
+  COLLECTION_LANES.forEach(lane => {
+    state.tmdbDiscoveryCursor[lane.key] = freshTmdbDiscoveryCursor();
   });
 }
 
@@ -3229,13 +3249,178 @@ async function nextLaneDiscoveryCandidates(lane, limit, existing, seenThisRun) {
   return out;
 }
 
+// --- TMDB year-wise discovery (v90) ------------------------------------------
+// Maps a collection lane to the TMDB /discover endpoint + original language.
+function laneTmdbParams(lane) {
+  return {
+    mediaType: lane.mode === 'shows' ? 'tv' : 'movie',
+    language: lane.language === 'Hindi' ? 'hi' : 'en'
+  };
+}
+
+async function tmdbDiscover(mediaType, language, year, page) {
+  const endpoint = mediaType === 'tv' ? 'tv' : 'movie';
+  const yearParam = mediaType === 'tv' ? 'first_air_date_year' : 'primary_release_year';
+  const params = new URLSearchParams({
+    api_key: TMDB_API_KEY,
+    include_adult: 'false',
+    include_video: 'false',
+    language: 'en-US',
+    sort_by: 'popularity.desc',
+    with_original_language: language,
+    'vote_count.gte': String(TMDB_DISCOVER_VOTE_FLOOR),
+    page: String(Math.max(1, page))
+  });
+  params.set(yearParam, String(year));
+  const data = await tmdbApiJson(`https://api.themoviedb.org/3/discover/${endpoint}?${params.toString()}`);
+  return {
+    results: Array.isArray(data?.results) ? data.results : [],
+    totalPages: Math.max(1, Math.min(500, Number(data?.total_pages) || 1))
+  };
+}
+
+function freshTmdbDiscoveryCursor() {
+  return { version:TMDB_DISCOVERY_CURSOR_VERSION, year:collectionMaxYear(), page:1, cycles:0 };
+}
+
+function ensureTmdbDiscoveryCursor() {
+  if (!state.tmdbDiscoveryCursor || typeof state.tmdbDiscoveryCursor !== 'object') state.tmdbDiscoveryCursor = {};
+  const minY = collectionMinYear();
+  const maxY = collectionMaxYear();
+  COLLECTION_LANES.forEach(lane => {
+    const c = state.tmdbDiscoveryCursor[lane.key];
+    if (!c || Number(c.version || 0) !== TMDB_DISCOVERY_CURSOR_VERSION) {
+      state.tmdbDiscoveryCursor[lane.key] = freshTmdbDiscoveryCursor();
+      return;
+    }
+    state.tmdbDiscoveryCursor[lane.key] = {
+      version: TMDB_DISCOVERY_CURSOR_VERSION,
+      year: Math.max(minY, Math.min(maxY, Number(c.year) || maxY)),
+      page: Math.max(1, Number(c.page) || 1),
+      cycles: Math.max(0, Number(c.cycles) || 0)
+    };
+  });
+}
+
+async function nextLaneTmdbCandidates(lane, limit, existing, seenThisRun) {
+  ensureTmdbDiscoveryCursor();
+  const cursor = state.tmdbDiscoveryCursor[lane.key];
+  const { mediaType, language } = laneTmdbParams(lane);
+  const format = lane.mode === 'shows' ? 'series' : null;
+  const minY = collectionMinYear();
+  const maxY = collectionMaxYear();
+  const out = [];
+  let scannedPages = 0;
+  while (out.length < limit && !fetchAbortRequested && scannedPages < 12) {
+    const { results, totalPages } = await tmdbDiscover(mediaType, language, cursor.year, cursor.page);
+    scannedPages++;
+    const pageCap = Math.min(TMDB_DISCOVER_PAGE_CAP, totalPages);
+    if (!results.length || cursor.page > pageCap) {
+      // This year is exhausted (no more results or hit the per-year cap): walk
+      // to the prior year, looping back to the newest year after the oldest.
+      cursor.page = 1;
+      cursor.year = cursor.year - 1 < minY ? maxY : cursor.year - 1;
+      if (cursor.year === maxY) cursor.cycles += 1;
+      continue;
+    }
+    for (const result of results) {
+      if (out.length >= limit) break;
+      const title = String(result.title || result.name || '').trim();
+      if (!title) continue;
+      const tmdbId = Number(result.id) || 0;
+      if (!tmdbId || existing.tmdbIds.has(tmdbId)) continue;
+      const year = tmdbCandidateYear(result, mediaType) || cursor.year;
+      const candidate = {
+        title,
+        year,
+        pageid: '',
+        tmdbId,
+        tmdbMediaType: mediaType,
+        tmdbResult: result,
+        lane,
+        laneKey: lane.key,
+        format,
+        language: lane.language,
+        tier: 0,
+        discoveryYear: cursor.year,
+        discoveryCycle: cursor.cycles,
+        sourceCategory: `TMDB ${mediaType}/${language} ${cursor.year} p${cursor.page}`,
+        sourceLabel: `${lane.label} · TMDB ${cursor.year}`,
+        discoveryProgress: `${lane.label} · ${cursor.year} · TMDB page ${cursor.page}`,
+        cursorAfter: null
+      };
+      const decision = discoveryCandidateDecision(candidate, lane, existing, seenThisRun);
+      if (decision.allowed) {
+        seenThisRun.add(discoveryCandidateIdentity(candidate));
+        existing.tmdbIds.add(tmdbId);
+        noteDiscoveryEncounter(candidate, 'queued');
+        candidate.cursorAfter = { ...cursor };
+        out.push(candidate);
+      } else {
+        noteDiscoveryEncounter(candidate, 'skipped-before-fetch', decision.reason);
+      }
+    }
+    // Consumed this page; advance so the next pass reads the following page.
+    cursor.page += 1;
+  }
+  return out;
+}
+
+// Turns a TMDB-discovered candidate into a stored record: Wikipedia supplies the
+// rich plot/episode text the tagger needs, while the already-known TMDB id
+// supplies poster, genres, reception and reviews with a single by-id lookup —
+// no wasteful TMDB title search, since discovery already resolved the id.
+async function fetchTmdbDiscoveredMovie(candidate, diagnostics={}) {
+  const lane = candidate.lane || null;
+  const mode = lane?.mode || (candidate.format ? 'shows' : 'movies');
+  const fresh = await refreshTitleFromWikipedia(
+    {
+      title: candidate.title,
+      year: candidate.year,
+      format: candidate.format || null,
+      language: candidate.language,
+      country: candidate.language === 'Hindi' ? 'India' : ''
+    },
+    { ai:false, tmdb:false, mode, diagnostics, acceptDifferentTitle:true }
+  );
+  if (!fresh) {
+    if (diagnostics && !diagnostics.reason) diagnostics.reason = 'no Wikipedia article for TMDB title';
+    return null;
+  }
+  try {
+    const details = await tmdbDetailsWithAvailability(candidate.tmdbId, candidate.tmdbMediaType);
+    if (details) {
+      applyTmdbDetails(fresh, { ...details, tmdbId:candidate.tmdbId, tmdbMediaType:candidate.tmdbMediaType, detailsFetched:true });
+    } else {
+      // Details lookup failed — fall back to the discover payload we already
+      // hold so the record still gets poster/genre/reception, retried later.
+      const r = candidate.tmdbResult || {};
+      const posterPath = r.poster_path || '';
+      applyTmdbDetails(fresh, {
+        tmdbId: candidate.tmdbId,
+        tmdbMediaType: candidate.tmdbMediaType,
+        posterUrl: posterPath ? TMDB_IMAGE_BASE + posterPath : '',
+        genres: tmdbGenresToCanonical((r.genre_ids || []).map(id => ({ id }))),
+        voteAverage: Number.isFinite(Number(r.vote_average)) && Number(r.vote_average) > 0 ? Number(r.vote_average) : null,
+        voteCount: Math.max(0, parseInt(r.vote_count, 10) || 0),
+        detailsFetched: false
+      });
+    }
+  } catch (err) {
+    if (fetchAbortRequested || err?.name === 'AbortError') throw err;
+    // A TMDB hiccup must not lose the Wikipedia record; TMDB backfill retries it.
+  }
+  return fresh;
+}
+
 async function nextDiscoveryCandidates(mode, limit, seenThisRun=new Set()) {
-  ensureDiscoveryCursor();
+  ensureTmdbDiscoveryCursor();
   const lanes = collectionLanesForMode(mode);
   const knownRecords = [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})];
   const existing = {
     titles:new Set(knownRecords.flatMap(movie => [movie.title, movie.wikiTitle, movie.pageTitle].map(normaliseTitleKey).filter(Boolean))),
     pageIds:new Set(knownRecords.map(wikiPageIdFromMovie).filter(Boolean)),
+    tmdbIds:new Set(knownRecords.map(movie => Number(movie.tmdbId) || 0).filter(Boolean)),
     // Built once per discovery pass instead of re-scanned per scanned title.
     hiddenIndex:buildDiscoveryExclusionIndex(state.hiddenTitles),
     wrongPickIndex:buildDiscoveryExclusionIndex(state.wrongPicks)
@@ -3244,7 +3429,7 @@ async function nextDiscoveryCandidates(mode, limit, seenThisRun=new Set()) {
   const out = [];
   for (const lane of lanes) {
     if (fetchAbortRequested) break;
-    out.push(...await nextLaneDiscoveryCandidates(lane, laneLimit, existing, seenThisRun));
+    out.push(...await nextLaneTmdbCandidates(lane, laneLimit, existing, seenThisRun));
   }
   return out;
 }
@@ -3559,7 +3744,7 @@ async function expandPool(manual=true) {
       added < FETCH_MAX_ADDED_PER_RUN &&
       (manual || shouldRunBackgroundCollection())
     ) {
-      const cursorBeforeBatch = JSON.parse(JSON.stringify(state.discoveryCursor || {}));
+      const cursorBeforeBatch = JSON.parse(JSON.stringify(state.tmdbDiscoveryCursor || {}));
       const remaining = Math.min(8, attemptBudget - attempts);
       const toFetch = await nextDiscoveryCandidates(mode, Math.max(1, remaining), seenThisRun);
       if (!toFetch.length) break;
@@ -3584,9 +3769,11 @@ async function expandPool(manual=true) {
           seenThisRun.add(typeof candidate === 'string' ? `title:${normaliseTitleKey(title)}` : discoveryCandidateIdentity(candidate));
           attempts++;
           const diagnostics = {};
-          const work = pageId
-            ? fetchWikiMovieByPageId(pageId, fetchMode, {ai:false, diagnostics, trustedLane:lane})
-            : fetchWikiMovie(title, fetchMode, diagnostics, {ai:false, trustedLane:lane});
+          const work = (typeof candidate === 'object' && candidate?.tmdbId)
+            ? fetchTmdbDiscoveredMovie(candidate, diagnostics)
+            : pageId
+              ? fetchWikiMovieByPageId(pageId, fetchMode, {ai:false, diagnostics, trustedLane:lane})
+              : fetchWikiMovie(title, fetchMode, diagnostics, {ai:false, trustedLane:lane});
           return {title, lane, fetchMode, diagnostics, candidate, work};
         });
 
@@ -3655,11 +3842,11 @@ async function expandPool(manual=true) {
       }
 
       if (processedCandidates < toFetch.length) {
-        state.discoveryCursor = cursorBeforeBatch;
+        state.tmdbDiscoveryCursor = cursorBeforeBatch;
         Object.entries(processedCursorByLane).forEach(([laneKey, checkpoint]) => {
-          state.discoveryCursor[laneKey] = checkpoint;
+          state.tmdbDiscoveryCursor[laneKey] = checkpoint;
         });
-        ensureDiscoveryCursor();
+        ensureTmdbDiscoveryCursor();
         saveCollectionState({preserveUpdatedAt:true});
       } else saveCollectionState({preserveUpdatedAt:true});
 
@@ -8396,6 +8583,7 @@ function localProfilePayload() {
     tagNormalization:state.tagNormalization,
     tasteStory:state.tasteStory,
     discoveryCursor:state.discoveryCursor,
+    tmdbDiscoveryCursor:state.tmdbDiscoveryCursor,
     discoveryLedger:state.discoveryLedger,
     poolFetched:state.poolFetched,
     drive:{
@@ -8737,6 +8925,7 @@ function normaliseIncomingData(d={}) {
     tagNormalization: d.tagNormalization || {version:'', lastRawTagCount:0, normalizedAt:'', model:'', error:''},
     tasteStory: normaliseTasteStory(d.tasteStory || {}),
     discoveryCursor: normaliseDiscoveryCursor(d.discoveryCursor || {}),
+    tmdbDiscoveryCursor: (d.tmdbDiscoveryCursor && typeof d.tmdbDiscoveryCursor === 'object') ? d.tmdbDiscoveryCursor : {},
     discoveryLedger: d.discoveryLedger || {}
   };
 }
@@ -8767,6 +8956,7 @@ function replaceStateFromDataset(dataset) {
   state.tagNormalization = incoming.tagNormalization;
   state.tasteStory = incoming.tasteStory;
   state.discoveryCursor = incoming.discoveryCursor;
+  state.tmdbDiscoveryCursor = incoming.tmdbDiscoveryCursor || {};
   state.discoveryLedger = incoming.discoveryLedger || {};
   state.meta = incoming.meta;
   Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
@@ -8884,6 +9074,9 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
     tagNormalization:dataTimestamp(remote) > dataTimestamp(local) ? remote.tagNormalization : local.tagNormalization,
     tasteStory:newestTasteStory(local.tasteStory, remote.tasteStory),
     discoveryCursor:cursor,
+    // The TMDB sweep cursor is a resumable checkpoint, not merge-critical data
+    // (the ledger dedupes regardless), so the newer profile's cursor simply wins.
+    tmdbDiscoveryCursor:(dataTimestamp(remote) > dataTimestamp(local) ? remote.tmdbDiscoveryCursor : local.tmdbDiscoveryCursor) || {},
     discoveryLedger
   };
   return {dataset, source:'record-merge'};
@@ -8949,6 +9142,7 @@ function loadLocalState() {
       delete state.canonicalTagStats;
       if (s.meta) state.meta={...state.meta,...s.meta};
       if (s.discoveryCursor) state.discoveryCursor=normaliseDiscoveryCursor(s.discoveryCursor);
+      if (s.tmdbDiscoveryCursor && typeof s.tmdbDiscoveryCursor==='object') state.tmdbDiscoveryCursor=s.tmdbDiscoveryCursor;
       if (s.discoveryLedger) state.discoveryLedger=s.discoveryLedger;
       ensureDiscoveryCursor();
       if (s.drive) {
@@ -9558,6 +9752,7 @@ function exportDriveProfile() {
     tagNormalization:state.tagNormalization,
     tasteStory:state.tasteStory,
     discoveryCursor:state.discoveryCursor,
+    tmdbDiscoveryCursor:state.tmdbDiscoveryCursor,
     discoveryLedger:state.discoveryLedger
   };
 }
