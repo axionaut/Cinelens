@@ -129,6 +129,14 @@
       <option value="and">AND</option>
     </select>
      </div>
+    <label>Format</label>
+    <select class="platform-select" id="formatPreference" onchange="updateFormatPreference(this.value)" aria-label="Format preference" title="How much weight shows carry against movies in recommendations">
+      <option value="balanced">Movies &amp; shows equally</option>
+      <option value="movies-slight">Favour movies</option>
+      <option value="movies-strong">Strongly favour movies</option>
+      <option value="shows-slight">Favour shows</option>
+      <option value="shows-strong">Strongly favour shows</option>
+    </select>
     <label>Rating</label>
     <select class="platform-select" id="ratingFilter" onchange="updateRatingFilter(this.value)">
       <option value="all">All ratings</option>

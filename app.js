@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 101;
+const APP_VERSION = 102;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -561,10 +561,28 @@ const TAG_MASS_PIVOT_FALLBACK = 4;
 // How strongly tag volume is normalised away. 0 = off (pre-v100 behaviour),
 // 1 = score purely on average tag strength. BM25's default.
 const TAG_LENGTH_NORM_B = 0.75;
-// Stated format preference. Scales how far a title's learned taste signal can
-// carry it from the baseline, so a show must be proportionally stronger than a
-// movie to reach the same slot. 1 = no preference. See predictTasteFit.
-const FORMAT_SCORE_WEIGHT = { movie: 1, show: 0.25 };
+// Stated format preference, chosen in the filter bar. Scales how far a title's
+// learned taste signal can carry it from the baseline, so the down-weighted
+// format must be proportionally stronger to reach the same slot. See
+// predictTasteFit. 'balanced' applies no weighting at all.
+const FORMAT_PREFERENCE_OPTIONS = {
+  balanced:        { label:'Movies & shows equally', movie:1,    show:1    },
+  'movies-slight': { label:'Favour movies',          movie:1,    show:0.5  },
+  'movies-strong': { label:'Strongly favour movies', movie:1,    show:0.25 },
+  'shows-slight':  { label:'Favour shows',           movie:0.5,  show:1    },
+  'shows-strong':  { label:'Strongly favour shows',  movie:0.25, show:1    }
+};
+const DEFAULT_FORMAT_PREFERENCE = 'movies-strong';
+
+function formatPreferenceKey() {
+  const key = String(state.settings?.formatPreference || '');
+  return FORMAT_PREFERENCE_OPTIONS[key] ? key : DEFAULT_FORMAT_PREFERENCE;
+}
+
+function formatScoreWeight(formatClassName) {
+  const option = FORMAT_PREFERENCE_OPTIONS[formatPreferenceKey()];
+  return Number(option?.[formatClassName] ?? 1);
+}
 const SHOW_STORY_MAX_CHARS = 12000;
 const TMDB_API_KEY = 'b807a738c939c5b8ef9d0c3f3b3ad662';
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
@@ -740,7 +758,7 @@ let state = {
   movies: {},
   tagWeights: {},
   genreWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', genreFilters:[], genreMatchMode:'or', ratingFilter:'all', sortMode:'recommended', sortDirection:'desc', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, tmdbBackfillPaused:false },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', genreFilters:[], genreMatchMode:'or', ratingFilter:'all', sortMode:'recommended', sortDirection:'desc', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, formatPreference:DEFAULT_FORMAT_PREFERENCE, tmdbBackfillPaused:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', manifestFileId:'', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   wrongPicks: {},
@@ -3220,16 +3238,93 @@ function purgeDisallowedHindiShows() {
 // through a Wikipedia lane or already be stored, and TMDB_GENRE_MAP drops the
 // Reality/Talk/News ids so movie.genres never records them — so detection here
 // reads the article text instead.
-const NON_NARRATIVE_SHOW_PATTERN = /\b(reality (?:television|tv|show|series|competition|program)|reality-(?:television|tv)|competition (?:series|show)|talent show|game show|quiz show|talk show|chat show|news (?:program|programme|series|broadcast)|dating show|cooking show|makeover show|docuseries|docu-series)\b/;
+// v102: anything without a story. CineLens recommends on story tags, so a
+// format with no narrative has nothing for the tagger to read and nothing for
+// the model to compare — it is not merely unwanted, it is unusable.
+//
+// Matched against the Wikipedia lead sentence and category text, both of which
+// state the format explicitly ("is an American talk show"), so this keys on
+// self-description rather than on subject matter.
+const NON_NARRATIVE_SHOW_PATTERN = new RegExp([
+  // Unscripted / participation formats
+  'reality (?:television|tv|show|series|competition|program|programme)',
+  'reality-(?:television|tv|show|series)',
+  '(?:competition|elimination|survival|dating|matchmaking|makeover|renovation|cooking|baking|cook-off|talent|singing|dance|modell?ing|quiz|game|panel|puzzle|trivia|auction|pawn|antiques|fishing|hunting|survivalist) (?:shows?|series|programmes?|programs?|formats?)',
+  'talent (?:contests?|searc(?:h|hes))',
+  'beauty pageants?',
+  'game-shows?',
+  // Discussion / presentation formats
+  '(?:talk|chat|variety|sketch|comedy|magazine|interview|debate|discussion|advice|lifestyle|travelogue|infotainment|shopping|home shopping) (?:shows?|series|programmes?|programs?)',
+  'talk-shows?',
+  'late-night (?:show|series|talk)',
+  'stand-?up (?:comedy )?(?:specials?|shows?|series)',
+  'comedy specials?',
+  'variety specials?',
+  'sketch comed(?:y|ies)',
+  'podcasts?',
+  'radio (?:show|programme|program|series)',
+  // News / factual / events
+  'news (?:program|programme|series|broadcast|magazine|bulletin|channel)',
+  'current affairs (?:shows?|series|programmes?|programs?)',
+  'newscasts?',
+  'documentary (?:series|television series|miniseries)',
+  'docu-?series',
+  'nature documentary',
+  'award(?:s)? (?:show|ceremony|telecast|special)',
+  'telethons?',
+  'beauty contests?',
+  // Sport and live event broadcasts
+  '(?:sports|wrestling|boxing|racing|esports) (?:programmes?|programs?|broadcasts?|telecasts?|shows?)',
+  'professional wrestling (?:television|show|programme|program)',
+  'live (?:broadcast|telecast) (?:special|event)',
+  'concert (?:films?|specials?|tour films?)',
+  // Children's / instructional non-narrative
+  '(?:educational|instructional|preschool educational) (?:shows?|series|programmes?|programs?)'
+].map(part => `\\b${part}\\b`).join('|'));
 
+// Films with no narrative either. Deliberately tighter than the show pattern
+// and matched only against the OPENING clause, where a page states what it is
+// ("is a 2019 stand-up comedy special"). A drama *about* a stand-up comedian
+// mentions the phrase later in the lead and must not be caught.
+const NON_NARRATIVE_FILM_PATTERN = /\b(stand-?up (?:comedy )?(?:special|film)|comedy special|concert (?:film|movie|special|documentary)|filmed (?:stage )?(?:performance|concert|play)|compilation film|award(?:s)? ceremony|television special|variety special)\b/;
+
+// A page states its FORMAT first and its SUBJECT after — "is an American
+// comedy-drama series about a talk show host". Testing the whole lead caught
+// the subject and blocked scripted dramas about television, stand-up or awards
+// nights. So the text is cut at the first word that turns declaration into
+// description, and only the declarative head is matched.
+const NON_NARRATIVE_SUBJECT_BREAK = /\b(?:about|set (?:in|during|at|around)|based on|adapted from|follows?|following|centres? on|centers? on|revolves|depicts?|chronicles?|tells the story|starring|which|who|that)\b/;
+
+function nonNarrativeOpeningClause(leadText='') {
+  const text = String(leadText || '').trim();
+  const stop = text.indexOf('. ');
+  const sentence = (stop > 0 ? text.slice(0, stop) : text).toLowerCase();
+  const cut = sentence.search(NON_NARRATIVE_SUBJECT_BREAK);
+  return cut > 0 ? sentence.slice(0, cut) : sentence;
+}
+
+function isNonNarrativeRecord(movie) {
+  if (!movie) return false;
+  // TMDB's own classification is authoritative and wording-independent, so it
+  // is checked before any text heuristic.
+  if (movie.nonNarrative) return true;
+  const head = nonNarrativeOpeningClause(movie.leadText);
+  if (movie.format) {
+    // Categories are curated and state the format directly
+    // ("Category:American talk shows"), so they are trusted in full.
+    return NON_NARRATIVE_SHOW_PATTERN.test(head)
+      || NON_NARRATIVE_SHOW_PATTERN.test(String(movie.categoryText || '').toLowerCase());
+  }
+  return NON_NARRATIVE_FILM_PATTERN.test(head);
+}
+
+// Kept under the old name so existing callers are untouched.
 function isNonNarrativeShowRecord(movie) {
-  if (!movie?.format) return false;
-  const text = `${movie.leadText || ''} ${movie.categoryText || ''}`.toLowerCase();
-  return NON_NARRATIVE_SHOW_PATTERN.test(text);
+  return isNonNarrativeRecord(movie);
 }
 
 function purgeNonNarrativeShows() {
-  return excludeStoredTitles(isNonNarrativeShowRecord, 'reality-show-excluded');
+  return excludeStoredTitles(isNonNarrativeRecord, 'non-narrative-excluded');
 }
 
 // The conventional-horror gate is retired: ratings and manual removal decide
@@ -5051,6 +5146,11 @@ async function tmdbDetailsWithAvailability(id, mediaType) {
     posterUrl: posterPath ? TMDB_IMAGE_BASE + posterPath : '',
     watchAvailability: buildWatchAvailability(data['watch/providers']?.results),
     genres: tmdbGenresToCanonical(data.genres),
+    // TMDB_GENRE_MAP deliberately drops Reality/Talk/News, so the verdict has
+    // to be taken here or the signal is lost. This is structured data from the
+    // source rather than a guess at Wikipedia's wording — it does not care
+    // whether the article happens to use the phrase "talk show".
+    nonNarrative: (data.genres || []).some(g => TMDB_EXCLUDED_TV_GENRE_IDS.includes(Number(g?.id))),
     voteAverage: Number.isFinite(Number(data.vote_average)) && Number(data.vote_average) > 0 ? Number(data.vote_average) : null,
     voteCount: Math.max(0, parseInt(data.vote_count, 10) || 0),
     reviewText:compactTmdbReviewText(data.reviews),
@@ -5074,6 +5174,7 @@ async function fetchTmdbDetailsById(tmdbId, mediaType) {
     posterUrl: details.posterUrl || '',
     watchAvailability: details.watchAvailability || null,
     genres: details.genres || [],
+    nonNarrative: !!details.nonNarrative,
     voteAverage: details.voteAverage,
     voteCount: details.voteCount,
     reviewText: details.reviewText || '',
@@ -5107,6 +5208,7 @@ async function fetchTmdbDetails(title, year, format) {
       posterUrl: details?.posterUrl || fallbackPoster || '',
       watchAvailability: details?.watchAvailability || null,
       genres: details?.genres || [],
+      nonNarrative: !!details?.nonNarrative,
       voteAverage: details?.voteAverage ?? fallbackVoteAverage,
       voteCount: details?.voteAverage != null ? details.voteCount : Math.max(0, parseInt(candidate.vote_count, 10) || 0),
       reviewText:details?.reviewText || '',
@@ -5134,6 +5236,9 @@ function applyTmdbDetails(movie, tmdb) {
     // Real TMDB classification replaces the GENRE_RULES text-guessing
     // fallback whenever TMDB actually returns genres for this title.
     if (tmdb.genres && tmdb.genres.length) movie.genres = tmdb.genres;
+    // Sticky: TMDB saying "this is a talk show" is authoritative and is what
+    // the startup purge and the recommendation filters key off.
+    if (tmdb.nonNarrative) movie.nonNarrative = true;
     if (tmdb.detailsFetched) {
       movie.tmdbReviewText=String(tmdb.reviewText || '');
       movie.tmdbReviewCount=Math.max(0,Number(tmdb.reviewCount || 0));
@@ -5792,11 +5897,13 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   if (!mediaEvidence.film && !mediaEvidence.show && !preliminaryFormat.strong && !infoboxMedia && !trustedLane) return rejectWikiParse(diagnostics, 'no film/show evidence');
   const formatDecision = preliminaryFormat;
   const format = formatDecision.strong ? formatDecision.format : (infobox.type === 'show' ? 'series' : (trustedLane ? (trustedLane.mode === 'shows' ? 'series' : null) : formatDecision.format));
-  // Reality, competition, talk, game and news television never enters the
-  // library. Checked here, before the story text is even built, so it costs
-  // nothing and cannot be stored by any lane.
-  if (format && NON_NARRATIVE_SHOW_PATTERN.test(`${leadText} ${catText}`.toLowerCase())) {
-    return rejectWikiParse(diagnostics, 'reality or other non-narrative television');
+  // Nothing without a story enters the library — reality, talk, game, variety,
+  // news, sport and award formats for television; stand-up specials and concert
+  // films for cinema. CineLens recommends on story tags, so these have nothing
+  // to tag and nothing to compare. Checked before the story text is even built,
+  // so it costs nothing and no lane can store one.
+  if (isNonNarrativeRecord({format, leadText, categoryText:catText})) {
+    return rejectWikiParse(diagnostics, 'non-narrative format, not a story title');
   }
   const storyText = buildStoryTextForFormat(extract, format, wikitext);
   if (!storyText || storyText.length < MIN_STORY_SECTION_CHARS) return rejectWikiParse(diagnostics, 'no usable narrative section');
@@ -6856,6 +6963,8 @@ function updateControlDeck() {
   }
   const genreMatchMode=document.getElementById('genreMatchMode');
   if (genreMatchMode) genreMatchMode.value=state.settings.genreMatchMode || 'or';
+  const formatPreference=document.getElementById('formatPreference');
+  if (formatPreference) formatPreference.value=formatPreferenceKey();
   const languageFilter=document.getElementById('languageFilter');
   if (languageFilter && languageFilter.value !== (state.settings.languageFilter || 'all')) languageFilter.value=state.settings.languageFilter || 'all';
   const ratingFilter=document.getElementById('ratingFilter');
@@ -6904,6 +7013,7 @@ function normaliseFilterAndSortSettings() {
     state.settings.genreFilters = legacyGenre && legacyGenre !== 'all' ? [legacyGenre] : [];
   }
   state.settings.genreMatchMode = state.settings.genreMatchMode === 'and' ? 'and' : 'or';
+  state.settings.formatPreference = formatPreferenceKey();
   const legacySortModes = {
     'rating-desc':['rating','desc'], 'year-desc':['year','desc'], 'year-asc':['year','asc'],
     'updated-desc':['addedAt','desc'], 'title-asc':['title','asc']
@@ -6935,6 +7045,18 @@ function updateGenreFilter(genre, checked) {
   const nowChecked = checked === undefined ? !current.has(value) : !!checked;
   if (nowChecked) current.add(value); else current.delete(value);
   setGenreFilters([...current]);
+}
+
+// Changing the format preference changes every predicted score, so the cached
+// scores and card match data must go — computeTagWeights alone would not do it.
+function updateFormatPreference(value) {
+  const next = FORMAT_PREFERENCE_OPTIONS[value] ? value : DEFAULT_FORMAT_PREFERENCE;
+  if (next === formatPreferenceKey()) return;
+  state.settings.formatPreference = next;
+  saveSettingsState();
+  invalidateTasteModel();
+  render();
+  showToast(FORMAT_PREFERENCE_OPTIONS[next].label, 'success');
 }
 
 function updateGenreMatchMode(mode) {
@@ -8595,15 +8717,15 @@ function predictTasteFit(movie, model=null, opts={}) {
   // This is a PREFERENCE, not a bias correction — distinct from the length
   // normalisation above, which fixes shows being over-scored for carrying more
   // tags. That is a measurement fix and stays unconditional; this is Nitin
-  // saying he wants fewer shows. Set FORMAT_SCORE_WEIGHT.show to 1 to remove it
-  // without touching anything else.
+  // saying he wants fewer shows, chosen in the filter bar and adjustable there
+  // ("Movies & shows equally" removes it entirely).
   // tasteOnly callers are MEASURING the model (reception calibration compares
   // this prediction against the actual rating). A stated preference must not
   // leak in there, or the calibrator reads the deliberate show penalty as the
   // model under-predicting shows and compensates for it via reception.
   const formatWeight = (opts.tasteOnly || opts.ignoreFormatWeight)
     ? 1
-    : Number(FORMAT_SCORE_WEIGHT[formatClass(movie)] ?? 1);
+    : formatScoreWeight(formatClass(movie));
   if (formatWeight !== 1) {
     const baseline = Number(activeModel?.baseline || 3);
     rawRating = baseline + (rawRating - baseline) * formatWeight;
