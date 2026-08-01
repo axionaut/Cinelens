@@ -154,10 +154,11 @@
     <button class="tb-filter-btn" id="shuffleAgainBtn" onclick="shuffleAgain()" hidden>Shuffle again</button>
      </div>
     <label>Search</label>
-    <input class="title-search-input" id="titleSearch" type="search" placeholder="search local + Wikipedia" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)">
-    <button class="tb-filter-btn" id="unifiedSearchBtn" onclick="searchWikipediaFromUnifiedInput()">search wiki</button>
+    <input class="title-search-input" id="titleSearch" type="search" placeholder="search local + TMDB + Wikipedia" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)">
+    <button class="tb-filter-btn" id="unifiedSearchBtn" onclick="searchWikipediaFromUnifiedInput()">search</button>
     <button class="tb-filter-btn tag-delete-mode" id="tagDeleteModeBtn" onclick="toggleTagDeleteMode()">Tag clicks: explore</button>
   </div>
+  <div class="wiki-search-results" id="tmdbSearchResults" hidden></div>
   <div class="wiki-search-results" id="wikiSearchResults" hidden></div>
 
   <details class="maintenance-panel" id="maintenancePanel">

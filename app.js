@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 98;
+const APP_VERSION = 99;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -548,6 +548,12 @@ const RECEPTION_BACKFILL_CONCURRENCY = 6;
 const RECEPTION_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const ENGLISH_PREFERENCE_STAR_BONUS = 0.3;
 const CROSS_FORMAT_TASTE_WEIGHT = 0.4;
+// Max tags any single title contributes to the taste fit. Levels the movie/show
+// playing field — see fitScoringTags.
+const SCORING_TAG_CAP = 14;
+// For You alternates movie/show while both have candidates, so neither format
+// can monopolise the top regardless of score.
+const REC_FORMAT_INTERLEAVE = true;
 const SHOW_STORY_MAX_CHARS = 12000;
 const TMDB_API_KEY = 'b807a738c939c5b8ef9d0c3f3b3ad662';
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
@@ -710,6 +716,7 @@ let tasteStoryInProgress = false;
 let tasteStoryRefreshPending = false;
 let poolVisibleLimit = 80;
 let wikiSearchResults = [];
+let tmdbSearchResults = [];
 let wikiSearchQuery = '';
 let localBlockedSearchResults = [];
 let similarTitleSourceId = '';
@@ -1049,6 +1056,27 @@ function tagIsPresentable(tag) {
 
 function recommendationScoringTags(movie) {
   return scoringTags(movie).filter(tagIsPresentable);
+}
+
+// v99: predictTasteFit accumulates a SUM over tags, so a title carrying more
+// tags can stack more positive contributions than one carrying fewer — its
+// ceiling is simply higher. Shows are handed ~12,000 chars of episode synopses
+// against a few thousand for a film's plot, so they routinely reach the 24-tag
+// cap while movies sit well below it, and shows crowded the top of For You.
+//
+// Per-format models and calibration already equalised the AVERAGE prediction
+// per format; they cannot equalise that ceiling. Capping the tags that feed the
+// fit puts both formats on the same footing. The most specific tags are kept,
+// since those carry the most signal — the ones dropped are the vaguest.
+//
+// Used by BOTH training and scoring: if they disagreed on a title's tag set the
+// learned effects would be fitted against features the scorer never sees.
+function fitScoringTags(movie) {
+  const tags = recommendationScoringTags(movie);
+  if (tags.length <= SCORING_TAG_CAP) return tags;
+  return [...tags]
+    .sort((a, b) => tagSpecificity(b) - tagSpecificity(a) || a.localeCompare(b))
+    .slice(0, SCORING_TAG_CAP);
 }
 
 function cleanTagArray(tags, movie=null, keepLowConfidence=false) {
@@ -4378,6 +4406,126 @@ function handleUnifiedSearchKey(event) {
   searchWikipediaFromUnifiedInput();
 }
 
+// Accepts any themoviedb.org title URL — /movie/123, /tv/456, with or without
+// a slug, language prefix or query string. Mirrors wikipediaTitleFromUrl: a
+// pasted link is an add request for that exact title, not a text search.
+function tmdbRefFromUrl(value) {
+  const raw = (value || '').trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase().replace(/^(www|m)\./, '');
+    if (host !== 'themoviedb.org') return null;
+    // Path may carry a language prefix (/en-US/movie/123-slug).
+    const match = url.pathname.match(/\/(movie|tv)\/(\d+)/);
+    if (!match) return null;
+    return {mediaType:match[1], tmdbId:Number(match[2])};
+  } catch(e) {}
+  return null;
+}
+
+// One TMDB record -> the candidate shape fetchTmdbDiscoveredMovie already
+// consumes, so a manual add hydrates through exactly the same path as a
+// discovered title and ends up with a verified id.
+function tmdbCandidateFromResult(result, mediaType) {
+  const type = mediaType === 'tv' || result?.media_type === 'tv' ? 'tv' : 'movie';
+  const title = String(result?.title || result?.name || '').trim();
+  if (!title) return null;
+  return {
+    title,
+    year:tmdbCandidateYear(result, type) || null,
+    format:type === 'tv' ? 'series' : null,
+    language:String(result?.original_language || '') === 'hi' ? 'Hindi' : 'English',
+    tmdbId:Number(result?.id) || 0,
+    tmdbMediaType:type,
+    tmdbResult:result
+  };
+}
+
+// TMDB is a title database; Wikipedia's list=search searches article TEXT and
+// routinely ranks essays mentioning a film above the film itself. Since
+// discovery is TMDB-first, searching it here also means a manual add arrives
+// with the same verified id a discovered title gets.
+async function tmdbSearchTitles(query, limit=8) {
+  if (!TMDB_API_KEY || !query) return [];
+  const params = new URLSearchParams({api_key:TMDB_API_KEY, query, include_adult:'false'});
+  const data = await tmdbApiJson(`https://api.themoviedb.org/3/search/multi?${params.toString()}`);
+  return (Array.isArray(data?.results) ? data.results : [])
+    .filter(item => item?.media_type === 'movie' || item?.media_type === 'tv')
+    .filter(item => !(item.media_type === 'tv' && (item.genre_ids || []).some(id => TMDB_EXCLUDED_TV_GENRE_IDS.includes(Number(id)))))
+    .map(item => tmdbCandidateFromResult(item, item.media_type))
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+// Hydrates a TMDB candidate into a stored record, reusing fetchUnifiedWikiResult
+// for all the already-in-library / hidden / blocked / tagging handling.
+async function addTmdbCandidate(candidate) {
+  if (!candidate?.tmdbId) return false;
+  const btn = document.getElementById('unifiedSearchBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'fetching...'; }
+  showFetchProgress('Fetching from TMDB...', 12, candidate.title);
+  try {
+    const diagnostics = {};
+    const movie = await fetchTmdbDiscoveredMovie(candidate, diagnostics);
+    if (!movie) {
+      showToast(`No usable Wikipedia article for "${candidate.title}": ${diagnostics.reason || 'not found'}`, 'error');
+      return false;
+    }
+    return await fetchUnifiedWikiResult(movie.title || candidate.title, '', {preloaded:movie});
+  } catch(e) {
+    showToast(`Could not add "${candidate.title}": ${e.message || e}`, 'error');
+    return false;
+  } finally {
+    hideFetchProgress();
+    if (btn) { btn.disabled = false; btn.textContent = 'search'; }
+  }
+}
+
+async function addTmdbSearchResult(index) {
+  const candidate = tmdbSearchResults[index];
+  if (!candidate) return false;
+  return addTmdbCandidate(candidate);
+}
+
+// A pasted TMDB link: resolve the id to a title, then hydrate as usual.
+async function addTmdbByRef(ref) {
+  const details = await tmdbApiJson(
+    `https://api.themoviedb.org/3/${ref.mediaType}/${ref.tmdbId}?api_key=${TMDB_API_KEY}`
+  );
+  if (!details) {
+    showToast('TMDB did not return that title.', 'error');
+    return false;
+  }
+  const candidate = tmdbCandidateFromResult(details, ref.mediaType);
+  if (!candidate) {
+    showToast('That TMDB link has no usable title.', 'error');
+    return false;
+  }
+  return addTmdbCandidate(candidate);
+}
+
+function renderTmdbSearchResults() {
+  const box = document.getElementById('tmdbSearchResults') || (() => {
+    const anchor = document.getElementById('wikiSearchResults');
+    if (!anchor) return null;
+    anchor.insertAdjacentHTML('beforebegin', '<div class="wiki-search-results" id="tmdbSearchResults" hidden></div>');
+    return document.getElementById('tmdbSearchResults');
+  })();
+  if (!box) return;
+  if (!tmdbSearchResults.length) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = `<span class="wiki-search-label">TMDB</span>${tmdbSearchResults.map((candidate, index) => {
+    const label = `${candidate.title}${candidate.year ? ` (${candidate.year})` : ''}${candidate.format ? ' · show' : ' · movie'}`;
+    const url = `https://www.themoviedb.org/${candidate.tmdbMediaType}/${candidate.tmdbId}`;
+    return `<span class="wiki-search-choice"><a class="wiki-search-result" href="${attrSafe(url)}" target="_blank" rel="noopener noreferrer">open ${attrSafe(label)}</a><button class="wiki-search-result" onclick="addTmdbSearchResult(${index})">add</button></span>`;
+  }).join('')}`;
+}
+
 function renderWikiSearchResults() {
   const box = document.getElementById('wikiSearchResults');
   if (!box) return;
@@ -4411,22 +4559,40 @@ async function searchWikipediaFromUnifiedInput() {
   const query = String(input?.value || '').trim();
   if (!query) {
     wikiSearchResults = [];
+    tmdbSearchResults = [];
     wikiSearchQuery = '';
     renderWikiSearchResults();
+    renderTmdbSearchResults();
     return;
   }
   const urlTitle = wikipediaTitleFromUrl(query);
+  const tmdbRef = tmdbRefFromUrl(query);
   if (btn) { btn.disabled = true; btn.textContent = 'searching...'; }
   try {
     fetchAbortRequested = false;
     wikiSearchQuery = query;
     const diagnostics = {};
     const exactTitle = urlTitle || query;
+    if (tmdbRef) {
+      // A pasted TMDB link is an add request for that exact id — the same
+      // contract a pasted Wikipedia link already had.
+      wikiSearchResults = [];
+      tmdbSearchResults = [];
+      renderWikiSearchResults();
+      renderTmdbSearchResults();
+      await addTmdbByRef(tmdbRef);
+      return;
+    }
     if (urlTitle) {
       // A pasted Wikipedia link is an add request, not merely a text search.
       await fetchUnifiedWikiResult(urlTitle, query, {directUrl:query});
       return;
     }
+    // TMDB first: it is a title index, so it finds the title itself rather
+    // than articles that merely mention it, and an add from here carries a
+    // verified tmdbId. Wikipedia search still runs below as the fallback.
+    tmdbSearchResults = await tmdbSearchTitles(exactTitle).catch(() => []);
+    renderTmdbSearchResults();
     const exactMovie = await fetchWikiTitleAcrossModes(exactTitle, ['all'], diagnostics, {ai:false});
     if (exactMovie) {
       wikiSearchResults = [{
@@ -4443,11 +4609,13 @@ async function searchWikipediaFromUnifiedInput() {
       .map(result => ({...result, wikiUrl:wikiUrlFromTitle(result.title)}))
       .slice(0, 8);
     renderWikiSearchResults();
-    if (!wikiSearchResults.length) showToast(`Wikipedia returned no matching title for "${query}".`, '');
+    // Only complain when NEITHER source found anything — a TMDB hit with no
+    // Wikipedia article is a normal, usable result.
+    if (!wikiSearchResults.length && !tmdbSearchResults.length) showToast(`No matching title found for "${query}".`, '');
   } catch(e) {
-    showToast(`Wikipedia search failed: ${e.message || e}`, 'error');
+    if (!tmdbSearchResults.length) showToast(`Search failed: ${e.message || e}`, 'error');
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'search wiki'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'search'; }
   }
 }
 
@@ -4548,7 +4716,7 @@ async function fetchUnifiedWikiResult(title, rawUrl='', opts={}) {
     return false;
   } finally {
     hideFetchProgress();
-    if (btn) { btn.disabled = false; btn.textContent = 'search wiki'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'search'; }
   }
 }
 
@@ -6817,11 +6985,13 @@ function clearUnifiedTitleSearch() {
   state.settings.titleSearch = '';
   wikiSearchQuery = '';
   wikiSearchResults = [];
+  tmdbSearchResults = [];
   localBlockedSearchResults = [];
   const input = document.getElementById('titleSearch');
   if (input) input.value = '';
   syncUnifiedSearchClearButton();
   renderWikiSearchResults();
+  renderTmdbSearchResults();
   saveViewState();
   renderActiveCards();
 }
@@ -7315,6 +7485,32 @@ function scheduleAutoExpand(delay = 2500) {
   }, delay);
 }
 
+// Ranks movies and shows separately, then alternates them. Each format keeps
+// its own score order, so nothing is reordered WITHIN a format — this only
+// stops one format monopolising the visible top. When one side runs out the
+// other simply continues, so a library that is mostly shows still fills up.
+function interleaveByFormat(scored) {
+  if (!REC_FORMAT_INTERLEAVE || scored.length < 2) return scored;
+  const movies = [];
+  const shows = [];
+  scored.forEach(item => (item.movie?.format ? shows : movies).push(item));
+  if (!movies.length || !shows.length) return scored;
+  const merged = [];
+  // Start with whichever format holds the single best match, so the top slot
+  // still belongs to the strongest recommendation rather than to a format.
+  let takeShow = (shows[0]?.matchScore || 0) > (movies[0]?.matchScore || 0);
+  let m = 0;
+  let s = 0;
+  while (m < movies.length || s < shows.length) {
+    if (takeShow && s < shows.length) merged.push(shows[s++]);
+    else if (!takeShow && m < movies.length) merged.push(movies[m++]);
+    else if (s < shows.length) merged.push(shows[s++]);
+    else merged.push(movies[m++]);
+    takeShow = !takeShow;
+  }
+  return merged;
+}
+
 function renderRecs() {
   if (activeTab === 'pool' || activeTab === 'rated' || activeTab === 'recent' || activeTab === 'tags') return;
   const grid = document.getElementById('recsGrid');
@@ -7330,7 +7526,7 @@ function renderRecs() {
     const scored = recommendationCandidates();
     const visibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10));
       const ordered = (state.settings.sortMode || 'recommended') === 'recommended'
-        ? (state.settings.sortDirection === 'asc' ? [...scored].reverse() : scored)
+        ? interleaveByFormat(state.settings.sortDirection === 'asc' ? [...scored].reverse() : scored)
         : (() => {
             const scoredById = new Map(scored.map(item => [String(item.movie.id), item]));
             return sortMovies(scored.map(item => item.movie), 'title-asc')
@@ -8063,7 +8259,7 @@ function ratingEvidenceRows(excludeMovieId='') {
       movie,
       rating:Number(movie.rating),
       formatClass:formatClass(movie),
-      tags:recommendationScoringTags(movie),
+      tags:fitScoringTags(movie),
       genres:movieGenres(movie)
     }));
 }
@@ -8304,7 +8500,7 @@ function scheduleReceptionCalibrationUpdate() {
 
 function predictTasteFit(movie, model=null, opts={}) {
   const activeModel = model || getTasteModel('', formatClass(movie));
-  const tags = recommendationScoringTags(movie);
+  const tags = fitScoringTags(movie);
   const genres = movieGenres(movie);
   let rawRating = Number(activeModel?.baseline || 3);
   let posOverlap = 0;
