@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 93;
+const APP_VERSION = 94;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -501,6 +501,37 @@ const COLLECTION_FETCH_CONCURRENCY = 12;
 // How many candidates to pull from discovery per window. Large enough that the
 // worker pool never starves waiting on the next discovery round-trip.
 const COLLECTION_DISCOVERY_WINDOW = 60;
+// ─────────────────────────────────────────────
+// v94 — SOURCE TEXT SHEDDING
+//
+// The library must be able to grow large without becoming heavy. TMDB exposes
+// ~1.6M titles, so a cap on the NUMBER of titles is the wrong lever: a title
+// evicted today may be an excellent match after the next tagger change, which
+// is exactly why the old rolling-pool eviction was removed. Nothing here ever
+// deletes a title.
+//
+// What it deletes is text that has already done its job. storyText and
+// tmdbReviewText exist solely to feed the tagger. Once a title holds a
+// verified tag set they are dead weight — and they are by far the heaviest
+// fields on a record (12,000 and 8,000 chars respectively, against ~1KB for
+// everything a card actually renders).
+//
+// Shedding is deferred until the stored text is genuinely large, so a small
+// library keeps its text and retags for free. Above the threshold the weakest,
+// oldest, least-recommendable records shed first; anything the user has
+// touched never sheds at all.
+//
+// Recovery is already built in: enrichLegacyTitleForAi re-fetches the article
+// whenever storyText is missing, so a prompt-version bump still retags
+// correctly — it just costs one Wikipedia request per title first.
+const SOURCE_SHED_MIN_TITLES = 4000;
+const SOURCE_SHED_START_BYTES = 40 * 1024 * 1024;
+const SOURCE_SHED_TARGET_BYTES = 24 * 1024 * 1024;
+const SOURCE_SHED_BATCH = 300;
+// Evidence justifies a tag; it is not a document. The tagger caps each quote
+// at 500 chars, which across 24 tags is larger than the card it supports.
+const AI_TAG_EVIDENCE_MAX_CHARS = 200;
+
 const RECEPTION_VERSION = 1;
 const RECEPTION_MAX_DOWN = 1.25;
 const RECEPTION_MAX_UP = 0.5;
@@ -645,6 +676,8 @@ let autoFetchPaused = false;
 let autoExpandTimer = null;
 let receptionBackfillTimer = null;
 let receptionBackfillInProgress = false;
+let sourceShedTimer = null;
+let sourceShedInProgress = false;
 let receptionCalibrationTimer = null;
 let backgroundAiTaggingInProgress = false;
 let backgroundAiTimer = null;
@@ -1219,13 +1252,17 @@ function aiTagSourceText(movie) {
 }
 
 function hasCurrentAiTags(movie) {
-  return !!(
-    movie?.aiTagging?.status === 'verified' &&
-    movie.aiTagging.promptVersion === AI_TAG_PROMPT_VERSION &&
-    movie.aiTagging.storyHash === aiStoryHash(aiTagSourceText(movie)) &&
-    Array.isArray(movie.tags) &&
-    movie.tags.length > 0
-  );
+  if (!movie?.aiTagging || movie.aiTagging.status !== 'verified') return false;
+  if (movie.aiTagging.promptVersion !== AI_TAG_PROMPT_VERSION) return false;
+  if (!Array.isArray(movie.tags) || !movie.tags.length) return false;
+  // A shed record no longer holds the text the hash was taken over, so the
+  // hash cannot be recomputed. The stored storyHash is retained as provenance,
+  // and the prompt-version check above still forces a proper retag when the
+  // tagger changes — at which point the text is re-fetched from Wikipedia
+  // first (see enrichLegacyTitleForAi). Without this branch every shed title
+  // would read as stale and the whole library would queue for retagging.
+  if (movie.sourceShed) return true;
+  return movie.aiTagging.storyHash === aiStoryHash(aiTagSourceText(movie));
 }
 
 function clearGeneratedTags(movie) {
@@ -2287,6 +2324,9 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
     scheduleTagCloudNormalization(1800);
     scheduleReceptionBackfill(4500);
     scheduleTmdbBackfill(4500);
+    // Only acts once the stored source text is genuinely large; a no-op below
+    // the threshold, so a small library keeps its text and retags for free.
+    scheduleSourceShed(12000);
   }
 
   render();
@@ -2575,7 +2615,14 @@ function normaliseStoredTitleRecord(movie) {
   if (correctedFormat.strong) movie.format = correctedFormat.format;
 
   const isWikiRecord = movie.source === 'wikipedia' || !!movie.storyText || !!movie.wikiPageId || !!movie.wikiUrl;
-  if (isWikiRecord && movie.storyText) {
+  // Self-heal: holding text and the shed flag at once is contradictory (a
+  // refresh landed after a shed), and the text is the truth.
+  if (movie.storyText && movie.sourceShed) clearSourceShedFlag(movie);
+  // A shed record is a COMPLETE wiki record that deliberately dropped its
+  // source text — not an incomplete one. Without this it would fall to the
+  // branch below and be stamped needsManualUrl / 'needs Wikipedia refresh' on
+  // every load, presenting a fully tagged title as broken.
+  if (isWikiRecord && (movie.storyText || movie.sourceShed)) {
     movie.source = 'wikipedia';
     movie.wikiVerified = true;
     movie.tags = cleanTagArray(movie.tags || movie.coreTags || movie.plotTags || movie.descriptorTags || [], movie, false);
@@ -4988,6 +5035,146 @@ async function runReceptionBackfill() {
   }
 }
 
+// ─────────────────────────────────────────────
+// SOURCE TEXT SHEDDING (see the constants block for the rationale)
+// ─────────────────────────────────────────────
+
+// Cheap: reads string .length only, never serialises. Still O(titles), so it
+// runs on the shed scheduler rather than on render.
+function estimateSourceTextBytes() {
+  let bytes = 0;
+  for (const movie of Object.values(state.movies || {})) {
+    bytes += (movie?.storyText || '').length + (movie?.tmdbReviewText || '').length;
+  }
+  return bytes;
+}
+
+// Anything the user has expressed an interest in keeps its full source, so a
+// retag of a title that actually matters never needs a network round trip.
+function sourceTextShedProtected(movie) {
+  return !!(
+    Number(movie?.rating || 0) > 0 ||
+    movie?.manualAdded ||
+    movie?.watchlist ||
+    movie?.hidden
+  );
+}
+
+function sourceTextShedEligible(movie) {
+  if (!movie || movie.sourceShed) return false;
+  if (!(movie.storyText || movie.tmdbReviewText)) return false;
+  if (sourceTextShedProtected(movie)) return false;
+  // Only a title whose tags are complete and current — an untagged or
+  // mid-retry title still needs its text.
+  return hasCurrentAiTags(movie);
+}
+
+// Trims stored evidence in place. Kept separate from shedding because it is
+// safe to apply to every record, including protected ones.
+function trimStoredTagEvidence(movie) {
+  const evidence = movie?.aiTagEvidence;
+  if (!evidence) return false;
+  let changed = false;
+  for (const key of Object.keys(evidence)) {
+    const entry = evidence[key];
+    const text = String(entry?.evidence || '');
+    if (text.length <= AI_TAG_EVIDENCE_MAX_CHARS) continue;
+    evidence[key] = {...entry, evidence:text.slice(0, AI_TAG_EVIDENCE_MAX_CHARS)};
+    changed = true;
+  }
+  return changed;
+}
+
+function shedSourceTextForMovie(movie) {
+  if (!sourceTextShedEligible(movie)) return false;
+  delete movie.storyText;
+  delete movie.tmdbReviewText;
+  trimStoredTagEvidence(movie);
+  // Marks the absence as deliberate. hasCurrentAiTags and tagEvidenceOk both
+  // key off this: without it a shed record looks like a broken one.
+  movie.sourceShed = true;
+  movie.sourceShedAt = nowStamp();
+  touchRecord(movie);
+  return true;
+}
+
+// Undo, used whenever the text comes back from Wikipedia.
+function clearSourceShedFlag(movie) {
+  if (!movie?.sourceShed) return;
+  delete movie.sourceShed;
+  delete movie.sourceShedAt;
+}
+
+function sourceShedCandidates() {
+  const rank = new Map(scoreMovies().map((item, index) => [String(item.movie.id), index]));
+  return Object.values(state.movies || {})
+    .filter(sourceTextShedEligible)
+    // Weakest first: titles with no recommendation standing, then the lowest
+    // ranked, then the oldest. The strongest candidates keep their text
+    // longest, because they are the ones most likely to be retagged or
+    // inspected.
+    .sort((a, b) => {
+      const aRank = rank.has(String(a.id)) ? rank.get(String(a.id)) : Number.MAX_SAFE_INTEGER;
+      const bRank = rank.has(String(b.id)) ? rank.get(String(b.id)) : Number.MAX_SAFE_INTEGER;
+      return bRank - aRank || movieAddedTime(a) - movieAddedTime(b);
+    });
+}
+
+function sourceShedDue() {
+  if (libraryRecordCount() < SOURCE_SHED_MIN_TITLES) return false;
+  return estimateSourceTextBytes() > SOURCE_SHED_START_BYTES;
+}
+
+function scheduleSourceShed(delay=8000) {
+  if (!libraryWritesUnlocked || sourceShedInProgress || sourceShedTimer) return;
+  const run = () => {
+    sourceShedTimer = null;
+    runSourceShed();
+  };
+  if ('requestIdleCallback' in window) {
+    sourceShedTimer = setTimeout(() => requestIdleCallback(run, {timeout:2000}), delay);
+  } else {
+    sourceShedTimer = setTimeout(run, delay);
+  }
+}
+
+async function runSourceShed() {
+  if (sourceShedInProgress || !libraryWritesUnlocked) return;
+  if (!sourceShedDue()) return;
+
+  sourceShedInProgress = true;
+  const changedMovieIds = [];
+  try {
+    let bytes = estimateSourceTextBytes();
+    const startBytes = bytes;
+    const candidates = sourceShedCandidates();
+    for (const movie of candidates) {
+      if (bytes <= SOURCE_SHED_TARGET_BYTES || changedMovieIds.length >= SOURCE_SHED_BATCH) break;
+      const freed = (movie.storyText || '').length + (movie.tmdbReviewText || '').length;
+      if (!shedSourceTextForMovie(movie)) continue;
+      bytes -= freed;
+      changedMovieIds.push(String(movie.id));
+    }
+    if (changedMovieIds.length) {
+      showBackgroundPipelineProgress('Compacting', `${changedMovieIds.length} titles · ${((startBytes - bytes) / 1048576).toFixed(1)}MB reclaimed`);
+      saveLocalState({preserveUpdatedAt:true, changedMovieIds, silentUi:true});
+      queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
+      console.info('CineLens shed source text', {
+        titles:changedMovieIds.length,
+        reclaimedMB:Number(((startBytes - bytes) / 1048576).toFixed(1)),
+        remainingMB:Number((bytes / 1048576).toFixed(1))
+      });
+    }
+  } catch(error) {
+    console.warn('Source shed paused', error);
+  } finally {
+    sourceShedInProgress = false;
+    settleBackgroundPipelineProgress(0);
+    // Re-enter until under target; sourceShedDue() stops the loop.
+    if (changedMovieIds.length && sourceShedDue()) scheduleSourceShed(6000);
+  }
+}
+
 // Dedicated, faster poster/watch-provider backfill for the existing library.
 // Deliberately independent of the reception backfill above: it needs only a
 // lightweight TMDB lookup against already-stored title/year/format, never a
@@ -5830,6 +6017,13 @@ function ensureMinimumPlotTags(coreTags, text, meta={}) {
 
 function tagEvidenceOk(tag, movie) {
   if (!movie || movie.source !== 'wikipedia') return true;
+  // v94: a record whose source text was deliberately shed must never be
+  // re-validated against text it no longer holds. normaliseStoredTitleRecord
+  // runs cleanTagArray -> tagEvidenceOk on EVERY load, so without this a shed
+  // title would have grounded tags like betrayal or revenge-driven silently
+  // deleted on the next reload — the tag was proven when the story was present,
+  // and absence of the text is not evidence against it.
+  if (movie.sourceShed) return true;
   const normalised = normaliseTagName(tag);
   const t = `${movie.storyText || ''} ${movie.leadText || ''}`.toLowerCase();
   if (!t.trim()) return !['time-manipulation','sports-drama','war-drama'].includes(tag);
@@ -5927,6 +6121,7 @@ function backgroundPipelineStages(extra='') {
   if (receptionBackfillInProgress) stages.push('Wikipedia');
   if (tmdbBackfillInProgress) stages.push('TMDB');
   if (backgroundAiTaggingInProgress) stages.push('Gemini');
+  if (sourceShedInProgress) stages.push('Compacting');
   if (extra && !stages.includes(extra)) stages.push(extra);
   return stages;
 }
@@ -6000,6 +6195,9 @@ async function enrichLegacyTitleForAi(movie) {
   try {
     const fresh = await refreshTitleFromWikipedia(movie, {ai:false, tmdb:false});
     if (!fresh) throw new Error('Wikipedia title could not be resolved');
+    // The text is back, so the record is a normal one again — this is the
+    // recovery path that makes shedding safe for a prompt-version retag.
+    clearSourceShedFlag(movie);
     return applyFreshWikiMovie(movie.id, fresh, movie);
   } catch(e) {
     movie.needsManualUrl = false;
@@ -6372,13 +6570,17 @@ function updateRatingFilter(rating) {
   renderActiveCards();
 }
 
+// v94: a genre chip on a card now behaves exactly like a tag chip — it filters
+// AND opens the panel, so a genre can be rated (Like / Avoid / Neutral) from
+// the same place a tag can. Previously it only filtered, which left the genre
+// preference controls reachable solely through the tag cloud.
 function filterByGenreFromCard(genre, event) {
   if (event) event.stopPropagation();
   state.settings.genreFilters = [genre];
   state.settings.genreFilter = genre;
   saveViewState();
-  renderActiveCards();
   updateControlDeck();
+  openTagFromCard(genreTagKey(genre));
 }
 
 function updateSortMode(mode) {
