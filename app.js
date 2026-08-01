@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 90;
+const APP_VERSION = 91;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -38,19 +38,38 @@ const AI_TAG_MIN_COUNT = 10;
 const AI_TAG_BESTEFFORT_MIN = 6;
 const AI_TAG_MAX_COUNT = 24;
 const AI_TAG_MIGRATION_VERSION = 1;
-const AI_TAG_BATCH_SIZE = 3;
-const AI_BACKGROUND_BATCH_SIZE = 8;
-const AI_BACKGROUND_REQUEST_DELAY_MS = 20000;
-const AI_MANUAL_TAG_BATCH_SIZE = 10;
-const AI_MANUAL_RESOLVE_CONCURRENCY = 30;
-const AI_MANUAL_REQUEST_DELAY_MS = 6000;
+// v91 pipeline rebuild — batch sizes are now the server's real ceiling
+// (Apps Script MAX_ITEMS = 20), not a hand-tuned throttle. Pacing is owned
+// entirely by the adaptive limiters below, so every *_REQUEST_DELAY_MS is 0:
+// a fixed inter-request sleep is strictly worse than a token bucket, because
+// it idles the connection whenever the previous call was slow and it cannot
+// react when the upstream actually pushes back.
+const AI_TAG_BATCH_SIZE = 20;
+const AI_BACKGROUND_BATCH_SIZE = 20;
+const AI_BACKGROUND_REQUEST_DELAY_MS = 0;
+const AI_MANUAL_TAG_BATCH_SIZE = 20;
+// Wikipedia resolution window per wave. Wider than the Gemini batch so several
+// full batches are ready to dispatch concurrently; wikiLimiter caps the actual
+// in-flight request count.
+const AI_MANUAL_RESOLVE_CONCURRENCY = 100;
+const AI_MANUAL_REQUEST_DELAY_MS = 0;
 const AI_MANUAL_RETRY_LIMIT = 1;
+// Kept at 3: retries only fire for titles that fell short of the 10-tag floor,
+// and they now run inside the parallel lane, so the wall-time cost that made a
+// lower limit tempting no longer exists. Lowering it would trade tag quality
+// for a speedup we already got elsewhere.
 const AI_TAG_RETRY_LIMIT = 3;
+// How many Gemini batches may be in flight at once. Each batch is 20 titles,
+// so 4 in flight = 80 titles being tagged concurrently vs 3 before.
+const AI_TAG_LANE_CONCURRENCY = 4;
+const AI_TAG_LANE_RPM = 45;
 const AI_VOCABULARY_SAMPLE_SIZE = 240;
 const AI_TAG_CLOUD_NORMALIZE_EVERY = 100;
 const AI_TAG_CLOUD_NORMALIZE_VERSION = 'cinelens-tag-cloud-v2';
-const AI_REQUEST_DELAY_MS = 12000;
-const AI_TAGGER_TIMEOUT_MS = 45 * 1000;
+const AI_REQUEST_DELAY_MS = 0;
+// A 20-item batch is a bigger prompt than the old 3-item one, so Gemini needs
+// longer to produce it. The limiter keeps other batches moving meanwhile.
+const AI_TAGGER_TIMEOUT_MS = 120 * 1000;
 // Every network call must be able to fail. A mobile browser routinely
 // suspends an in-flight fetch when the app is backgrounded or the phone
 // locks, and the promise then never settles — whichever background loop
@@ -58,6 +77,162 @@ const AI_TAGGER_TIMEOUT_MS = 45 * 1000;
 // other loop that yields to it (one hung TMDB fetch froze the entire
 // pipeline at "TMDB refresh running"). v36 fixed this for the AI tagger
 // only; these give the remaining paths the same discipline.
+// ─────────────────────────────────────────────
+// v91 — ADAPTIVE REQUEST LIMITERS
+//
+// Before v91 every upstream was paced by the same pattern: a module-level
+// `lastXRequestAt` stamp plus `await sleep(DELAY - elapsed)`, and for Gemini a
+// promise chain (`reserveAiRequest`) that serialised *every* call process-wide.
+// Three problems, all of which capped the database build:
+//
+//   1. A fixed inter-request delay is a throughput ceiling that ignores latency.
+//      Wikipedia at 850ms spacing is 70 req/min no matter how many are in
+//      flight; Gemini at 12s spacing is 5 calls/min. Neither number came from
+//      an upstream limit — they were guesses, and they were the binding
+//      constraint on the whole app.
+//   2. The delay was enforced *serially*, so a slow response did not overlap
+//      with the next request's wait. Wall time was sum(latency) + sum(delay)
+//      rather than max of the two.
+//   3. Nothing reacted to actual pushback. A 429 was handled by a fixed
+//      multi-minute global cooldown, and success never earned any headroom
+//      back.
+//
+// This replaces all of it with the standard shape used by production API
+// clients: a token bucket for the average rate, a bounded worker pool for
+// concurrency, and AIMD (additive-increase / multiplicative-decrease) so the
+// pool converges on whatever the upstream will actually accept — automatically
+// correct on both a free and a paid Gemini tier, on a fast desktop connection
+// and on a throttled mobile one, with no constant to retune.
+//
+// Each upstream gets its own limiter, so Gemini being slow can no longer stop
+// Wikipedia, and vice versa. That independence is most of the speedup.
+// ─────────────────────────────────────────────
+class AdaptiveLimiter {
+  constructor({name, rpm, concurrency, maxConcurrency, minConcurrency = 1, burst = 0}) {
+    this.name = name;
+    this.ratePerMs = Math.max(0, Number(rpm) || 0) / 60000;
+    this.burst = Math.max(1, burst || Math.ceil((Number(rpm) || 60) / 12));
+    this.tokens = this.burst;
+    this.lastRefill = Date.now();
+    this.limit = Math.max(1, concurrency);
+    this.min = Math.max(1, minConcurrency);
+    this.max = Math.max(this.limit, maxConcurrency || concurrency);
+    this.active = 0;
+    this.waiters = [];
+    this.wins = 0;
+    this.cooldownUntil = 0;
+    this.stats = {ok: 0, throttled: 0, failed: 0};
+  }
+
+  refill(now = Date.now()) {
+    const elapsed = Math.max(0, now - this.lastRefill);
+    if (!elapsed) return;
+    this.lastRefill = now;
+    this.tokens = Math.min(this.burst, this.tokens + elapsed * this.ratePerMs);
+  }
+
+  // ms until this limiter could admit one more request, or 0 if it can now.
+  delayUntilReady(now = Date.now()) {
+    if (this.active >= this.limit) return Infinity;
+    if (now < this.cooldownUntil) return this.cooldownUntil - now;
+    this.refill(now);
+    if (this.tokens >= 1) return 0;
+    return this.ratePerMs > 0 ? Math.ceil((1 - this.tokens) / this.ratePerMs) : Infinity;
+  }
+
+  async acquire() {
+    for (;;) {
+      if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
+      const wait = this.delayUntilReady();
+      if (wait === 0) {
+        this.tokens -= 1;
+        this.active++;
+        return;
+      }
+      if (wait === Infinity) {
+        // Concurrency-bound: park until a slot frees, rather than polling.
+        await new Promise(resolve => this.waiters.push(resolve));
+      } else {
+        await abortableSleep(Math.min(wait, 1000));
+      }
+    }
+  }
+
+  release() {
+    this.active = Math.max(0, this.active - 1);
+    const next = this.waiters.shift();
+    if (next) next();
+  }
+
+  // Additive increase: a run of clean responses earns one more slot.
+  recordSuccess() {
+    this.stats.ok++;
+    if (this.limit >= this.max) return;
+    if (++this.wins >= this.limit * 4) {
+      this.wins = 0;
+      this.limit++;
+    }
+  }
+
+  // Multiplicative decrease: real pushback halves the pool immediately and
+  // pauses the lane briefly, which is what keeps this polite under load.
+  recordThrottle(retryAfterMs = 0) {
+    this.stats.throttled++;
+    this.wins = 0;
+    this.limit = Math.max(this.min, Math.floor(this.limit / 2));
+    const pause = Math.max(2000, Number(retryAfterMs) || 0);
+    this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + pause);
+    // Drain the bucket too, so the burst allowance can't undo the backoff.
+    this.tokens = 0;
+    for (const waiter of this.waiters.splice(0)) waiter();
+  }
+
+  recordFailure() { this.stats.failed++; this.wins = 0; }
+
+  async run(fn) {
+    await this.acquire();
+    try {
+      const value = await fn();
+      this.recordSuccess();
+      return value;
+    } catch (error) {
+      if (isExternalRateLimitError(error)) this.recordThrottle(error?.retryAfterMs);
+      else this.recordFailure();
+      throw error;
+    } finally {
+      this.release();
+    }
+  }
+
+  snapshot() {
+    return {name: this.name, limit: this.limit, active: this.active, ...this.stats};
+  }
+}
+
+// Starting points, not ceilings — AIMD moves each of these to wherever the
+// upstream actually pushes back, in both directions.
+//
+// Wikipedia publishes no hard anonymous API limit and asks for serial-ish,
+// well-identified traffic; 10 req/s across 8 connections is well inside what
+// the action API serves and roughly 9x the old 850ms gate.
+const wikiLimiter = new AdaptiveLimiter({name: 'wikipedia', rpm: 600, concurrency: 8, maxConcurrency: 16});
+// TMDB removed its published rate limit and tolerates ~50 req/s; 20/s is a
+// deliberately conservative fraction of that.
+const tmdbLimiter = new AdaptiveLimiter({name: 'tmdb', rpm: 1200, concurrency: 12, maxConcurrency: 24});
+// Gemini through Apps Script. Each call carries 20 titles, so even this modest
+// rate is ~900 titles/min of tagging headroom versus 15/min before.
+const aiLimiter = new AdaptiveLimiter({
+  name: 'gemini',
+  rpm: AI_TAG_LANE_RPM,
+  concurrency: AI_TAG_LANE_CONCURRENCY,
+  maxConcurrency: 8,
+  burst: AI_TAG_LANE_CONCURRENCY
+});
+
+function pipelineLimiterSnapshot() {
+  return [wikiLimiter, tmdbLimiter, aiLimiter].map(limiter => limiter.snapshot());
+}
+
 const TMDB_FETCH_TIMEOUT_MS = 15 * 1000;
 const TMDB_TITLE_REFRESH_TIMEOUT_MS = 25 * 1000;
 const WIKI_FETCH_TIMEOUT_MS = 30 * 1000;
@@ -254,9 +429,8 @@ let tagDetailVisibleLimit = 40;
 let poolExpansionInProgress = false;
 let fetchAbortRequested = false;
 let lastAutoExpandAt = 0;
-let lastWikiRequestAt = 0;
-const WIKI_REQUEST_DELAY_MS = 850;
-const WIKI_BATCH_PAUSE_MS = 2500;
+// v91: the fixed Wikipedia stopwatch/pause pair (850ms between requests, a
+// 2.5s pause every 20) is gone — wikiLimiter meters this lane now.
 const BACKGROUND_SYNC_DEBOUNCE_MS = 30 * 1000;
 let backgroundChangesSinceRender = 0;
 const WIKI_PARSER_VERSION = 7;
@@ -312,13 +486,21 @@ function checkpointBackgroundUi(changedCount=0, force=false) {
 }
 const INITIAL_TAGGED_POOL_FLOOR = 80;
 const AI_BACKGROUND_RETRY_MS = 2 * 60 * 1000;
-const FETCH_AUTO_ATTEMPT_BUDGET = 55;
-const FETCH_MANUAL_ATTEMPT_BUDGET = 100;
-const FETCH_MAX_ADDED_PER_RUN = 35;
-// Wikipedia candidate fetches during collection run this many at a time
-// (network only — state updates stay serial). 3 keeps the load on
-// Wikipedia's API polite while roughly tripling collection throughput.
-const COLLECTION_FETCH_CONCURRENCY = 3;
+// v91: the old budgets were sized for a pipeline that managed roughly one
+// title every few seconds, so a run ended almost as soon as it started and the
+// library grew in 35-title increments. With the fetch pool and the decoupled
+// tag lane a run sustains far more, and there is no longer any reason to stop
+// early — the limiters, not the budget, are what keep this polite.
+const FETCH_AUTO_ATTEMPT_BUDGET = 600;
+const FETCH_MANUAL_ATTEMPT_BUDGET = 1200;
+const FETCH_MAX_ADDED_PER_RUN = 400;
+// Concurrent candidate hydrations. Each one is a Wikipedia article fetch plus
+// its TMDB lookups, and both of those are independently rate-limited, so this
+// is a worker count rather than a request rate.
+const COLLECTION_FETCH_CONCURRENCY = 12;
+// How many candidates to pull from discovery per window. Large enough that the
+// worker pool never starves waiting on the next discovery round-trip.
+const COLLECTION_DISCOVERY_WINDOW = 60;
 const RECEPTION_VERSION = 1;
 const RECEPTION_MAX_DOWN = 1.25;
 const RECEPTION_MAX_UP = 0.5;
@@ -328,14 +510,17 @@ const RECEPTION_COEFFICIENT_MIN = 0.25;
 const RECEPTION_COEFFICIENT_MAX = 1.1;
 const RECEPTION_LANE_MIN_SAMPLE = 25;
 const RECEPTION_GLOBAL_MIN_SAMPLE = 15;
-const RECEPTION_BACKFILL_BATCH_SIZE = 3;
+// v91: was 3 titles, fetched strictly one after another. The lane is metered
+// by wikiLimiter now, so the batch can be large and genuinely concurrent.
+const RECEPTION_BACKFILL_BATCH_SIZE = 40;
+const RECEPTION_BACKFILL_CONCURRENCY = 6;
 const RECEPTION_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const ENGLISH_PREFERENCE_STAR_BONUS = 0.3;
 const CROSS_FORMAT_TASTE_WEIGHT = 0.4;
 const SHOW_STORY_MAX_CHARS = 12000;
 const TMDB_API_KEY = 'b807a738c939c5b8ef9d0c3f3b3ad662';
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
-const TMDB_REQUEST_DELAY_MS = 300;
+// v91: superseded by tmdbLimiter (was a fixed 300ms between every request).
 const TMDB_SEARCH_REGION = 'IN';
 // v90: TMDB /discover drives year-wise title discovery. Each page returns ~20
 // titles pre-validated for year, original language and media type, so almost
@@ -345,7 +530,10 @@ const TMDB_SEARCH_REGION = 'IN';
 const TMDB_DISCOVER_VOTE_FLOOR = 12;   // enough notability to warrant a Wikipedia page + real reviews
 const TMDB_DISCOVER_PAGE_CAP = 5;      // up to ~100 titles per year per lane before walking to the prior year
 const TMDB_DISCOVERY_CURSOR_VERSION = 1;
-const TMDB_BACKFILL_BATCH_SIZE = 10;
+// v91: was 10 titles fetched one at a time. TMDB is the cheapest upstream here
+// and tolerates far more than this; tmdbLimiter meters it.
+const TMDB_BACKFILL_BATCH_SIZE = 80;
+const TMDB_BACKFILL_CONCURRENCY = 10;
 const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // v18: replaces the fixed-India where-to-watch display. Instead of one
 // hardcoded region, CineLens shows which countries carry the title on
@@ -426,7 +614,6 @@ const COUNTRY_NAMES = {
 function countryName(code) {
   return COUNTRY_NAMES[String(code || '').toUpperCase()] || String(code || '');
 }
-let lastTmdbRequestAt = 0;
 let tmdbBackfillTimer = null;
 let tmdbBackfillInProgress = false;
 const DISCOVERY_LEDGER_CAP = 2000;
@@ -445,9 +632,15 @@ let recentVisibleLimit = 40;
 let currentWikiAbortController = null;
 let currentAiTagAbortController = null;
 let currentTmdbAbortController = null;
+// v91: several requests per upstream are now in flight at once, so Stop has to
+// abort a set rather than a single "current" controller. The singletons above
+// are kept because other call sites still reference them.
+const activeWikiAbortControllers = new Set();
+const activeTmdbAbortControllers = new Set();
+const activeAiAbortControllers = new Set();
 let currentSleepCancel = null;
-let lastAiRequestAt = 0;
-let aiRequestReservation = Promise.resolve();
+// v91: the global Gemini serialisation chain (aiRequestReservation) is gone —
+// aiLimiter admits AI_TAG_LANE_CONCURRENCY batches at once instead of one.
 let autoFetchPaused = false;
 let autoExpandTimer = null;
 let receptionBackfillTimer = null;
@@ -1707,10 +1900,17 @@ function purgeAiSensitiveContentExclusions() {
 }
 
 async function postAiTaggerBatch(items, partials, opts={}) {
-  const requestDelay = Math.max(0, Number(opts.requestDelayMs ?? AI_REQUEST_DELAY_MS));
-  await reserveAiRequest(requestDelay);
+  await reserveAiRequest();
+  // v91: admission control lives in aiLimiter, so up to
+  // AI_TAG_LANE_CONCURRENCY of these batches are genuinely in flight at once
+  // and a 429 halves the lane instead of stopping the app.
+  return aiLimiter.run(() => postAiTaggerBatchRequest(items, partials, opts));
+}
+
+async function postAiTaggerBatchRequest(items, partials, opts={}) {
   const controller = new AbortController();
   currentAiTagAbortController = controller;
+  activeAiAbortControllers.add(controller);
   let timedOut = false;
   const timeout = setTimeout(() => {
     timedOut = true;
@@ -1761,12 +1961,14 @@ async function postAiTaggerBatch(items, partials, opts={}) {
     throw error;
   } finally {
     clearTimeout(timeout);
+    activeAiAbortControllers.delete(controller);
     if (currentAiTagAbortController === controller) currentAiTagAbortController = null;
   }
   if (!response.ok) {
     const error=new Error(`AI tagger HTTP ${response.status}`);
-    if (response.status === 429) {
+    if (response.status === 429 || response.status === 503) {
       error.cinelensRateLimited=true;
+      error.retryAfterMs=Number(response.headers.get('retry-after') || 0) * 1000;
       registerAiRateLimit();
     }
     throw error;
@@ -1774,10 +1976,35 @@ async function postAiTaggerBatch(items, partials, opts={}) {
   return response.json();
 }
 
+// v91: collection and the background queue now tag concurrently, so a title
+// could otherwise be picked up by both. Ids are claimed for the duration of a
+// request and released in the finally below; every producer also filters
+// against this set so it does not queue work that is already running.
+const aiTaggingInFlightIds = new Set();
+
+function aiTagInFlight(movie) {
+  return aiTaggingInFlightIds.has(String(movie?.id));
+}
+
 async function requestAiTags(movies, opts={}) {
   const batchSize = Math.max(1, Number(opts.batchSize || AI_TAG_BATCH_SIZE));
-  const items = (movies || []).filter(movie => movie?.storyText).slice(0, batchSize);
+  // A retry/continuation re-enters with items it already owns, so only the
+  // outermost call claims — nested calls pass through.
+  const nested = Number(opts.retry || 0) > 0 || opts.claimed === true;
+  const items = (movies || [])
+    .filter(movie => movie?.storyText && (nested || !aiTagInFlight(movie)))
+    .slice(0, batchSize);
   if (!items.length) return {tagged:0, failed:0};
+  const claimedIds = nested ? [] : items.map(movie => String(movie.id));
+  claimedIds.forEach(id => aiTaggingInFlightIds.add(id));
+  try {
+    return await requestAiTagsInner(items, {...opts, claimed:true});
+  } finally {
+    claimedIds.forEach(id => aiTaggingInFlightIds.delete(id));
+  }
+}
+
+async function requestAiTagsInner(items, opts={}) {
   const savedPartials = Object.fromEntries(items
     .filter(movie => movie.aiTagPartial?.tags?.length)
     .map(movie => [String(movie.id), movie.aiTagPartial]));
@@ -2677,25 +2904,35 @@ function isShowListPage(title) {
 
 async function wikiApiJson(url) {
   if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
-  const wait = Math.max(0, WIKI_REQUEST_DELAY_MS - (Date.now() - lastWikiRequestAt));
-  if (wait) await abortableSleep(wait);
-  if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
-  lastWikiRequestAt = Date.now();
-  const controller = new AbortController();
-  currentWikiAbortController = controller;
-  // The controller predates fetchWithTimeout (stopFetching aborts it
-  // manually), but a suspended mobile fetch needs the timer too — without
-  // it a backgrounded request hangs the reception/collection loop that
-  // awaited it until the user happens to tap Pause.
-  const timer = setTimeout(() => controller.abort(), WIKI_FETCH_TIMEOUT_MS);
-  try {
-    const resp = await fetch(url, { signal: controller.signal });
-    if (!resp.ok) throw new Error('Wikipedia request failed: ' + resp.status);
-    return await resp.json();
-  } finally {
-    clearTimeout(timer);
-    if (currentWikiAbortController === controller) currentWikiAbortController = null;
-  }
+  // v91: pacing moved into wikiLimiter. Calls now overlap instead of queueing
+  // behind a shared 850ms stopwatch, and a 429 narrows the lane automatically.
+  return wikiLimiter.run(async () => {
+    if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
+    const controller = new AbortController();
+    // Still tracked so stopFetching can abort in-flight work; with a real
+    // worker pool there are several at once, so this is a set.
+    currentWikiAbortController = controller;
+    activeWikiAbortControllers.add(controller);
+    // A suspended mobile fetch needs the timer too — without it a backgrounded
+    // request hangs whichever worker awaited it until the user taps Pause.
+    const timer = setTimeout(() => controller.abort(), WIKI_FETCH_TIMEOUT_MS);
+    try {
+      const resp = await fetch(url, { signal: controller.signal });
+      if (!resp.ok) {
+        const error = new Error('Wikipedia request failed: ' + resp.status);
+        if (resp.status === 429 || resp.status === 503) {
+          error.cinelensRateLimited = true;
+          error.retryAfterMs = Number(resp.headers.get('retry-after') || 0) * 1000;
+        }
+        throw error;
+      }
+      return await resp.json();
+    } finally {
+      clearTimeout(timer);
+      activeWikiAbortControllers.delete(controller);
+      if (currentWikiAbortController === controller) currentWikiAbortController = null;
+    }
+  });
 }
 
 function hiddenTitleMatches(value) {
@@ -2867,6 +3104,12 @@ function stopFetching(opts={}) {
   if (backgroundAiTimer) {
     clearTimeout(backgroundAiTimer);
     backgroundAiTimer = null;
+  }
+  // Abort every in-flight request across all lanes, not just the most recent
+  // one per upstream — with a worker pool there are many.
+  for (const set of [activeWikiAbortControllers, activeTmdbAbortControllers, activeAiAbortControllers]) {
+    for (const controller of [...set]) { try { controller.abort(); } catch(_) {} }
+    set.clear();
   }
   if (currentWikiAbortController) currentWikiAbortController.abort();
   if (currentAiTagAbortController) currentAiTagAbortController.abort();
@@ -3426,12 +3669,14 @@ async function nextDiscoveryCandidates(mode, limit, seenThisRun=new Set()) {
     wrongPickIndex:buildDiscoveryExclusionIndex(state.wrongPicks)
   };
   const laneLimit = Math.max(1, Math.ceil(limit / Math.max(1, lanes.length)));
-  const out = [];
-  for (const lane of lanes) {
-    if (fetchAbortRequested) break;
-    out.push(...await nextLaneTmdbCandidates(lane, laneLimit, existing, seenThisRun));
-  }
-  return out;
+  // v91: lanes scan concurrently. Each lane owns a separate cursor and queries
+  // a disjoint slice of TMDB (its own language and media type), so the only
+  // shared state is the dedupe sets — and a cross-lane collision there is
+  // already handled downstream by identity-based upsert.
+  const perLane = await Promise.all(lanes.map(lane =>
+    fetchAbortRequested ? [] : nextLaneTmdbCandidates(lane, laneLimit, existing, seenThisRun)
+  ));
+  return perLane.flat();
 }
 
 function discoveryLaneForMovie(movie) {
@@ -3583,10 +3828,22 @@ function aiRateLimitError() {
 
 function registerAiRateLimit() {
   state.meta=state.meta || {};
-  const failures=Math.max(0,Number(state.meta.aiRateLimitCount || 0)) + 1;
-  const cooldown=Math.min(60 * 60 * 1000,5 * 60 * 1000 * Math.pow(3,Math.min(2,failures - 1)));
-  state.meta.aiRateLimitCount=failures;
-  state.meta.aiRateLimitUntil=Date.now() + cooldown;
+  const now=Date.now();
+  // v91: aiLimiter's AIMD is now the primary response to a 429 — it halves the
+  // lane instantly and pauses it for seconds. This persisted cooldown exists
+  // only for a sustained daily-quota exhaustion, so it starts at 30s instead
+  // of 5 minutes and tops out at 10, rather than parking the whole pipeline
+  // for an hour after one transient throttle.
+  //
+  // With several batches in flight a single throttle arrives as a burst of
+  // 429s; without this window they would each escalate the counter and turn
+  // one blip into the maximum cooldown.
+  if (now - (Date.parse(state.meta.aiRateLimitedAt || '') || 0) > 60 * 1000) {
+    state.meta.aiRateLimitCount=Math.max(0,Number(state.meta.aiRateLimitCount || 0)) + 1;
+  }
+  const failures=Math.max(1,Number(state.meta.aiRateLimitCount || 1));
+  const cooldown=Math.min(10 * 60 * 1000,30 * 1000 * Math.pow(2,Math.min(4,failures - 1)));
+  state.meta.aiRateLimitUntil=now + cooldown;
   state.meta.aiRateLimitedAt=nowStamp();
   return cooldown;
 }
@@ -3597,21 +3854,14 @@ function clearAiRateLimitAfterSuccess() {
   state.meta.aiRateLimitCount=0;
 }
 
-async function reserveAiRequest(requestDelay=AI_REQUEST_DELAY_MS) {
-  let release;
-  const previous=aiRequestReservation;
-  aiRequestReservation=new Promise(resolve => { release=resolve; });
-  await previous;
-  try {
-    if (aiRateLimitRemaining()) throw aiRateLimitError();
-    const wait=Math.max(0,Math.max(0,Number(requestDelay)||0) - (Date.now() - lastAiRequestAt));
-    if (wait) await abortableSleep(wait);
-    if (fetchAbortRequested) throw new DOMException('Aborted','AbortError');
-    if (aiRateLimitRemaining()) throw aiRateLimitError();
-    lastAiRequestAt=Date.now();
-  } finally {
-    release();
-  }
+// v91: this used to be a process-wide promise chain that serialised every
+// Gemini call and slept AI_REQUEST_DELAY_MS (12s) between them — a 5 calls/min
+// ceiling that had nothing to do with any real quota. Admission is now
+// aiLimiter's job; this only enforces the persisted cooldown that a genuine
+// upstream 429 sets, and it no longer blocks other callers while doing so.
+async function reserveAiRequest(_requestDelay=AI_REQUEST_DELAY_MS) {
+  if (fetchAbortRequested) throw new DOMException('Aborted','AbortError');
+  if (aiRateLimitRemaining()) throw aiRateLimitError();
 }
 
 async function expandPool(manual=true) {
@@ -3643,6 +3893,14 @@ async function expandPool(manual=true) {
   const parserReasons = {};
   const seenThisRun = new Set();
   const pendingAiMovies = [];
+  // v91: tagging no longer blocks collection. Before, every 3rd kept title the
+  // fetch loop stopped dead and awaited a full Gemini round trip (12s admission
+  // gate + 10-30s of Apps Script and model latency), so the collection rate was
+  // really the *tagging* rate — the single biggest reason the library grew as
+  // slowly as it did. Batches are now dispatched into the AI lane and tracked
+  // here; the fetch workers keep going, and the run only waits for outstanding
+  // batches once, at the end.
+  const inFlightTagBatches = new Set();
   let added = 0;
   let attempts = 0;
   let aiFailure = '';
@@ -3733,6 +3991,27 @@ async function expandPool(manual=true) {
     }
   };
 
+  // Dispatch whole batches into the AI lane without blocking the caller. The
+  // lane's own limiter decides how many run at once; this just keeps feeding
+  // it while the fetch workers carry on.
+  const kickTagBatches = ({drain = false} = {}) => {
+    while (
+      !fetchAbortRequested &&
+      pendingAiMovies.length >= (drain ? 1 : AI_TAG_BATCH_SIZE) &&
+      inFlightTagBatches.size < AI_TAG_LANE_CONCURRENCY * 2
+    ) {
+      const batch = flushPendingAiMovies();
+      inFlightTagBatches.add(batch);
+      batch.catch(() => {}).finally(() => inFlightTagBatches.delete(batch));
+    }
+  };
+
+  const awaitTagBatches = async () => {
+    while (inFlightTagBatches.size) {
+      await Promise.allSettled([...inFlightTagBatches]);
+    }
+  };
+
   try {
     progress(`Collecting ${mode === 'all' ? 'titles' : mode} that may fit your taste…`);
     await nextPaint();
@@ -3745,23 +4024,29 @@ async function expandPool(manual=true) {
       (manual || shouldRunBackgroundCollection())
     ) {
       const cursorBeforeBatch = JSON.parse(JSON.stringify(state.tmdbDiscoveryCursor || {}));
-      const remaining = Math.min(8, attemptBudget - attempts);
+      const remaining = Math.min(COLLECTION_DISCOVERY_WINDOW, attemptBudget - attempts);
       const toFetch = await nextDiscoveryCandidates(mode, Math.max(1, remaining), seenThisRun);
       if (!toFetch.length) break;
 
       let processedCandidates = 0;
       const processedCursorByLane = {};
 
-      // Candidates fetch COLLECTION_FETCH_CONCURRENCY at a time: the network
-      // round-trips (Wikipedia article + TMDB lookups) overlap, while all
-      // state mutation stays strictly serial in the results loop below, so
-      // there is no concurrent-write risk against state.movies.
-      for (let chunkStart = 0; chunkStart < toFetch.length; chunkStart += COLLECTION_FETCH_CONCURRENCY) {
-        if (fetchAbortRequested || collectionSatisfied || attempts >= attemptBudget || added >= FETCH_MAX_ADDED_PER_RUN) break;
+      // v91: a continuous worker pool over the whole candidate window, instead
+      // of fixed chunks joined by Promise.allSettled. The old shape had a
+      // barrier every 3 candidates, so each chunk cost the *slowest* of its
+      // three round-trips and no request could start until all three finished —
+      // in practice that wasted most of the concurrency it appeared to have.
+      // Workers here pull independently, so the pipe stays full.
+      //
+      // Concurrency safety is unchanged: every worker's post-fetch block below
+      // is synchronous, so state.movies mutation is still atomic per candidate.
+      const queue = toFetch.slice();
+      let aborted = false;
 
-        const attemptsBeforeChunk = attempts;
-        const chunk = toFetch.slice(chunkStart, chunkStart + Math.min(COLLECTION_FETCH_CONCURRENCY, attemptBudget - attempts));
-        const jobs = chunk.map(candidate => {
+      const exhausted = () => fetchAbortRequested || collectionSatisfied ||
+        attempts >= attemptBudget || added >= FETCH_MAX_ADDED_PER_RUN;
+
+      const runCandidate = async candidate => {
           const title = typeof candidate === 'string' ? candidate : candidate.title;
           const lane = typeof candidate === 'string' ? null : candidate.lane;
           const pageId = typeof candidate === 'string' ? '' : candidate.pageid;
@@ -3769,35 +4054,28 @@ async function expandPool(manual=true) {
           seenThisRun.add(typeof candidate === 'string' ? `title:${normaliseTitleKey(title)}` : discoveryCandidateIdentity(candidate));
           attempts++;
           const diagnostics = {};
-          const work = (typeof candidate === 'object' && candidate?.tmdbId)
-            ? fetchTmdbDiscoveredMovie(candidate, diagnostics)
-            : pageId
-              ? fetchWikiMovieByPageId(pageId, fetchMode, {ai:false, diagnostics, trustedLane:lane})
-              : fetchWikiMovie(title, fetchMode, diagnostics, {ai:false, trustedLane:lane});
-          return {title, lane, fetchMode, diagnostics, candidate, work};
-        });
 
-        const discoveryProgress = jobs.find(job => job.candidate?.discoveryProgress)?.candidate.discoveryProgress || '';
-        progress(
-          `Checking ${jobs.length > 1 ? jobs.length + ' titles' : jobs[0]?.fetchMode === 'shows' ? 'show' : jobs[0]?.fetchMode === 'movies' ? 'movie' : 'title'}…`,
-          [discoveryProgress, jobs.map(job => job.title).join(' · ')].filter(Boolean).join(' · ')
-        );
-        await nextPaint();
-        const settled = await Promise.allSettled(jobs.map(job => job.work));
+          let outcome;
+          try {
+            const value = await ((typeof candidate === 'object' && candidate?.tmdbId)
+              ? fetchTmdbDiscoveredMovie(candidate, diagnostics)
+              : pageId
+                ? fetchWikiMovieByPageId(pageId, fetchMode, {ai:false, diagnostics, trustedLane:lane})
+                : fetchWikiMovie(title, fetchMode, diagnostics, {ai:false, trustedLane:lane}));
+            outcome = {status:'fulfilled', value};
+          } catch (reason) {
+            outcome = {status:'rejected', reason};
+          }
 
-        let aborted = false;
-        for (let i = 0; i < jobs.length; i++) {
-          const {lane, fetchMode, diagnostics, candidate} = jobs[i];
-          const outcome = settled[i];
           if (outcome.status === 'rejected') {
-            if (fetchAbortRequested || outcome.reason?.name === 'AbortError') { aborted = true; break; }
+            if (fetchAbortRequested || outcome.reason?.name === 'AbortError') { aborted = true; return; }
             outcomes.parser++;
             const reason = String(outcome.reason?.message || 'Wikipedia request failed');
             parserReasons[reason] = (parserReasons[reason] || 0) + 1;
             noteDiscoveryEncounter(candidate, 'fetch-failed', reason);
             processedCandidates++;
             if (lane?.key && candidate?.cursorAfter) processedCursorByLane[lane.key] = candidate.cursorAfter;
-            continue;
+            return;
           }
           const movie = outcome.value;
           if (movie && lane) {
@@ -3818,8 +4096,10 @@ async function expandPool(manual=true) {
               added++;
             }
 
+            // Queue for tagging and dispatch without waiting — this line used
+            // to be the collection loop's stall point.
             if (!hasCurrentAiTags(stored)) pendingAiMovies.push({movie:stored, lane});
-            if (pendingAiMovies.length >= AI_TAG_BATCH_SIZE) await flushPendingAiMovies();
+            kickTagBatches();
             noteDiscoveryEncounter(candidate, existingMovie ? 'duplicate' : 'added');
           } else if (movie) {
             outcomes.filtered++;
@@ -3832,14 +4112,26 @@ async function expandPool(manual=true) {
           }
           processedCandidates++;
           if (lane?.key && candidate?.cursorAfter) processedCursorByLane[lane.key] = candidate.cursorAfter;
-        }
-        if (aborted) break;
+      };
 
-        progress('Evaluating collection health…');
-        // Same politeness pause as the old per-title loop (every ~20 attempts),
-        // detected by crossing a multiple-of-20 boundary within this chunk.
-        if (Math.floor(attempts / 20) > Math.floor(attemptsBeforeChunk / 20) && !fetchAbortRequested) await abortableSleep(WIKI_BATCH_PAUSE_MS);
-      }
+      const fetchWorker = async () => {
+        while (!exhausted() && !aborted) {
+          const candidate = queue.shift();
+          if (!candidate) return;
+          await runCandidate(candidate);
+          // One cheap progress tick per completion, throttled inside
+          // showFetchProgress; no forced layout, no grid rebuild.
+          if (!(attempts % 4)) progress('Collecting titles…', candidate?.title || '');
+        }
+      };
+
+      await nextPaint();
+      await Promise.all(
+        Array.from(
+          {length: Math.min(COLLECTION_FETCH_CONCURRENCY, toFetch.length)},
+          fetchWorker
+        )
+      );
 
       if (processedCandidates < toFetch.length) {
         state.tmdbDiscoveryCursor = cursorBeforeBatch;
@@ -3850,8 +4142,14 @@ async function expandPool(manual=true) {
         saveCollectionState({preserveUpdatedAt:true});
       } else saveCollectionState({preserveUpdatedAt:true});
 
-      if (!fetchAbortRequested) await flushPendingAiMovies();
+      // Keep the AI lane fed between windows, but never block on it here.
+      kickTagBatches({drain:true});
+      if (aborted) break;
     }
+
+    // Collection is done; now let the tag lane finish what it still owes.
+    kickTagBatches({drain:true});
+    if (!fetchAbortRequested) await awaitTagBatches();
   } catch (error) {
     if (error?.name !== 'AbortError') {
       console.error('Pool expansion failed:', error);
@@ -3882,7 +4180,13 @@ async function expandPool(manual=true) {
     }
 
     const outcomeSummary = `parser ${outcomes.parser}, duplicate ${outcomes.duplicate}, hidden ${outcomes.hidden}, filters ${outcomes.filtered}, AI pending ${outcomes.ai}`;
-    console.info('CineLens expansion outcomes', {attempts, added, kept:added, outcomes, parserReasons, health:collectionHealth()});
+    console.info('CineLens expansion outcomes', {
+      attempts, added, kept:added, outcomes, parserReasons,
+      health:collectionHealth(),
+      // Where each lane settled. If a limit sits pinned at its minimum with a
+      // high throttled count, that upstream — not the app — is the constraint.
+      lanes:pipelineLimiterSnapshot()
+    });
 
     if (manual && aiFailure) {
       showToast(`Checked ${attempts}, fetched ${added}, kept ${added}. AI tagging deferred: ${aiFailure}`, 'error');
@@ -4203,19 +4507,36 @@ function saveManualTagChoices() {
 // ─────────────────────────────────────────────
 async function tmdbApiJson(url) {
   if (fetchAbortRequested) return null;
-  const wait = Math.max(0, TMDB_REQUEST_DELAY_MS - (Date.now() - lastTmdbRequestAt));
-  if (wait) await abortableSleep(wait);
-  if (fetchAbortRequested) return null;
-  lastTmdbRequestAt = Date.now();
-  let controller = null;
+  // v91: paced by tmdbLimiter. This still resolves null on any failure — the
+  // callers all treat TMDB as best-effort enrichment — but a 429 is now
+  // rethrown inside the limiter first so the lane can narrow, then swallowed.
   try {
-    const resp = await fetchWithTimeout(url, {}, TMDB_FETCH_TIMEOUT_MS, c => { controller = c; currentTmdbAbortController = c; });
-    if (!resp.ok) return null;
-    return await resp.json();
+    return await tmdbLimiter.run(async () => {
+      if (fetchAbortRequested) return null;
+      let controller = null;
+      try {
+        const resp = await fetchWithTimeout(url, {}, TMDB_FETCH_TIMEOUT_MS, c => {
+          controller = c;
+          currentTmdbAbortController = c;
+          activeTmdbAbortControllers.add(c);
+        });
+        if (!resp.ok) {
+          if (resp.status === 429) {
+            const error = new Error('TMDB rate limited');
+            error.cinelensRateLimited = true;
+            error.retryAfterMs = Number(resp.headers.get('retry-after') || 0) * 1000;
+            throw error;
+          }
+          return null;
+        }
+        return await resp.json();
+      } finally {
+        if (controller) activeTmdbAbortControllers.delete(controller);
+        if (currentTmdbAbortController === controller) currentTmdbAbortController = null;
+      }
+    });
   } catch(_) {
     return null;
-  } finally {
-    if (currentTmdbAbortController === controller) currentTmdbAbortController = null;
   }
 }
 
@@ -4530,7 +4851,6 @@ function receptionBackfillStatusText() {
   const remaining = receptionBackfillPendingCount();
   if (!remaining) return '';
   if (receptionBackfillInProgress) return `legacy Wiki repair running · ${remaining} pending`;
-  if (poolExpansionInProgress) return `legacy Wiki repair waiting · ${remaining} pending`;
   return `${remaining} legacy titles need Wiki repair`;
 }
 
@@ -4554,10 +4874,11 @@ function scheduleReceptionBackfill(delay=3500) {
 }
 
 async function runReceptionBackfill() {
-  // Source workers overlap each other and Gemini across different titles.
-  // Pool expansion remains exclusive because it already fans out through the
-  // same sources. autoFetchPaused still halts every background stage.
-  if (autoFetchPaused || !libraryWritesUnlocked || receptionBackfillInProgress || poolExpansionInProgress) {
+  // v91: no longer exclusive with pool expansion. Both use Wikipedia, but they
+  // now share one adaptive limiter that meters the *combined* load correctly,
+  // which is strictly better than having one stage idle while the other runs.
+  // autoFetchPaused still halts every background stage.
+  if (autoFetchPaused || !libraryWritesUnlocked || receptionBackfillInProgress) {
     scheduleReceptionBackfill(3000);
     return;
   }
@@ -4573,10 +4894,13 @@ async function runReceptionBackfill() {
   const batch = candidates.slice(0, RECEPTION_BACKFILL_BATCH_SIZE);
   try {
     let index = 0;
-    for (const movie of batch) {
+    // v91: worker pool instead of a strictly sequential for-await. Each title
+    // is an independent Wikipedia round-trip, so serialising them meant the
+    // batch cost the sum of its latencies for no reason.
+    const queue = batch.slice();
+    const backfillOne = async movie => {
       // Per-title pause check so "Pause collection" stops this within one
       // title instead of finishing the whole batch first.
-      if (autoFetchPaused || poolExpansionInProgress) break;
       index++;
       showBackgroundPipelineProgress('Wikipedia', `${index}/${batch.length} · ${movie.title}`);
       try {
@@ -4606,7 +4930,7 @@ async function runReceptionBackfill() {
           delete movie.receptionBackfillFailCount;
           touchRecord(movie);
           changedMovieIds.push(String(movie.id));
-          continue;
+          return;
         }
         movie.reception = normaliseReceptionRecord(fresh.reception);
         delete movie.receptionBackfillAttemptedAt;
@@ -4623,7 +4947,20 @@ async function runReceptionBackfill() {
         touchRecord(movie);
         changedMovieIds.push(String(movie.id));
       }
-    }
+    };
+
+    const receptionWorker = async () => {
+      while (!autoFetchPaused && !fetchAbortRequested) {
+        const movie = queue.shift();
+        if (!movie) return;
+        await backfillOne(movie);
+      }
+    };
+    await Promise.all(Array.from(
+      {length: Math.min(RECEPTION_BACKFILL_CONCURRENCY, batch.length)},
+      receptionWorker
+    ));
+
     if (changedMovieIds.length) {
       saveLocalState({preserveUpdatedAt:true, changedMovieIds, silentUi:true});
       queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
@@ -4698,7 +5035,6 @@ function tmdbBackfillStatusText() {
   if (paused) return remaining ? `TMDB refresh paused · ${remaining} pending (posters/genres/availability/audience evidence)` : 'TMDB refresh paused';
   if (!remaining) return '';
   if (tmdbBackfillInProgress) return `TMDB refresh running · ${remaining} pending`;
-  if (poolExpansionInProgress) return `TMDB refresh waiting · ${remaining} pending (behind collection expansion)`;
   return `TMDB refresh queued · ${remaining} pending`;
 }
 
@@ -4740,7 +5076,9 @@ async function runTmdbBackfill() {
   // polling so it resumes by itself the moment collection is resumed —
   // pausing collection should quiet ALL background fetching, not leave the
   // progress bar reappearing seconds later for a different loop.
-  if (autoFetchPaused || !libraryWritesUnlocked || tmdbBackfillInProgress || poolExpansionInProgress) {
+  // v91: no longer stands down for pool expansion — TMDB has its own limiter,
+  // and collection barely touches it compared to this sweep.
+  if (autoFetchPaused || !libraryWritesUnlocked || tmdbBackfillInProgress) {
     scheduleTmdbBackfill(3000);
     return;
   }
@@ -4754,11 +5092,10 @@ async function runTmdbBackfill() {
   const batch = candidates.slice(0, TMDB_BACKFILL_BATCH_SIZE);
   try {
     let index = 0;
-    for (const movie of batch) {
-      // Checked per title, not just at batch start — clicking Pause takes
-      // effect within the current title instead of after the whole batch.
-      if (state.settings.tmdbBackfillPaused || autoFetchPaused) break;
-      if (poolExpansionInProgress) break;
+    // v91: concurrent workers instead of a serial for-await. These are small
+    // independent TMDB lookups — exactly the shape that benefits most.
+    const queue = batch.slice();
+    const refreshOne = async movie => {
       index++;
       showBackgroundPipelineProgress('TMDB', `${index}/${batch.length} · ${movie.title} · posters, genres, availability, audience evidence`);
       try {
@@ -4787,7 +5124,22 @@ async function runTmdbBackfill() {
         touchRecord(movie);
         changedMovieIds.push(String(movie.id));
       }
-    }
+    };
+
+    const tmdbWorker = async () => {
+      // Checked per title, not just at batch start — clicking Pause takes
+      // effect within the current title instead of after the whole batch.
+      while (!state.settings.tmdbBackfillPaused && !autoFetchPaused && !fetchAbortRequested) {
+        const movie = queue.shift();
+        if (!movie) return;
+        await refreshOne(movie);
+      }
+    };
+    await Promise.all(Array.from(
+      {length: Math.min(TMDB_BACKFILL_CONCURRENCY, batch.length)},
+      tmdbWorker
+    ));
+
     if (changedMovieIds.length) {
       saveLocalState({preserveUpdatedAt:true, changedMovieIds, silentUi:true});
       queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
@@ -5725,8 +6077,17 @@ async function tagAllUntagged() {
         if (enriched?.storyText && !hasCurrentAiTags(enriched)) batch.push(enriched);
       });
 
-      for (let batchStart=0; batchStart < batch.length && !fetchAbortRequested; batchStart += AI_MANUAL_TAG_BATCH_SIZE) {
-        const tagBatch=batch.slice(batchStart,batchStart + AI_MANUAL_TAG_BATCH_SIZE);
+      // v91: the resolved titles are split into Gemini batches which now run
+      // concurrently through aiLimiter. Previously each sub-batch waited for
+      // the one before it *and* for a 6s inter-request delay, so a manual
+      // retag of a few hundred titles took the better part of an hour.
+      const tagBatches = [];
+      for (let batchStart=0; batchStart < batch.length; batchStart += AI_MANUAL_TAG_BATCH_SIZE) {
+        tagBatches.push(batch.slice(batchStart, batchStart + AI_MANUAL_TAG_BATCH_SIZE));
+      }
+
+      const runTagBatch = async tagBatch => {
+        if (fetchAbortRequested) return;
         showFetchProgress(
           `AI tagging batch · ${Math.min(index,queue.length)}/${queue.length}`,
           Math.round((index / queue.length) * 100),
@@ -5784,7 +6145,12 @@ async function tagAllUntagged() {
           silentUi:true
         });
         await nextPaint();
-      }
+      };
+
+      // A rate-limit rejection still aborts the whole run, as before.
+      const settled = await Promise.allSettled(tagBatches.map(runTagBatch));
+      const rejected = settled.find(entry => entry.status === 'rejected');
+      if (rejected) throw rejected.reason;
     }
 
     rebuildTagBrain();
@@ -6395,12 +6761,16 @@ function syncMaintenancePanelPlacement() {
 
 function scheduleBackgroundAiQueue(delay = 700) {
   const cooldown=aiRateLimitRemaining();
+  // v91: poolExpansionInProgress is deliberately no longer a blocker. The AI
+  // lane and the Wikipedia/TMDB lanes have separate limiters and separate
+  // budgets, so there is nothing to contend over, and refusing to tag while
+  // collecting was half of why the backlog never drained. aiTaggingInFlightIds
+  // prevents the two producers from claiming the same title.
   if (
     autoFetchPaused ||
     legacyTagRecoveryPending() ||
     backgroundAiTaggingInProgress ||
     backgroundAiTimer ||
-    poolExpansionInProgress ||
     !pendingBackgroundAiCount()
   ) {
     return;
@@ -6412,24 +6782,44 @@ function scheduleBackgroundAiQueue(delay = 700) {
   }, Math.max(delay,cooldown));
 }
 
+// v91: dispatches several 20-title batches at once instead of one 8-title
+// batch every 20 seconds, and no longer stands down while collection runs.
+// Old ceiling: ~24 titles/min. New: bounded only by what aiLimiter finds Gemini
+// will accept.
 async function runBackgroundAiQueue() {
-  if (backgroundAiTaggingInProgress || poolExpansionInProgress || autoFetchPaused || legacyTagRecoveryPending()) return;
+  if (backgroundAiTaggingInProgress || autoFetchPaused || legacyTagRecoveryPending()) return;
   if (aiRateLimitRemaining()) {
     scheduleBackgroundAiQueue(aiRateLimitRemaining());
     return;
   }
-  const batch = pendingBackgroundAiMovies().slice(0, AI_BACKGROUND_BATCH_SIZE);
-  if (!batch.length) return;
+  const pending = pendingBackgroundAiMovies().filter(movie => !aiTagInFlight(movie));
+  if (!pending.length) return;
+
+  const batches = [];
+  for (
+    let start = 0;
+    start < pending.length && batches.length < AI_TAG_LANE_CONCURRENCY;
+    start += AI_BACKGROUND_BATCH_SIZE
+  ) {
+    batches.push(pending.slice(start, start + AI_BACKGROUND_BATCH_SIZE));
+  }
+  const batch = batches.flat();
   const changedMovieIds=batch.map(movie => String(movie.id));
 
   backgroundAiTaggingInProgress = true;
   try {
-    showBackgroundPipelineProgress('Gemini', `${batch.length} titles queued · ${batch.map(movie => movie.title).join(' · ')}`);
-    const result = await requestAiTags(batch, {
+    showBackgroundPipelineProgress('Gemini', `${batch.length} titles across ${batches.length} batches`);
+    const settled = await Promise.allSettled(batches.map(group => requestAiTags(group, {
       deferUi:true,
       batchSize:AI_BACKGROUND_BATCH_SIZE,
       requestDelayMs:AI_BACKGROUND_REQUEST_DELAY_MS
-    });
+    })));
+    const rejected = settled.find(entry => entry.status === 'rejected');
+    if (rejected) throw rejected.reason;
+    const result = settled.reduce((total, entry) => ({
+      tagged:total.tagged + Number(entry.value?.tagged || 0),
+      failed:total.failed + Number(entry.value?.failed || 0)
+    }), {tagged:0, failed:0});
     if (Number(result?.tagged || 0)) deferRecommendationRefresh();
     saveLocalState({silentUi:true,preserveUpdatedAt:true,changedMovieIds});
     queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
@@ -6472,33 +6862,24 @@ async function runBackgroundAiQueue() {
   }
 }
 
+// v91: collection and tagging are now started *together* rather than as
+// alternatives. Previously this function returned early whenever any tagging
+// was pending or running, so with a non-empty tag backlog — the normal steady
+// state — background collection simply never started, and the two stages
+// ping-ponged instead of overlapping.
 function maybeAutoExpandPool() {
-  if (
-    !startupDriveRestoreDone ||
-    !libraryWritesUnlocked ||
-    autoFetchPaused ||
-    poolExpansionInProgress ||
-    backgroundAiTaggingInProgress ||
-    autoExpandTimer ||
-    backgroundAiTimer
-  ) {
+  if (!startupDriveRestoreDone || !libraryWritesUnlocked || autoFetchPaused) {
     updateLibraryHealth();
     return;
   }
 
-  if (pendingBackgroundAiCount()) {
-    scheduleBackgroundAiQueue();
-    updateLibraryHealth();
-    return;
+  if (pendingBackgroundAiCount()) scheduleBackgroundAiQueue();
+
+  if (!poolExpansionInProgress && !autoExpandTimer && shouldRunBackgroundCollection()) {
+    lastAutoExpandAt = Date.now();
+    scheduleAutoExpand(2500);
   }
 
-  if (!shouldRunBackgroundCollection()) {
-    updateLibraryHealth();
-    return;
-  }
-
-  lastAutoExpandAt = Date.now();
-  scheduleAutoExpand(2500);
   updateLibraryHealth();
 }
 
@@ -6509,7 +6890,6 @@ function scheduleAutoExpand(delay = 2500) {
     autoFetchPaused ||
     autoExpandTimer ||
     poolExpansionInProgress ||
-    backgroundAiTaggingInProgress ||
     !shouldRunBackgroundCollection()
   ) {
     return;
@@ -9212,6 +9592,8 @@ const driveDirtyChunkKeys=new Set();
 const DRIVE_SYNC_RETRY_MIN_MS=15000;
 const DRIVE_SYNC_RETRY_MAX_MS=5*60*1000;
 const DRIVE_SYNC_DEBOUNCE_MS=1200;
+// Concurrent Drive chunk uploads per sync (see syncDirtyDrive).
+const DRIVE_CHUNK_UPLOAD_CONCURRENCY=5;
 // let, not const: production code never reassigns this, but the test
 // harness temporarily shrinks it to avoid a real 10s+ wall-clock wait when
 // verifying the hard-cap-overrides-deferral behavior (see assert-current.mjs).
@@ -9922,20 +10304,47 @@ async function syncDirtyDrive() {
   if (!driveManifestCache?.profile?.id || !state.drive.manifestFileId || driveAllChunksDirty) return null;
   const manifest=JSON.parse(JSON.stringify(driveManifestCache));
   let changed=false;
+  // v91: chunk uploads run concurrently. A faster collection dirties several
+  // chunks per sync, and uploading them one after another made sync time scale
+  // linearly with how much work the pipeline had just done — the opposite of
+  // what should happen. Payload/hash construction stays synchronous and
+  // ordered; only the uploads overlap, and the manifest is written once after
+  // they all land, so a partial failure still leaves the manifest untouched.
+  const chunkJobs=[];
   for (const key of driveDirtyChunkKeys) {
     const payload=buildDriveChunkPayload(key);
     const hash=driveHash(payload);
     const remote=manifest.chunks?.[key];
     if (!remote) {
-      const file=await createDriveJson(`${DRIVE_CHUNK_PREFIX}${key}.json`,payload);
-      manifest.chunks=manifest.chunks || {};
-      manifest.chunks[key]={id:file.id,hash,updatedAt:nowStamp(),count:Object.keys(payload.movies).length};
-      changed=true;
+      chunkJobs.push(async () => {
+        const file=await createDriveJson(`${DRIVE_CHUNK_PREFIX}${key}.json`,payload);
+        manifest.chunks=manifest.chunks || {};
+        manifest.chunks[key]={id:file.id,hash,updatedAt:nowStamp(),count:Object.keys(payload.movies).length};
+        changed=true;
+      });
     } else if (remote.hash !== hash) {
-      await uploadDriveJson(remote.id,payload);
-      manifest.chunks[key]={...remote,hash,updatedAt:nowStamp(),count:Object.keys(payload.movies).length};
-      changed=true;
+      chunkJobs.push(async () => {
+        await uploadDriveJson(remote.id,payload);
+        manifest.chunks[key]={...remote,hash,updatedAt:nowStamp(),count:Object.keys(payload.movies).length};
+        changed=true;
+      });
     }
+  }
+  if (chunkJobs.length) {
+    const pending=chunkJobs.slice();
+    const uploadWorker=async () => {
+      for (;;) {
+        const job=pending.shift();
+        if (!job) return;
+        await job();
+      }
+    };
+    // Any rejection propagates, so syncDrive's catch still schedules a retry
+    // and driveSyncPending stays true.
+    await Promise.all(Array.from(
+      {length: Math.min(DRIVE_CHUNK_UPLOAD_CONCURRENCY, pending.length)},
+      uploadWorker
+    ));
   }
   if (driveProfileDirty) {
     const profile=exportDriveProfile();
