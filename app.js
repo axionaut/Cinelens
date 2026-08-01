@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 94;
+const APP_VERSION = 95;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -813,6 +813,27 @@ const TMDB_GENRE_MAP = {
   10765: ['science-fiction', 'fantasy'], // TV "Sci-Fi & Fantasy"
   10768: ['war'] // TV "War & Politics"
 };
+
+// v95: the genre lane owns these words. A story tag that merely repeats one is
+// a duplicate of a signal the genre already carries — it showed up twice in the
+// tag cloud and, worse, was scored twice (once through tagEffects and again
+// through genreEffects) for the same underlying fact.
+//
+// Derived from the two genre sources rather than hand-listed, so it cannot
+// drift out of step with them. The tagger is already told not to emit genres
+// and cleanAiTagResults already drops tags matching a title's OWN genres; this
+// catches the cross-title case and every legacy tag stored before those rules
+// existed.
+const CANONICAL_GENRE_TAGS = new Set([
+  ...Object.values(TMDB_GENRE_MAP).flat(),
+  ...GENRE_RULES.map(([genre]) => genre),
+  // Spellings the tagger reaches for that mean exactly a canonical genre.
+  'sci-fi', 'scifi', 'animated', 'documentary-film', 'romantic'
+]);
+
+function isGenreNameTag(tag) {
+  return CANONICAL_GENRE_TAGS.has(normaliseTagName(tag));
+}
 
 function tmdbGenresToCanonical(genres) {
   const out = new Set();
@@ -2262,6 +2283,28 @@ function cleanContaminatedTags(silent=true) {
   return changed;
 }
 
+// v95: a preference set on a bare genre-name TAG (e.g. "animation") before
+// those became genre-only would now point at a tag that no longer exists, so
+// the opinion would be silently ignored. The intent is unambiguous — it was
+// about that genre — so it moves to the genre key rather than being discarded.
+// An existing genre preference always wins; this never overwrites one.
+function migrateGenreNameTagPreferences() {
+  const preferences = state.settings?.tagPreferences;
+  if (!preferences) return 0;
+  let moved = 0;
+  for (const key of Object.keys(preferences)) {
+    if (isGenreTagKey(key) || !isGenreNameTag(key)) continue;
+    const target = genreTagKey(key);
+    if (!Object.prototype.hasOwnProperty.call(preferences, target)) {
+      preferences[target] = preferences[key];
+    }
+    delete preferences[key];
+    moved++;
+  }
+  if (moved) touchSettings();
+  return moved;
+}
+
 function runStartupMaintenance() {
   const run = () => {
     try {
@@ -2272,10 +2315,11 @@ function runStartupMaintenance() {
       const ratedAtMigrated = ensureRatedAtMetadata();
       const retiredWatchlist = retireWatchlistForRecentlyAdded();
       const changed = cleanContaminatedTags(true);
+      const movedGenrePreferences = migrateGenreNameTagPreferences();
       const removedLegacyPoolExclusions = legacyDiscoveryExclusionsRemovedDuringLoad || Object.hasOwn(state, 'rollingPoolExclusions');
       legacyDiscoveryExclusionsRemovedDuringLoad = false;
       if (Object.hasOwn(state, 'rollingPoolExclusions')) delete state.rollingPoolExclusions;
-      if (removedHindiShows || clearedHorrorExclusions || excludedSensitiveTitles || addedAtMigrated || ratedAtMigrated || retiredWatchlist || changed || removedLegacyPoolExclusions) {
+      if (removedHindiShows || clearedHorrorExclusions || excludedSensitiveTitles || addedAtMigrated || ratedAtMigrated || retiredWatchlist || changed || movedGenrePreferences || removedLegacyPoolExclusions) {
         saveLocalState();
         queueDriveSync();
         render();
@@ -2896,6 +2940,11 @@ function inferPageFormat(pageTitle='', leadText='', cats=[], mediaEvidence=null)
 }
 
 function isMetaTag(tag) {
+  // A bare genre name is metadata, not a story signal — the genre lane already
+  // carries it. Filtering here covers every gate at once: rawScoringTags (so it
+  // leaves the cloud, the cards and the score), cleanAiTagResults (so it stops
+  // being stored), and the manual tag chooser.
+  if (isGenreNameTag(tag)) return true;
   return /^(english-language|hindi-language|usa|uk|india|south-korea|brazil|poland|germany|japan|film|series|miniseries|prestige-tv|\d{4}s)$/.test(tag);
 }
 
