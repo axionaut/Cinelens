@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 95;
+const APP_VERSION = 96;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -6619,16 +6619,17 @@ function updateRatingFilter(rating) {
   renderActiveCards();
 }
 
-// v94: a genre chip on a card now behaves exactly like a tag chip — it filters
-// AND opens the panel, so a genre can be rated (Like / Avoid / Neutral) from
-// the same place a tag can. Previously it only filtered, which left the genre
-// preference controls reachable solely through the tag cloud.
+// v95: a genre chip now behaves EXACTLY like a tag chip — it opens the panel
+// for that genre, where it can be rated (Like / Avoid / Neutral) and where the
+// titles carrying it are listed.
+//
+// It deliberately no longer rewrites the global Genre dropdown. A tag chip does
+// not mutate app-wide filter state, and doing so here left a sticky filter
+// behind that the user had to notice and undo — which is what made clicking a
+// genre feel like the wrong thing happened. The panel's own title list is the
+// filtered view.
 function filterByGenreFromCard(genre, event) {
   if (event) event.stopPropagation();
-  state.settings.genreFilters = [genre];
-  state.settings.genreFilter = genre;
-  saveViewState();
-  updateControlDeck();
   openTagFromCard(genreTagKey(genre));
 }
 
@@ -9029,6 +9030,11 @@ function openTagPanel(tag) {
 }
 
 function openTagFromCard(tag) {
+  // v95: the card modal is a CLONE overlaying the page, so navigating to the
+  // Tags tab underneath it left the user staring at the still-open modal with
+  // nothing apparently having happened. This affected tag chips too, not just
+  // the new genre chips — clicking a tag inside a modal looked like a no-op.
+  closeMovieCardModal();
   selectedTag=tag;
   tagDetailView='all';
   tagDetailVisibleLimit=40;
