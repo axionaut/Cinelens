@@ -203,6 +203,10 @@
   .tag-pref-label{font-family:'DM Mono',monospace;font-size:10px;color:var(--muted);text-transform:uppercase}
   .tag-pref-buttons{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
   .tag-pref-btn.active{border-color:var(--accent);color:var(--accent);background:rgba(var(--accent-rgb),.08)}
+  /* Clear resets the preference rather than expressing one, so it sits apart
+     from the four opinion buttons and stays visually quiet until needed. */
+  .tag-pref-clear{margin-left:6px;padding-left:9px;border-color:transparent;color:var(--muted);border-left:1px solid rgba(255,255,255,.16);border-radius:0 999px 999px 0;opacity:.85}
+  .tag-pref-clear:hover{color:var(--danger);border-color:transparent;border-left-color:rgba(255,255,255,.16);opacity:1}
   .tag-status{display:inline-flex;margin-top:8px;padding:2px 6px;border-radius:999px;background:rgba(0,0,0,.72);border:1px solid rgba(255,255,255,.16);font-family:'DM Mono',monospace;font-size:9px;color:var(--text)}
   .tag-delete-mode.active{background:rgba(239,83,80,.14);border-color:var(--danger);color:#ff8a86}
 
