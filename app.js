@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 100;
+const APP_VERSION = 101;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -561,6 +561,10 @@ const TAG_MASS_PIVOT_FALLBACK = 4;
 // How strongly tag volume is normalised away. 0 = off (pre-v100 behaviour),
 // 1 = score purely on average tag strength. BM25's default.
 const TAG_LENGTH_NORM_B = 0.75;
+// Stated format preference. Scales how far a title's learned taste signal can
+// carry it from the baseline, so a show must be proportionally stronger than a
+// movie to reach the same slot. 1 = no preference. See predictTasteFit.
+const FORMAT_SCORE_WEIGHT = { movie: 1, show: 0.25 };
 const SHOW_STORY_MAX_CHARS = 12000;
 const TMDB_API_KEY = 'b807a738c939c5b8ef9d0c3f3b3ad662';
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
@@ -8581,6 +8585,29 @@ function predictTasteFit(movie, model=null, opts={}) {
       negativePenalty += Math.abs(contribution);
     }
   });
+
+  // v101: a stated FORMAT preference, applied to the learned taste signal only
+  // (the distance from baseline), never to the baseline itself. Scaling the
+  // whole score would drag every show toward 1 star; scaling the signal means a
+  // show has to be proportionally stronger than a movie to reach the same
+  // position, which is exactly "if a show is still a strong one it'll rise".
+  //
+  // This is a PREFERENCE, not a bias correction — distinct from the length
+  // normalisation above, which fixes shows being over-scored for carrying more
+  // tags. That is a measurement fix and stays unconditional; this is Nitin
+  // saying he wants fewer shows. Set FORMAT_SCORE_WEIGHT.show to 1 to remove it
+  // without touching anything else.
+  // tasteOnly callers are MEASURING the model (reception calibration compares
+  // this prediction against the actual rating). A stated preference must not
+  // leak in there, or the calibrator reads the deliberate show penalty as the
+  // model under-predicting shows and compensates for it via reception.
+  const formatWeight = (opts.tasteOnly || opts.ignoreFormatWeight)
+    ? 1
+    : Number(FORMAT_SCORE_WEIGHT[formatClass(movie)] ?? 1);
+  if (formatWeight !== 1) {
+    const baseline = Number(activeModel?.baseline || 3);
+    rawRating = baseline + (rawRating - baseline) * formatWeight;
+  }
 
   const tasteOnlyPredictedRating = clamp(
     Number(activeModel?.calibrationIntercept || 0) + Number(activeModel?.calibrationSlope || 1) * rawRating,
