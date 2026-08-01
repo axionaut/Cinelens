@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 97;
+const APP_VERSION = 98;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -3780,7 +3780,10 @@ async function fetchTmdbDiscoveredMovie(candidate, diagnostics={}) {
   try {
     const details = await tmdbDetailsWithAvailability(candidate.tmdbId, candidate.tmdbMediaType);
     if (details) {
-      applyTmdbDetails(fresh, { ...details, tmdbId:candidate.tmdbId, tmdbMediaType:candidate.tmdbMediaType, detailsFetched:true });
+      // Discovery HANDED us this id — the Wikipedia article was then located
+      // for it. There is no matching step to be wrong about, so the id is
+      // authoritative and this title never needs a title search again.
+      applyTmdbDetails(fresh, { ...details, tmdbId:candidate.tmdbId, tmdbMediaType:candidate.tmdbMediaType, tmdbIdVerified:true, tmdbMatchScore:1, detailsFetched:true });
     } else {
       // Details lookup failed — fall back to the discover payload we already
       // hold so the record still gets poster/genre/reception, retried later.
@@ -3789,6 +3792,10 @@ async function fetchTmdbDiscoveredMovie(candidate, diagnostics={}) {
       applyTmdbDetails(fresh, {
         tmdbId: candidate.tmdbId,
         tmdbMediaType: candidate.tmdbMediaType,
+        // Still an authoritative id — only the details request failed — so the
+        // retry can go straight back to it rather than searching by title.
+        tmdbIdVerified: true,
+        tmdbMatchScore: 1,
         posterUrl: posterPath ? TMDB_IMAGE_BASE + posterPath : '',
         genres: tmdbGenresToCanonical((r.genre_ids || []).map(id => ({ id }))),
         voteAverage: Number.isFinite(Number(r.vote_average)) && Number(r.vote_average) > 0 ? Number(r.vote_average) : null,
@@ -4839,6 +4846,30 @@ async function tmdbDetailsWithAvailability(id, mediaType) {
   };
 }
 
+// v98: the direct path. Given a TMDB id we trust, this is one request and no
+// matching of any kind — no title comparison, nothing to get wrong. Title
+// search exists only to ESTABLISH an id for a record that has none; once an id
+// is known to be right it is never re-derived from text again.
+async function fetchTmdbDetailsById(tmdbId, mediaType) {
+  if (!TMDB_API_KEY || !tmdbId) return null;
+  const details = await tmdbDetailsWithAvailability(tmdbId, mediaType);
+  if (!details) return null;
+  return {
+    tmdbId,
+    tmdbMediaType: mediaType,
+    tmdbIdVerified: true,
+    tmdbMatchScore: 1,
+    posterUrl: details.posterUrl || '',
+    watchAvailability: details.watchAvailability || null,
+    genres: details.genres || [],
+    voteAverage: details.voteAverage,
+    voteCount: details.voteCount,
+    reviewText: details.reviewText || '',
+    reviewCount: details.reviewCount || 0,
+    detailsFetched: true
+  };
+}
+
 async function fetchTmdbDetails(title, year, format) {
   if (!TMDB_API_KEY || !title) return null;
   const mediaType = format ? 'tv' : 'movie';
@@ -4857,6 +4888,10 @@ async function fetchTmdbDetails(title, year, format) {
       // Recorded so a fuzzy (non-exact) match can be found later without
       // re-querying — anything below 1 was matched on similarity, not identity.
       tmdbMatchScore: Number(candidate.cinelensMatchScore || 0),
+      // Only an EXACT title match earns the right to skip future searches. A
+      // fuzzy match stays re-checkable, so if the title is later corrected the
+      // record is not permanently pinned to a guess.
+      tmdbIdVerified: Number(candidate.cinelensMatchScore || 0) === 1,
       posterUrl: details?.posterUrl || fallbackPoster || '',
       watchAvailability: details?.watchAvailability || null,
       genres: details?.genres || [],
@@ -4879,6 +4914,9 @@ function applyTmdbDetails(movie, tmdb) {
       movie.tmdbId = tmdb.tmdbId;
       movie.tmdbMediaType = tmdb.tmdbMediaType;
       if (tmdb.tmdbMatchScore) movie.tmdbMatchScore = tmdb.tmdbMatchScore;
+      // Sticky: once verified, always verified. A later refresh goes straight
+      // to the id and never reopens the question.
+      if (tmdb.tmdbIdVerified) movie.tmdbIdVerified = true;
     }
     movie.watchAvailability = tmdb.watchAvailability || null;
     // Real TMDB classification replaces the GENRE_RULES text-guessing
@@ -4897,17 +4935,31 @@ function applyTmdbDetails(movie, tmdb) {
   return movie;
 }
 
+// Resolves a title's TMDB data by id when the id is trustworthy, and only
+// falls back to a title search when there is nothing else to go on.
+async function fetchTmdbDataForMovie(movie) {
+  const mediaType = movie.format ? 'tv' : 'movie';
+  if (movie.tmdbId && movie.tmdbIdVerified) {
+    const byId = await fetchTmdbDetailsById(movie.tmdbId, mediaType);
+    // A null here means the request failed, not that the id is wrong — falling
+    // back to a title search would risk replacing a correct id with a fuzzy
+    // match, so the refresh is simply retried later.
+    if (byId) return byId;
+    return null;
+  }
+  return fetchTmdbDetails(movie.title, movie.year, movie.format);
+}
+
 async function attachTmdbDetails(movie) {
   if (!movie?.title) return movie;
-  const tmdb = await fetchTmdbDetails(movie.title, movie.year, movie.format);
-  return applyTmdbDetails(movie, tmdb);
+  return applyTmdbDetails(movie, await fetchTmdbDataForMovie(movie));
 }
 
 async function attachTmdbDetailsWithDeadline(movie) {
   let timer = null;
   try {
     const tmdb = await Promise.race([
-      fetchTmdbDetails(movie.title, movie.year, movie.format),
+      fetchTmdbDataForMovie(movie),
       new Promise((_, reject) => {
         timer = setTimeout(() => {
           // v96 fix: this used to call currentTmdbAbortController?.abort().
@@ -8662,7 +8714,7 @@ async function retagFromStoredData(id, opts={}) {
     // evidence corpus depends on the completed Wiki + TMDB snapshot.
     const [fresh,tmdb] = await Promise.all([
       refreshTitleFromWikipedia(movie, {ai:false,tmdb:false}).catch(() => null),
-      fetchTmdbDetails(movie.title, movie.year, movie.format).catch(() => null)
+      fetchTmdbDataForMovie(movie).catch(() => null)
     ]);
     let updated = fresh ? applyFreshWikiMovie(id, fresh, movie) : movie;
     applyTmdbDetails(updated,tmdb);
