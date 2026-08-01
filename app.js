@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 99;
+const APP_VERSION = 100;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -548,12 +548,19 @@ const RECEPTION_BACKFILL_CONCURRENCY = 6;
 const RECEPTION_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const ENGLISH_PREFERENCE_STAR_BONUS = 0.3;
 const CROSS_FORMAT_TASTE_WEIGHT = 0.4;
-// Max tags any single title contributes to the taste fit. Levels the movie/show
-// playing field — see fitScoringTags.
-const SCORING_TAG_CAP = 14;
-// For You alternates movie/show while both have candidates, so neither format
-// can monopolise the top regardless of score.
-const REC_FORMAT_INTERLEAVE = true;
+// Max tags any single title contributes to the taste fit. Length normalisation
+// (tagMassLengthFactor) is what actually balances formats now, so this is only
+// a noise guard on the tail of an unusually verbose tag set — it is set high
+// enough that it trims rather than truncates, because dropping real matching
+// signal to fake a balance is exactly the wrong trade.
+const SCORING_TAG_CAP = 20;
+// Length normalisation for the tag score — see tagMassLengthFactor. The pivot
+// is derived per model from the rated library; this only applies before any
+// model has been trained.
+const TAG_MASS_PIVOT_FALLBACK = 4;
+// How strongly tag volume is normalised away. 0 = off (pre-v100 behaviour),
+// 1 = score purely on average tag strength. BM25's default.
+const TAG_LENGTH_NORM_B = 0.75;
 const SHOW_STORY_MAX_CHARS = 12000;
 const TMDB_API_KEY = 'b807a738c939c5b8ef9d0c3f3b3ad662';
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p/w500';
@@ -1071,6 +1078,39 @@ function recommendationScoringTags(movie) {
 //
 // Used by BOTH training and scoring: if they disagreed on a title's tag set the
 // learned effects would be fitted against features the scorer never sees.
+// Total feature mass of a title's scoring tags. This — not the tag COUNT — is
+// what actually determines how much a title can accumulate, because every tag
+// contributes effect x tagFeatureValue.
+function tagFeatureMass(tags) {
+  let mass = 0;
+  for (const tag of tags) mass += tagFeatureValue(tag);
+  return mass;
+}
+
+// BM25-style pivoted length normalisation — the standard information-retrieval
+// answer to exactly this problem: a longer document accumulates more term
+// matches and outranks a shorter, more relevant one purely on length.
+//
+//   factor = 1 / ((1 - b) + b * mass / pivot)
+//
+// pivot is the library's median feature mass, so the typical title scores
+// unchanged. Above it titles are damped, below it compensated, with b
+// controlling how much length is allowed to matter (b = 0 disables this
+// entirely, b = 1 fully normalises to the average). 0.75 is BM25's long-
+// standing default and behaves well here.
+//
+// This is a weighting correction INSIDE the score, so match% stays directly
+// comparable across formats — no post-hoc reshuffling of the ranking, and a
+// genuinely better-matched title still wins whatever format it is.
+function tagMassLengthFactor(mass, pivot) {
+  const p = Number(pivot) > 0 ? Number(pivot) : TAG_MASS_PIVOT_FALLBACK;
+  const m = Math.max(0, Number(mass) || 0);
+  const normaliser = (1 - TAG_LENGTH_NORM_B) + TAG_LENGTH_NORM_B * (m / p);
+  // Bounded so a title with almost no tag mass cannot be inflated by a huge
+  // reciprocal — the fit should never be dominated by a near-empty record.
+  return clamp(1 / Math.max(normaliser, 0.2), 0.35, 1.6);
+}
+
 function fitScoringTags(movie) {
   const tags = recommendationScoringTags(movie);
   if (tags.length <= SCORING_TAG_CAP) return tags;
@@ -7485,32 +7525,6 @@ function scheduleAutoExpand(delay = 2500) {
   }, delay);
 }
 
-// Ranks movies and shows separately, then alternates them. Each format keeps
-// its own score order, so nothing is reordered WITHIN a format — this only
-// stops one format monopolising the visible top. When one side runs out the
-// other simply continues, so a library that is mostly shows still fills up.
-function interleaveByFormat(scored) {
-  if (!REC_FORMAT_INTERLEAVE || scored.length < 2) return scored;
-  const movies = [];
-  const shows = [];
-  scored.forEach(item => (item.movie?.format ? shows : movies).push(item));
-  if (!movies.length || !shows.length) return scored;
-  const merged = [];
-  // Start with whichever format holds the single best match, so the top slot
-  // still belongs to the strongest recommendation rather than to a format.
-  let takeShow = (shows[0]?.matchScore || 0) > (movies[0]?.matchScore || 0);
-  let m = 0;
-  let s = 0;
-  while (m < movies.length || s < shows.length) {
-    if (takeShow && s < shows.length) merged.push(shows[s++]);
-    else if (!takeShow && m < movies.length) merged.push(movies[m++]);
-    else if (s < shows.length) merged.push(shows[s++]);
-    else merged.push(movies[m++]);
-    takeShow = !takeShow;
-  }
-  return merged;
-}
-
 function renderRecs() {
   if (activeTab === 'pool' || activeTab === 'rated' || activeTab === 'recent' || activeTab === 'tags') return;
   const grid = document.getElementById('recsGrid');
@@ -7526,7 +7540,7 @@ function renderRecs() {
     const scored = recommendationCandidates();
     const visibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10));
       const ordered = (state.settings.sortMode || 'recommended') === 'recommended'
-        ? interleaveByFormat(state.settings.sortDirection === 'asc' ? [...scored].reverse() : scored)
+        ? (state.settings.sortDirection === 'asc' ? [...scored].reverse() : scored)
         : (() => {
             const scoredById = new Map(scored.map(item => [String(item.movie.id), item]));
             return sortMovies(scored.map(item => item.movie), 'title-asc')
@@ -8288,12 +8302,24 @@ function trainTasteModel(excludeMovieId='', targetFormatClass='all') {
     genreEffects:{},
     calibrationSlope:1,
     calibrationIntercept:0,
+    tagMassPivot:TAG_MASS_PIVOT_FALLBACK,
     evidenceCount:rows.length,
     excludedMovieId:String(excludeMovieId || ''),
     targetFormatClass:targetFormatClass || 'all'
   };
 
   if (rows.length < 3) return model;
+
+  // The pivot is the MEDIAN feature mass across rated titles, so it tracks this
+  // library rather than being a tuned constant. Training and scoring both use
+  // it, and the calibration below is fitted on already-normalised predictions,
+  // so the whole model stays self-consistent.
+  const rowMasses = rows.map(row => tagFeatureMass(row.tags));
+  const sortedMasses = [...rowMasses].sort((a, b) => a - b);
+  model.tagMassPivot = sortedMasses.length
+    ? sortedMasses[Math.floor(sortedMasses.length / 2)]
+    : TAG_MASS_PIVOT_FALLBACK;
+  const rowLengthFactors = rowMasses.map(mass => tagMassLengthFactor(mass, model.tagMassPivot));
 
   const rawPredictions = rows.map(() => fallbackRating);
 
@@ -8302,8 +8328,9 @@ function trainTasteModel(excludeMovieId='', targetFormatClass='all') {
     rows.forEach((row, index) => {
       const weight = formatTasteWeight(row, targetFormatClass);
       const residual = row.rating - rawPredictions[index];
+      const lengthFactor = rowLengthFactors[index];
       row.tags.forEach(tag => {
-        const feature = tagFeatureValue(tag);
+        const feature = tagFeatureValue(tag) * lengthFactor;
         const stat = tagStats[tag] || (tagStats[tag] = {sum:0, strength:0});
         stat.sum += residual * feature * weight;
         stat.strength += feature * feature * weight;
@@ -8322,8 +8349,9 @@ function trainTasteModel(excludeMovieId='', targetFormatClass='all') {
       tagDeltas[tag] = delta;
     });
     rows.forEach((row, index) => {
+      const lengthFactor = rowLengthFactors[index];
       row.tags.forEach(tag => {
-        rawPredictions[index] += (tagDeltas[tag] || 0) * tagFeatureValue(tag);
+        rawPredictions[index] += (tagDeltas[tag] || 0) * tagFeatureValue(tag) * lengthFactor;
       });
     });
 
@@ -8501,6 +8529,11 @@ function scheduleReceptionCalibrationUpdate() {
 function predictTasteFit(movie, model=null, opts={}) {
   const activeModel = model || getTasteModel('', formatClass(movie));
   const tags = fitScoringTags(movie);
+  // Same length normalisation the model was trained under. Without it a
+  // tag-rich title (shows carry ~12,000 chars of episode synopses against a
+  // few thousand for a film's plot) simply accumulates more and outranks a
+  // better-matched movie on volume.
+  const lengthFactor = tagMassLengthFactor(tagFeatureMass(tags), activeModel?.tagMassPivot);
   const genres = movieGenres(movie);
   let rawRating = Number(activeModel?.baseline || 3);
   let posOverlap = 0;
@@ -8516,7 +8549,7 @@ function predictTasteFit(movie, model=null, opts={}) {
     // point of the state: cancel what the ratings inferred.
     const contribution = tagIsNeutralized(tag)
       ? 0
-      : ((Number(activeModel?.tagEffects?.[tag] || 0) + manualTagPreferenceEffect(tag)) * tagFeatureValue(tag));
+      : ((Number(activeModel?.tagEffects?.[tag] || 0) + manualTagPreferenceEffect(tag)) * tagFeatureValue(tag) * lengthFactor);
     rawRating += contribution;
     if (contribution > 0.015) {
       posOverlap++;
