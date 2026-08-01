@@ -28,10 +28,14 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 88;
+const APP_VERSION = 89;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
+// After every retry is exhausted, a title that still couldn't reach 10 grounded
+// tags commits with whatever it has down to this floor, rather than looping
+// forever in "building". Only genuinely thin titles ever land below 10.
+const AI_TAG_BESTEFFORT_MIN = 6;
 const AI_TAG_MAX_COUNT = 24;
 const AI_TAG_MIGRATION_VERSION = 1;
 const AI_TAG_BATCH_SIZE = 3;
@@ -1530,12 +1534,12 @@ function aiTagSetAlreadyStable(movie) {
   return grounded.length === tags.length && grounded.length >= aiTagMinimumForStory(sourceText);
 }
 
-function aiTagMinimumForStory(storyText='') {
-  const length=String(storyText || '').trim().length;
-  if (length >= 1500) return 10;
-  if (length >= 800) return 8;
-  if (length >= 400) return 6;
-  return 5;
+// Every title targets a full AI_TAG_MIN_COUNT (10) tag set — Nitin wants a
+// firm minimum of 10, not a length-scaled floor. Genuinely thin titles that
+// can't reach 10 even after every retry fall back to a best-effort commit
+// (see AI_TAG_BESTEFFORT_MIN) so they still get tagged instead of looping.
+function aiTagMinimumForStory(/* storyText */) {
+  return AI_TAG_MIN_COUNT;
 }
 
 function aiTagWordTokens(tag) {
@@ -1584,7 +1588,9 @@ function consensusTagResult(resultA, resultB) {
 function commitAiTagSet(movie, cleaned, model='', opts={}) {
   const reconciled = reconcileAiTagSet(movie, cleaned);
   const sourceText=aiTagSourceText(movie);
-  const minimumTags=aiTagMinimumForStory(sourceText);
+  // opts.minTags lets the best-effort final-attempt commit accept a thin title
+  // that will never reach the full 10; every other path holds the firm floor.
+  const minimumTags=opts.minTags ?? aiTagMinimumForStory(sourceText);
   if (reconciled.tags.length < minimumTags) throw new Error(`AI returned too few usable tags for ${movie.title}`);
   movie.tags = reconciled.tags;
   movie.coreTags = [...reconciled.tags];
@@ -1822,6 +1828,8 @@ async function requestAiTags(movies, opts={}) {
   let excluded = 0;
   const retryItems = [];
   const retryPartials = {};
+  const retryLimit=Math.max(0,Number(opts.retryLimit ?? AI_TAG_RETRY_LIMIT));
+  const isFinalAttempt = Number(opts.retry || 0) >= retryLimit;
   items.forEach(movie => {
     try {
       const result = byId.get(String(movie.id));
@@ -1835,6 +1843,12 @@ async function requestAiTags(movies, opts={}) {
       // "building N/10" just because a stochastic pass was sparse.
       if (merged.tags.length >= minimumTags || aiTagSetAlreadyStable(movie)) {
         commitAiTagSet(movie, merged, payload.model, opts);
+        tagged++;
+      } else if (isFinalAttempt && merged.tags.length >= AI_TAG_BESTEFFORT_MIN) {
+        // Retries exhausted and still short of 10 — a genuinely thin title.
+        // Commit the best grounded set we could build instead of leaving it
+        // permanently "building" and re-queued every cycle.
+        commitAiTagSet(movie, merged, payload.model, {...opts, minTags:merged.tags.length});
         tagged++;
       } else {
         retryItems.push(movie);
@@ -1866,7 +1880,6 @@ async function requestAiTags(movies, opts={}) {
       failed++;
     }
   });
-  const retryLimit=Math.max(0,Number(opts.retryLimit ?? AI_TAG_RETRY_LIMIT));
   if (retryItems.length && Number(opts.retry || 0) < retryLimit) {
     const retryResult = await requestAiTags(retryItems, {
       ...opts,

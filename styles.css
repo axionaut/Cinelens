@@ -509,6 +509,17 @@
   max-width:58px !important;
 }
 
+/* Genre + match-mode share one control cell so the mobile label|control grid
+   stays aligned (an unlabeled match select otherwise shifts every row). */
+.settings-bar .genre-control{display:flex;align-items:center;gap:8px;min-width:0}
+.settings-bar .sort-control{display:flex;align-items:center;gap:8px;min-width:0}
+@media(max-width:768px){
+  .settings-bar .genre-control{width:100%;min-width:0}
+  .settings-bar select.genre-match-select{flex:0 0 58px}
+  .settings-bar .sort-control{width:100%;min-width:0}
+  .settings-bar .sort-control #sortMode{flex:1 1 auto;min-width:0}
+}
+
 .tag,
 .tb-tag,
 .tag-insight-chip,

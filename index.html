@@ -101,7 +101,8 @@
       <option value="English">English</option>
     </select>
     <label>Genre</label>
-    <select class="platform-select genre-filter-select" id="genreFilter" multiple size="1" onchange="updateGenreFilter()" aria-label="Genres" title="Select one or more genres">
+    <div class="genre-control">
+     <select class="platform-select genre-filter-select" id="genreFilter" multiple size="1" onchange="updateGenreFilter()" aria-label="Genres" title="Select one or more genres">
       <option value="action">Action</option>
       <option value="adventure">Adventure</option>
       <option value="animation">Animation</option>
@@ -127,6 +128,7 @@
       <option value="or">OR</option>
       <option value="and">AND</option>
     </select>
+     </div>
     <label>Rating</label>
     <select class="platform-select" id="ratingFilter" onchange="updateRatingFilter(this.value)">
       <option value="all">All ratings</option>
@@ -138,7 +140,8 @@
       <option value="1">1 star &amp; above</option>
     </select>
     <label>Sort</label>
-    <select class="platform-select" id="sortMode" onchange="updateSortMode(this.value)">
+    <div class="sort-control">
+     <select class="platform-select" id="sortMode" onchange="updateSortMode(this.value)">
       <option value="recommended">Best match</option>
       <option value="rating">Your rating</option>
       <option value="year">Release year</option>
@@ -149,6 +152,7 @@
     </select>
     <button class="sort-direction-btn" id="sortDirectionBtn" type="button" onclick="toggleSortDirection()" aria-label="Sort descending" title="Sort descending">↓</button>
     <button class="tb-filter-btn" id="shuffleAgainBtn" onclick="shuffleAgain()" hidden>Shuffle again</button>
+     </div>
     <label>Search</label>
     <input class="title-search-input" id="titleSearch" type="search" placeholder="search local + Wikipedia" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)">
     <button class="tb-filter-btn" id="unifiedSearchBtn" onclick="searchWikipediaFromUnifiedInput()">search wiki</button>
