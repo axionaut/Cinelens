@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 103;
+const APP_VERSION = 104;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -40,6 +40,11 @@ const AI_TAG_BESTEFFORT_MIN = 6;
 // filtered out as generic or too common before they can count. See
 // usableTagCount.
 const AI_TAG_USABLE_HEADROOM = 5;
+// Bounded top-up passes for a title committed below the usable floor, and how
+// long to wait between them. Long enough that an underfilled back catalogue
+// drains slowly in the background instead of competing with new titles.
+const AI_TAG_TOPUP_ATTEMPT_LIMIT = 3;
+const AI_TAG_TOPUP_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 const AI_TAG_MAX_COUNT = 24;
 const AI_TAG_MIGRATION_VERSION = 1;
 // v91 pipeline rebuild — batch sizes are now the server's real ceiling
@@ -2002,6 +2007,15 @@ function commitAiTagSet(movie, cleaned, model='', opts={}) {
     narrativeHash:aiStoryHash(movie.storyText || ''),
     tmdbReviewHash:aiStoryHash(movie.tmdbReviewText || ''),
     completedTagCount:reconciled.tags.length,
+    // v104: a best-effort commit used to be indistinguishable from a full one.
+    // Both wrote status 'verified', hasCurrentAiTags returned true, and the
+    // title left the tagging pipeline permanently at as few as six tags — which
+    // is why Tejas sat on six learned signals and was never revisited. The set
+    // is still committed (leaving it "building" re-queues it forever), but it
+    // is now MARKED so the pipeline can come back and top it up.
+    usableTagCount:usableTagCount(reconciled.tags),
+    underfilled:usableTagCount(reconciled.tags) < aiTagMinimumForStory(sourceText),
+    topUpAttempts:Number(movie.aiTagging?.topUpAttempts || 0),
     taggedAt:new Date().toISOString()
   };
   movie.retagStatus = 'verified';
@@ -2206,6 +2220,23 @@ async function requestAiTagsInner(items, opts={}) {
   const savedPartials = Object.fromEntries(items
     .filter(movie => movie.aiTagPartial?.tags?.length)
     .map(movie => [String(movie.id), movie.aiTagPartial]));
+  // v104: a top-up must EXTEND the committed set, not replace it. Seeding the
+  // partial with the tags already held tells the tagger what is accepted and
+  // asks only for the shortfall, so an existing good tag is never traded away
+  // for a new one. The attempt is counted here so a title that keeps coming
+  // back short stops after AI_TAG_TOPUP_ATTEMPT_LIMIT tries.
+  items.forEach(movie => {
+    const id = String(movie.id);
+    if (savedPartials[id] || opts.partials?.[id] || !needsTagTopUp(movie)) return;
+    const existing = rawScoringTags(movie);
+    if (!existing.length) return;
+    savedPartials[id] = {tags:[...existing], evidence:{...(movie.aiTagEvidence || {})}};
+    movie.aiTagging = {
+      ...movie.aiTagging,
+      topUpAttempts:Number(movie.aiTagging?.topUpAttempts || 0) + 1,
+      lastTopUpAt:new Date().toISOString()
+    };
+  });
   const partials = opts.partials || savedPartials;
   // Consensus (Targeted scope): only the top-level manual/retag call sets
   // consensusPasses=2. Retries and continuations (which carry partials) stay
@@ -2446,6 +2477,8 @@ function runStartupMaintenance() {
     try {
       const removedHindiShows = purgeDisallowedHindiShows();
       const removedRealityShows = purgeNonNarrativeShows();
+      const repairedTmdb = repairMismatchedTmdbIdentities();
+      const retiredTmdb = retireUnverifiableTmdbIdentities();
       const clearedHorrorExclusions = clearConventionalHorrorExclusions();
       const excludedSensitiveTitles = purgeAiSensitiveContentExclusions();
       const addedAtMigrated = ensureAddedAtMetadata();
@@ -2456,7 +2489,7 @@ function runStartupMaintenance() {
       const removedLegacyPoolExclusions = legacyDiscoveryExclusionsRemovedDuringLoad || Object.hasOwn(state, 'rollingPoolExclusions');
       legacyDiscoveryExclusionsRemovedDuringLoad = false;
       if (Object.hasOwn(state, 'rollingPoolExclusions')) delete state.rollingPoolExclusions;
-      if (removedHindiShows || removedRealityShows || clearedHorrorExclusions || excludedSensitiveTitles || addedAtMigrated || ratedAtMigrated || retiredWatchlist || changed || movedGenrePreferences || removedLegacyPoolExclusions) {
+      if (removedHindiShows || removedRealityShows || repairedTmdb || retiredTmdb || clearedHorrorExclusions || excludedSensitiveTitles || addedAtMigrated || ratedAtMigrated || retiredWatchlist || changed || movedGenrePreferences || removedLegacyPoolExclusions) {
         saveLocalState();
         queueDriveSync();
         render();
@@ -2660,9 +2693,27 @@ function recordMatchesDiscoveryCandidate(record, candidate) {
     .some(title => normaliseTitleKey(title) === key);
 }
 
+// Do two records plausibly name the same title? Used to stop a shared TMDB id
+// — which is exactly the shape a bad match takes — from merging two genuinely
+// different films.
+function movieTitlesCompatible(a, b) {
+  const aTitles = [a?.title, a?.wikiTitle, a?.pageTitle].map(tmdbComparableTitle).filter(Boolean);
+  const bTitles = [b?.title, b?.wikiTitle, b?.pageTitle].map(tmdbComparableTitle).filter(Boolean);
+  if (!aTitles.length || !bTitles.length) return true;
+  return aTitles.some(x => bTitles.some(y => tmdbTitleSimilarity(x, y) >= TMDB_TITLE_MATCH_MIN));
+}
+
 function sameMovieIdentity(a, b) {
   const bKeys = new Set(movieIdentityKeys(b));
-  return movieIdentityKeys(a).some(key => bKeys.has(key));
+  const shared = movieIdentityKeys(a).filter(key => bKeys.has(key));
+  if (!shared.length) return false;
+  // A shared Wikipedia page id or title+year+format key is authoritative.
+  if (shared.some(key => key.startsWith('page:') || key.startsWith('title:'))) return true;
+  // Only the TMDB id matched. v104: previously that alone merged the records,
+  // so one wrong id could fuse two different films into a single entry —
+  // through collapseDuplicateMovies and through findExistingMovieByIdentity on
+  // every upsert. Require the titles to actually agree.
+  return movieTitlesCompatible(a, b);
 }
 
 function findExistingMovieByIdentity(movie, collection=state.movies) {
@@ -3354,6 +3405,44 @@ function isNonNarrativeRecord(movie) {
 // Kept under the old name so existing callers are untouched.
 function isNonNarrativeShowRecord(movie) {
   return isNonNarrativeRecord(movie);
+}
+
+// v104: repairs records that already carry another title's TMDB metadata.
+// Deliberately conservative — it only acts where a mismatch is PROVABLE from
+// the stored tmdbTitle, never on a guess, and it never deletes the title. The
+// wrong TMDB fields are stripped and tmdbDataVersion is reset so the existing
+// backfill re-resolves the record through the v97 similarity floor.
+function repairMismatchedTmdbIdentities() {
+  let repaired = 0;
+  ['movies', 'hiddenTitles'].forEach(mapName => {
+    Object.values(state[mapName] || {}).forEach(movie => {
+      if (!tmdbIdentityMismatch(movie)) return;
+      console.warn('CineLens clearing mismatched TMDB metadata', {
+        title:movie.title, storedTmdbTitle:movie.tmdbTitle, tmdbId:movie.tmdbId
+      });
+      clearTmdbIdentity(movie);
+      touchRecord(movie);
+      repaired++;
+    });
+  });
+  if (repaired) scheduleTmdbBackfill(1500);
+  return repaired;
+}
+
+// Legacy records hold no tmdbTitle, so a mismatch cannot be proven. Rather than
+// trusting them, the verified flag is dropped so fetchTmdbDataForMovie resolves
+// them by title once — through the similarity floor — and records the identity
+// it matched. After that pass they are self-checking.
+function retireUnverifiableTmdbIdentities() {
+  let cleared = 0;
+  Object.values(state.movies || {}).forEach(movie => {
+    if (!movie?.tmdbId || movie.tmdbTitle || !movie.tmdbIdVerified) return;
+    delete movie.tmdbIdVerified;
+    movie.tmdbDataVersion = 0;
+    touchRecord(movie);
+    cleared++;
+  });
+  return cleared;
 }
 
 function purgeNonNarrativeShows() {
@@ -5061,6 +5150,83 @@ function tmdbTitleSimilarity(candidateTitle, wantedComparable) {
   return (2 * shared) / (candidateTokens.length + wantedTokens.length);
 }
 
+// v104 — TMDB IDENTITY INTEGRITY
+//
+// A record used to have no way to state WHICH TMDB title its poster, id,
+// genres, reviews and reception came from, so a wrong pairing was invisible:
+// the card showed the Wikipedia title, the poster showed something else, and
+// nothing in the data disagreed. tmdbTitle/tmdbYear close that gap, and these
+// helpers act on it.
+//
+// How the pairing broke in the first place, in order of contribution:
+//   1. Pre-v97 tmdbSearchCandidate had no similarity floor and fell back to the
+//      most POPULAR result in the year window, so a title TMDB did not carry
+//      under that exact name adopted a more famous neighbour's id.
+//   2. applyFreshWikiMovie explicitly preserves the previous record's TMDB
+//      payload, and the retag path refreshes Wikipedia with {tmdb:false}. So a
+//      refresh that landed on a DIFFERENT article kept the old poster and id
+//      while adopting the new article's title — exactly "card says Tejas, wiki
+//      opens Tejas, poster and TMDB are Dhaakad".
+//   3. movieIdentityKeys treats tmdb:<id> as sufficient identity, so two
+//      genuinely different titles sharing one bad id were merged into a single
+//      record by collapseDuplicateMovies / findExistingMovieByIdentity.
+//   4. v98 made tmdbIdVerified sticky, which then PROTECTED a wrong id from
+//      ever being re-resolved.
+function tmdbIdentityMatches(movie) {
+  const stored = tmdbComparableTitle(movie?.tmdbTitle);
+  if (!stored) return true; // nothing recorded to check against
+  const own = [movie?.title, movie?.wikiTitle, movie?.pageTitle]
+    .map(tmdbComparableTitle)
+    .filter(Boolean);
+  if (!own.length) return true;
+  if (!own.some(title => tmdbTitleSimilarity(title, stored) >= TMDB_TITLE_MATCH_MIN)) return false;
+  const ownYear = Number(movie?.year) || 0;
+  const tmdbYear = Number(movie?.tmdbYear) || 0;
+  // Titles can legitimately differ in release year by one across sources.
+  if (ownYear && tmdbYear && Math.abs(ownYear - tmdbYear) > 1) return false;
+  return true;
+}
+
+// True only when we can PROVE a mismatch. A record with no stored tmdbTitle is
+// unverifiable, not wrong — it is handled by forcing a re-resolve instead.
+function tmdbIdentityMismatch(movie) {
+  return !!(movie?.tmdbId && movie?.tmdbTitle) && !tmdbIdentityMatches(movie);
+}
+
+// Removes every field that came from the wrong TMDB record, and only those.
+// Wikipedia identity, story text, tags, rating and user state are untouched, so
+// the title stays in the library and is simply re-resolved.
+function clearTmdbIdentity(movie) {
+  if (!movie) return false;
+  const had = !!(movie.tmdbId || movie.posterUrl || movie.tmdbReviewText);
+  delete movie.tmdbId;
+  delete movie.tmdbMediaType;
+  delete movie.tmdbTitle;
+  delete movie.tmdbYear;
+  delete movie.tmdbIdVerified;
+  delete movie.tmdbMatchScore;
+  delete movie.posterUrl;
+  delete movie.watchAvailability;
+  delete movie.tmdbReviewText;
+  delete movie.tmdbReviewCount;
+  // The TMDB audience score fed the reception record; drop that contribution
+  // but keep any Wikipedia-derived aggregator data, which is still valid.
+  if (movie.reception && typeof movie.reception === 'object') {
+    const reception = {...movie.reception};
+    delete reception.tmdbScore;
+    delete reception.tmdbVoteCount;
+    const {qualitySignal, strength} = computeReceptionQuality(reception);
+    reception.qualitySignal = qualitySignal;
+    reception.strength = strength;
+    movie.reception = reception;
+  }
+  // Force the backfill to resolve this title again from scratch.
+  movie.tmdbDataVersion = 0;
+  delete movie.posterBackfillAttemptedAt;
+  delete movie.tmdbBackfillFailCount;
+  return had;
+}
+
 function tmdbComparableTitle(value) {
   return String(value || '').toLowerCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -5184,6 +5350,11 @@ async function tmdbDetailsWithAvailability(id, mediaType) {
     // source rather than a guess at Wikipedia's wording — it does not care
     // whether the article happens to use the phrase "talk show".
     nonNarrative: (data.genres || []).some(g => TMDB_EXCLUDED_TV_GENRE_IDS.includes(Number(g?.id))),
+    // v104: the identity of what TMDB actually returned. Without this a record
+    // carrying another film's poster is undetectable — nothing stored says
+    // which title the id belongs to.
+    tmdbTitle: String(data.title || data.name || ''),
+    tmdbYear: tmdbCandidateYear(data, mediaType) || null,
     voteAverage: Number.isFinite(Number(data.vote_average)) && Number(data.vote_average) > 0 ? Number(data.vote_average) : null,
     voteCount: Math.max(0, parseInt(data.vote_count, 10) || 0),
     reviewText:compactTmdbReviewText(data.reviews),
@@ -5208,6 +5379,8 @@ async function fetchTmdbDetailsById(tmdbId, mediaType) {
     watchAvailability: details.watchAvailability || null,
     genres: details.genres || [],
     nonNarrative: !!details.nonNarrative,
+    tmdbTitle: details.tmdbTitle || '',
+    tmdbYear: details.tmdbYear || null,
     voteAverage: details.voteAverage,
     voteCount: details.voteCount,
     reviewText: details.reviewText || '',
@@ -5242,6 +5415,8 @@ async function fetchTmdbDetails(title, year, format) {
       watchAvailability: details?.watchAvailability || null,
       genres: details?.genres || [],
       nonNarrative: !!details?.nonNarrative,
+      tmdbTitle: details?.tmdbTitle || String(candidate.title || candidate.name || ''),
+      tmdbYear: details?.tmdbYear || tmdbCandidateYear(candidate, mediaType) || null,
       voteAverage: details?.voteAverage ?? fallbackVoteAverage,
       voteCount: details?.voteAverage != null ? details.voteCount : Math.max(0, parseInt(candidate.vote_count, 10) || 0),
       reviewText:details?.reviewText || '',
@@ -5260,6 +5435,8 @@ function applyTmdbDetails(movie, tmdb) {
     if (tmdb.tmdbId) {
       movie.tmdbId = tmdb.tmdbId;
       movie.tmdbMediaType = tmdb.tmdbMediaType;
+      if (tmdb.tmdbTitle) movie.tmdbTitle = tmdb.tmdbTitle;
+      if (tmdb.tmdbYear) movie.tmdbYear = tmdb.tmdbYear;
       if (tmdb.tmdbMatchScore) movie.tmdbMatchScore = tmdb.tmdbMatchScore;
       // Sticky: once verified, always verified. A later refresh goes straight
       // to the id and never reopens the question.
@@ -5289,7 +5466,11 @@ function applyTmdbDetails(movie, tmdb) {
 // falls back to a title search when there is nothing else to go on.
 async function fetchTmdbDataForMovie(movie) {
   const mediaType = movie.format ? 'tv' : 'movie';
-  if (movie.tmdbId && movie.tmdbIdVerified) {
+  // v104: tmdbIdVerified is only trustworthy when we also stored WHICH title
+  // was matched. Records written before that (and any whose stored identity no
+  // longer agrees) are re-resolved by title search instead of having a possibly
+  // wrong id protected forever.
+  if (movie.tmdbId && movie.tmdbIdVerified && movie.tmdbTitle && tmdbIdentityMatches(movie)) {
     const byId = await fetchTmdbDetailsById(movie.tmdbId, mediaType);
     // A null here means the request failed, not that the id is wrong — falling
     // back to a title search would risk replacing a correct id with a fuzzy
@@ -5606,6 +5787,9 @@ function sourceTextShedEligible(movie) {
   if (!movie || movie.sourceShed) return false;
   if (!(movie.storyText || movie.tmdbReviewText)) return false;
   if (sourceTextShedProtected(movie)) return false;
+  // Shedding an underfilled title would strip the very text needed to top it
+  // up, stranding it below the floor permanently.
+  if (needsTagTopUp(movie)) return false;
   // Only a title whose tags are complete and current — an untagged or
   // mid-retry title still needs its text.
   return hasCurrentAiTags(movie);
@@ -6711,7 +6895,7 @@ function aiTagCandidates() {
     ...Object.values(state.movies || {}),
     ...Object.values(state.hiddenTitles || {}).filter(movie => movie.storyText)
   ]
-    .filter(movie => movie.title && !hasCurrentAiTags(movie))
+    .filter(movie => movie.title && (!hasCurrentAiTags(movie) || needsTagTopUp(movie)))
     .filter(aiSourceDataReady)
     .filter(movie => aiBackgroundRetryReady(movie, now))
     .sort((a,b) => {
@@ -7387,6 +7571,26 @@ const AI_BACKGROUND_RETRY_BACKOFF_MS = [
   6 * 60 * 60 * 1000,   // 6 h
   24 * 60 * 60 * 1000   // then ~daily
 ];
+// A committed-but-underfilled title. Complete enough to display and score, not
+// complete enough to stop working on. Bounded attempts so a genuinely thin
+// title cannot be retried forever.
+function needsTagTopUp(movie) {
+  if (!movie?.aiTagging || movie.aiTagging.status !== 'verified') return false;
+  if (movie.aiTagging.promptVersion !== AI_TAG_PROMPT_VERSION) return false;
+  if (Number(movie.aiTagging.topUpAttempts || 0) >= AI_TAG_TOPUP_ATTEMPT_LIMIT) return false;
+  // A shed record has no story text to work from; sourceTextShedEligible now
+  // refuses to shed underfilled titles, so this only guards legacy records.
+  if (!movie.storyText || movie.sourceShed) return false;
+  const usable = usableTagCount(rawScoringTags(movie));
+  return usable < aiTagMinimumForStory(aiTagSourceText(movie));
+}
+
+function tagTopUpBackoffReady(movie, now) {
+  const at = Date.parse(movie?.aiTagging?.lastTopUpAt || movie?.aiTagging?.taggedAt || '') || 0;
+  if (!at) return true;
+  return now - at >= AI_TAG_TOPUP_COOLDOWN_MS;
+}
+
 function aiBackgroundRetryReady(movie, now) {
   const attemptedAt = Date.parse(movie.aiTagging?.attemptedAt || '') || 0;
   if (!attemptedAt) return true;
@@ -7399,7 +7603,9 @@ function pendingBackgroundAiMovies() {
   const now = Date.now();
   const recommendationRank = new Map(scoreMovies().map((item, index) => [String(item.movie.id), index]));
   return Object.values(state.movies || {})
-    .filter(movie => movie?.storyText && !hasCurrentAiTags(movie) && !movie.hidden)
+    .filter(movie => movie?.storyText && !movie.hidden)
+    // Underfilled titles rejoin the queue behind genuinely untagged ones.
+    .filter(movie => !hasCurrentAiTags(movie) || (needsTagTopUp(movie) && tagTopUpBackoffReady(movie, now)))
     .filter(movie => aiSourceDataReady(movie,now))
     .filter(movie => aiBackgroundRetryReady(movie, now))
     .sort((a, b) => {
@@ -8969,7 +9175,22 @@ function skipMovie(id, e) { toggleWatchlist(id, e); }
 function applyFreshWikiMovie(oldId, fresh, previous={}) {
   const stamp = nowStamp();
   const normalisedFresh = normaliseFetchedWikiMovie(fresh, previous);
-  const preserved = {
+  // v104 ROOT CAUSE FIX. The block below deliberately preserves the previous
+  // record's poster, tmdbId, availability and review text, and the retag path
+  // refreshes Wikipedia with {tmdb:false} so the fresh record never carries its
+  // own. That is correct only while the refresh stayed on the SAME title. When
+  // it landed on a different article the record adopted the new Wikipedia
+  // identity and kept the old film's TMDB payload — one record showing two
+  // different films. Carry it over only when the identity still agrees.
+  const identityHeld = !previous?.tmdbId || freshMatchesTitleRecord(normalisedFresh, previous);
+  const carryTmdb = identityHeld && tmdbIdentityMatches({
+    ...previous,
+    title:normalisedFresh.title || previous.title,
+    wikiTitle:normalisedFresh.wikiTitle || previous.wikiTitle,
+    pageTitle:normalisedFresh.pageTitle || previous.pageTitle,
+    year:normalisedFresh.year || previous.year
+  });
+  const preserved = carryTmdb ? {
     rating: Number(previous.rating || 0),
     watchlist: !!previous.watchlist,
     skipped: !!previous.skipped,
@@ -8983,7 +9204,22 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
     tmdbDataVersion:normalisedFresh.tmdbDataVersion || previous.tmdbDataVersion || 0,
     watchAvailability:normalisedFresh.watchAvailability || previous.watchAvailability || null,
     tmdbReviewText:normalisedFresh.tmdbReviewText || previous.tmdbReviewText || '',
-    tmdbReviewCount:Number(normalisedFresh.tmdbReviewCount || previous.tmdbReviewCount || 0)
+    tmdbReviewCount:Number(normalisedFresh.tmdbReviewCount || previous.tmdbReviewCount || 0),
+    tmdbTitle:normalisedFresh.tmdbTitle || previous.tmdbTitle || '',
+    tmdbYear:normalisedFresh.tmdbYear || previous.tmdbYear || null,
+    tmdbIdVerified:!!(normalisedFresh.tmdbIdVerified || previous.tmdbIdVerified)
+  } : {
+    // Identity changed: take only what the fresh article brought, and let the
+    // TMDB backfill resolve this title properly instead of inheriting a
+    // stranger's metadata.
+    thumbnailUrl: normalisedFresh.thumbnailUrl || '',
+    rating: Number(previous.rating || 0),
+    watchlist: !!previous.watchlist,
+    skipped: !!previous.skipped,
+    userNotes: previous.userNotes || '',
+    suppressedTags: previous.suppressedTags || [],
+    suppressedRawTags: previous.suppressedRawTags || [],
+    tmdbDataVersion: 0
   };
   const next = {
     ...normalisedFresh,

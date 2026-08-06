@@ -2512,9 +2512,10 @@ original deferral stands. No grounded-search integration was added.
 - `TMDB_API_KEY` (v3, read-only, non-billing) lives in `app.js` alongside the
   existing `GOOGLE_CLIENT_ID`/`AI_TAGGER_URL` public client-side identifiers —
   same established pattern, no new precedent.
-- **Posters:** `fetchTmdbDetails(title, year, format)` searches
-  `/search/movie` or `/search/tv`, matching a candidate whose release year is
-  within ±1 of the stored year (ties broken by TMDB `popularity`); every movie
+- **Posters (superseded by 31.15/31.20 — TMDB data is resolved by id, and a
+  title search must clear a similarity floor):** `fetchTmdbDetails(title, year,
+  format)` searches `/search/movie` or `/search/tv`, matching a candidate whose
+  release year is within ±1 of the stored year; every movie
   search adds `region=IN` (`TMDB_SEARCH_REGION`; TMDB's `/search/tv` endpoint
   has no region parameter, so shows use year-window + popularity only) purely
   to disambiguate identically-titled results — it does not limit which
@@ -2552,7 +2553,8 @@ original deferral stands. No grounded-search integration was added.
     shown, `+N` overflow) plus a "via JustWatch" link to
     `themoviedb.org/{movie|tv}/{tmdbId}/watch` — required whenever TMDB/
     JustWatch provider data is displayed. Still informational only.
-  - `TMDB_DATA_VERSION` (currently 2) lets `needsTmdbBackfill` pick up a
+  - `TMDB_DATA_VERSION` (**currently 7** — see 31.15; this line's original
+    value of 2 is historical) lets `needsTmdbBackfill` pick up a
     record that already has a poster but predates (or was built under) an
     older watch-data shape for exactly one refresh, without re-touching
     records already on the current version.
@@ -3952,7 +3954,8 @@ sentiment labels. Evidence validation and the AI source hash use the same
 combined corpus. Consequently, newly available review evidence makes an older
 tag set legitimately stale and queues a batched refresh.
 
-`TMDB_DATA_VERSION = 6` performs one ordinary TMDB backfill through the existing
+`TMDB_DATA_VERSION` (6 at the time of this section, **7 from v97** — see
+31.15) performs one ordinary TMDB backfill through the existing
 fixed progress surface. Each completed TMDB batch may yield to the existing
 background AI batch before continuing, rather than creating a parallel
 foreground process. Explicit retag refreshes TMDB before Gemini so audience
@@ -4098,3 +4101,155 @@ metadata, and all other fields are never replaced. Recovered chunks sync
 through the normal current writer. Gemini waits until revision recovery has
 finished or been attempted, then processes only records that could not be
 safely restored.
+
+### 31.15 Pipeline rebuild and TMDB identity integrity (v91–v104)
+
+This section supersedes earlier statements about TMDB title matching, the TMDB
+data version, and the treatment of tag sets below ten usable tags.
+
+**Parallel pipeline (v91).** Every upstream was previously paced by a fixed
+inter-request sleep against a shared timestamp, and Gemini additionally by a
+process-wide promise chain — ceilings of roughly 70, 200 and 5 requests per
+minute that came from no real quota. Collection, background tagging and both
+backfills also refused to run concurrently, so approximately one request was in
+flight application-wide. Each upstream now has an `AdaptiveLimiter`: a token
+bucket for average rate, a bounded worker pool for concurrency, and AIMD that
+halves on `429` and grows on sustained success, so each lane converges on what
+the upstream actually accepts. Collection dispatches tag batches instead of
+awaiting them, Gemini batches carry twenty titles (the Apps Script `MAX_ITEMS`)
+with several in flight, and `aiTaggingInFlightIds` stops two producers claiming
+the same title. Drive chunk uploads run concurrently.
+
+**Source-text shedding (v94).** Titles are never evicted: a title dropped today
+may match well after a later tagger change. Instead, once a title holds a
+verified tag set, `storyText` and `tmdbReviewText` — which exist only to feed
+the tagger — are shed above a size threshold, taking a record from roughly
+10–18KB to about 2KB. Rated, manually added, watchlisted, hidden and underfilled
+titles never shed. `sourceShed` marks the absence as deliberate:
+`hasCurrentAiTags` skips the story-hash comparison for such a record (while
+still enforcing the prompt version), and `tagEvidenceOk` returns true for it,
+because re-validating tags against text the record no longer holds would delete
+grounded tags on the next load.
+
+**TMDB matching and identity (v97, v98, v104).** `tmdbSearchCandidate`
+previously fell back to the most *popular* result in the year window when
+nothing matched exactly, which silently attached another film's poster, id,
+genres, reception and review text — and review text feeds the tagger, so
+mismatched titles were tagged from the wrong film's audience reviews. A
+candidate must now clear a Dice-coefficient similarity floor
+(`TMDB_TITLE_MATCH_MIN = 0.6`) against the localised or original title; below it
+the search returns nothing, because no poster is better than a wrong one.
+
+Since discovery is TMDB-first, most records already hold an authoritative id.
+`fetchTmdbDataForMovie` resolves by id through `fetchTmdbDetailsById` whenever
+the record carries a *verified* id, and title search exists only to establish an
+id for a record that has none. An id is verified when it came from discovery or
+from an exact title match; a fuzzy match is deliberately not verified so it
+stays re-checkable.
+
+Records now store `tmdbTitle` and `tmdbYear` — the identity of what TMDB
+actually returned. Without them a wrong pairing was undetectable, since nothing
+stored disagreed. `tmdbIdentityMismatch` proves a mismatch from that stored
+identity; `clearTmdbIdentity` strips every TMDB-derived field (id, media type,
+poster, availability, review text and count, and the TMDB contribution to
+`reception`) while preserving Wikipedia identity, story text, tags, rating and
+user state, then resets `tmdbDataVersion` so the ordinary backfill re-resolves
+the title. `repairMismatchedTmdbIdentities` runs this at startup and never
+deletes a title. Legacy records that hold an id but no `tmdbTitle` are
+unverifiable rather than wrong: `retireUnverifiableTmdbIdentities` drops only
+their verified flag so they are re-resolved once through the similarity floor,
+after which they are self-checking. A verified id is only trusted when
+`tmdbTitle` is present and still agrees, so stickiness cannot protect a wrong
+id.
+
+Two further paths could fuse two films into one record and are now closed:
+
+- `applyFreshWikiMovie` deliberately preserves the previous record's TMDB
+  payload, and the retag path refreshes Wikipedia with `{tmdb:false}`. That is
+  correct only while the refresh stays on the same title; when it landed on a
+  different article the record adopted the new Wikipedia identity and kept the
+  old film's poster and id. The payload is now carried over only when the
+  identity still agrees, and is otherwise dropped for re-resolution.
+- `movieIdentityKeys` includes a `tmdb:<type>:<id>` key, and `sameMovieIdentity`
+  matched on any single key, so one wrong id merged two different films through
+  `collapseDuplicateMovies` and through `findExistingMovieByIdentity` on every
+  upsert. A shared Wikipedia page id or title+year+format key remains
+  authoritative; a shared TMDB id alone now additionally requires the titles to
+  be compatible.
+
+`TMDB_DATA_VERSION` is **7**.
+
+**Non-narrative formats (v96, v97, v102).** Titles without a story are excluded
+entirely, since CineLens recommends on story tags and such formats have nothing
+to tag. TMDB genre ids are the primary, wording-independent signal: discovery
+sends `without_genres` for Reality/Talk/News, `tmdbDetailsWithAvailability`
+reports the verdict (`TMDB_GENRE_MAP` drops those ids, so it would otherwise be
+lost), and it is stored as a sticky `movie.nonNarrative`. A text pattern is the
+fallback, covering reality, competition, talent, game, quiz, panel, talk, chat,
+variety, sketch, magazine, news, current-affairs, documentary-series, awards,
+telethon, wrestling and sports formats, plus stand-up specials and concert films
+for cinema. It is matched only against the *declarative head* of the lead
+sentence — cut at `about`, `set in`, `follows`, `which`, `starring` and similar
+— so a scripted drama about a talk show host is not excluded. Already-stored
+titles are purged at startup through `excludeStoredTitles`.
+
+**Genres as tags (v92, v93, v95).** Genres participate in the tag preference
+system, stored in `settings.tagPreferences` under a `genre:` prefix so Drive
+merge and settings sync are unchanged and a genre can never collide with a story
+tag of the same name. Preferences have three distinct states: key absent (no
+opinion — the learned weight applies in full), key present with `0` (explicitly
+neutral — the learned weight is suppressed), and key present with ±N (a stated
+bias). Before v93 the first two collapsed together, so "Neutral" did nothing but
+clear. A bare genre name is no longer a valid story tag (`isMetaTag` rejects the
+canonical genre vocabulary), because the same signal was otherwise counted twice
+— once through `tagEffects` and again through `genreEffects`.
+
+**Format balance (v100, v101, v102).** `predictTasteFit` sums over tags, so a
+title carrying more tags accumulates more and outranks a better-matched shorter
+one on volume — document-length bias. `tagMassLengthFactor` applies BM25-style
+pivoted length normalisation, `1 / ((1 - b) + b * mass / pivot)`, where mass is
+total tag *feature value*, pivot is the median mass across rated titles (stored
+per model, so it tracks the library), and `b = 0.75`. It is applied identically
+in training and scoring so the calibration fit stays consistent. Separately,
+`FORMAT_PREFERENCE_OPTIONS` exposes a *stated* format preference in the filter
+bar, scaling a title's distance from the model baseline rather than its whole
+score; it is excluded from `tasteOnly` callers so reception calibration does not
+read a deliberate preference as model error.
+
+### 31.16 The ten-usable-tag floor (v103, v104)
+
+The intended condition is that a completed title carries at least ten *usable*
+tags. Two defects prevented that.
+
+First, the floor counted tags as returned, while cards and scoring use
+`recommendationScoringTags` — the same list after `tagIsPresentable` removes
+bare generic words and any tag appearing in more than ten per cent of the
+library. Only the commit-time gates ran when the set was accepted, so a title
+could legitimately commit ten tags and display six. `usableTagCount` now
+measures the floor, the retry threshold, the continuation shortfall requested
+from Gemini, and `aiTagSetAlreadyStable`. Gemini is asked for
+`AI_TAG_MIN_COUNT + AI_TAG_USABLE_HEADROOM` (15–24) rather than 10–24, because
+some of every response is filtered out and without headroom the first pass would
+fall short on most titles and force a retry every time.
+
+Second, a best-effort commit was indistinguishable from a full one. Both wrote
+`status: 'verified'`, `hasCurrentAiTags` returned true, and the title left the
+tagging pipeline permanently at as few as six tags. The set is still committed —
+leaving it `building` re-queues it forever — but `aiTagging` now records
+`usableTagCount`, `underfilled` and `topUpAttempts`. `needsTagTopUp` returns
+those records to `pendingBackgroundAiMovies` and `aiTagCandidates` behind
+genuinely untagged work, on an `AI_TAG_TOPUP_COOLDOWN_MS` backoff and bounded by
+`AI_TAG_TOPUP_ATTEMPT_LIMIT`. A top-up seeds the request partial with the tags
+already held, so it extends the committed set rather than trading a good tag for
+a new one. `sourceTextShedEligible` refuses to shed an underfilled title,
+because shedding would remove the very text needed to top it up.
+
+The best-effort escape still measures the **raw** count. A title whose tags are
+individually fine but mostly too common could never reach ten usable ones, and
+gating the escape on the usable count would leave it retrying forever. Only a
+title returning fewer than `AI_TAG_BESTEFFORT_MIN` raw tags remains uncommitted.
+
+This raises the count at commit time; it cannot pin it there. `tagTooCommon` is a
+share of the library, so a tag counted as usable today can cross the threshold as
+the library grows and stop being displayed later, and such a title becomes
+eligible for a bounded top-up rather than silently degrading.
