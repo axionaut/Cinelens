@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 104;
+const APP_VERSION = 105;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -48,15 +48,16 @@ const AI_TAG_TOPUP_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 const AI_TAG_MAX_COUNT = 24;
 const AI_TAG_MIGRATION_VERSION = 1;
 // v91 pipeline rebuild — batch sizes are now the server's real ceiling
-// (Apps Script MAX_ITEMS = 20), not a hand-tuned throttle. Pacing is owned
-// entirely by the adaptive limiters below, so every *_REQUEST_DELAY_MS is 0:
+// Apps Script still accepts 20 items, but the configured 250K TPM budget makes
+// two worst-case story payloads the safe client batch. Pacing is owned by
+// the adaptive limiter below, so every *_REQUEST_DELAY_MS remains 0:
 // a fixed inter-request sleep is strictly worse than a token bucket, because
 // it idles the connection whenever the previous call was slow and it cannot
 // react when the upstream actually pushes back.
-const AI_TAG_BATCH_SIZE = 20;
-const AI_BACKGROUND_BATCH_SIZE = 20;
+const AI_TAG_BATCH_SIZE = 2;
+const AI_BACKGROUND_BATCH_SIZE = 2;
 const AI_BACKGROUND_REQUEST_DELAY_MS = 0;
-const AI_MANUAL_TAG_BATCH_SIZE = 20;
+const AI_MANUAL_TAG_BATCH_SIZE = 2;
 // Wikipedia resolution window per wave. Wider than the Gemini batch so several
 // full batches are ready to dispatch concurrently; wikiLimiter caps the actual
 // in-flight request count.
@@ -68,16 +69,19 @@ const AI_MANUAL_RETRY_LIMIT = 1;
 // lower limit tempting no longer exists. Lowering it would trade tag quality
 // for a speedup we already got elsewhere.
 const AI_TAG_RETRY_LIMIT = 3;
-// How many Gemini batches may be in flight at once. Each batch is 20 titles,
-// so 4 in flight = 80 titles being tagged concurrently vs 3 before.
+// Gemini project quota (confirmed August 2026). A one-token burst prevents
+// independent producers from spending several of the 15 RPM simultaneously;
+// requests can still overlap when a response takes longer than four seconds.
 const AI_TAG_LANE_CONCURRENCY = 4;
-const AI_TAG_LANE_RPM = 45;
+const AI_TAG_LANE_RPM = 15;
+const AI_TAG_LANE_TPM = 250000;
+const AI_TAG_LANE_RPD = 500;
 const AI_VOCABULARY_SAMPLE_SIZE = 240;
 const AI_TAG_CLOUD_NORMALIZE_EVERY = 100;
 const AI_TAG_CLOUD_NORMALIZE_VERSION = 'cinelens-tag-cloud-v2';
 const AI_REQUEST_DELAY_MS = 0;
-// A 20-item batch is a bigger prompt than the old 3-item one, so Gemini needs
-// longer to produce it. The limiter keeps other batches moving meanwhile.
+// Long story/evidence prompts can still take time; the limiter lets admitted
+// requests overlap while holding their start rate to the project quota.
 const AI_TAGGER_TIMEOUT_MS = 120 * 1000;
 // Every network call must be able to fail. A mobile browser routinely
 // suspends an in-flight fetch when the app is backgrounded or the phone
@@ -117,7 +121,7 @@ const AI_TAGGER_TIMEOUT_MS = 120 * 1000;
 // Wikipedia, and vice versa. That independence is most of the speedup.
 // ─────────────────────────────────────────────
 class AdaptiveLimiter {
-  constructor({name, rpm, concurrency, maxConcurrency, minConcurrency = 1, burst = 0}) {
+  constructor({name, rpm, concurrency, maxConcurrency, minConcurrency = 1, burst = 0, dailyLimit = 0}) {
     this.name = name;
     this.ratePerMs = Math.max(0, Number(rpm) || 0) / 60000;
     this.burst = Math.max(1, burst || Math.ceil((Number(rpm) || 60) / 12));
@@ -130,6 +134,13 @@ class AdaptiveLimiter {
     this.waiters = [];
     this.wins = 0;
     this.cooldownUntil = 0;
+    this.dailyLimit = Math.max(0, Number(dailyLimit) || 0);
+    this.dailyStorageKey = this.dailyLimit ? `cinelens_${name}_request_starts_v1` : '';
+    try {
+      this.dailyStarts = JSON.parse(localStorage.getItem(this.dailyStorageKey) || '[]').filter(Number.isFinite);
+    } catch (_) {
+      this.dailyStarts = [];
+    }
     this.stats = {ok: 0, throttled: 0, failed: 0};
   }
 
@@ -154,6 +165,18 @@ class AdaptiveLimiter {
       if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
       const wait = this.delayUntilReady();
       if (wait === 0) {
+        if (this.dailyLimit) {
+          const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+          this.dailyStarts = this.dailyStarts.filter(stamp => stamp > cutoff);
+          if (this.dailyStarts.length >= this.dailyLimit) {
+            const error = new Error('Daily CineLens tagging limit reached');
+            error.cinelensRateLimited = true;
+            error.retryAfterMs = Math.max(1000, this.dailyStarts[0] + 24 * 60 * 60 * 1000 - Date.now());
+            throw error;
+          }
+          this.dailyStarts.push(Date.now());
+          try { localStorage.setItem(this.dailyStorageKey, JSON.stringify(this.dailyStarts)); } catch (_) {}
+        }
         this.tokens -= 1;
         this.active++;
         return;
@@ -214,7 +237,7 @@ class AdaptiveLimiter {
   }
 
   snapshot() {
-    return {name: this.name, limit: this.limit, active: this.active, ...this.stats};
+    return {name: this.name, limit: this.limit, active: this.active, dailyStarts: this.dailyStarts.length, ...this.stats};
   }
 }
 
@@ -228,14 +251,16 @@ const wikiLimiter = new AdaptiveLimiter({name: 'wikipedia', rpm: 600, concurrenc
 // TMDB removed its published rate limit and tolerates ~50 req/s; 20/s is a
 // deliberately conservative fraction of that.
 const tmdbLimiter = new AdaptiveLimiter({name: 'tmdb', rpm: 1200, concurrency: 12, maxConcurrency: 24});
-// Gemini through Apps Script. Each call carries 20 titles, so even this modest
-// rate is ~900 titles/min of tagging headroom versus 15/min before.
+// Gemini through Apps Script: 15 RPM, 250K TPM and 500 requests per rolling
+// day. Two-title payloads preserve token headroom; the upstream remains
+// authoritative when another device shares the same API key.
 const aiLimiter = new AdaptiveLimiter({
   name: 'gemini',
   rpm: AI_TAG_LANE_RPM,
   concurrency: AI_TAG_LANE_CONCURRENCY,
-  maxConcurrency: 8,
-  burst: AI_TAG_LANE_CONCURRENCY
+  maxConcurrency: AI_TAG_LANE_CONCURRENCY,
+  burst: 1,
+  dailyLimit: AI_TAG_LANE_RPD
 });
 
 function pipelineLimiterSnapshot() {
@@ -1690,7 +1715,7 @@ async function normalizeTagCloudWithAi(opts={}) {
   tagCloudNormalizationAttemptedCount = rawCount;
   try {
     await reserveAiRequest(AI_REQUEST_DELAY_MS);
-    const response = await fetchWithTimeout(AI_TAGGER_URL, {
+    const response = await aiLimiter.run(() => fetchWithTimeout(AI_TAGGER_URL, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify({
@@ -1710,7 +1735,7 @@ async function normalizeTagCloudWithAi(opts={}) {
           'Be conservative: uncertain pairs must remain separate.'
         ].join(' ')
       })
-    }, AI_TAGGER_TIMEOUT_MS);
+    }, AI_TAGGER_TIMEOUT_MS));
     if (!response.ok) {
       const error=new Error(`AI tag normalization HTTP ${response.status}`);
       if (response.status === 429) {
@@ -9644,7 +9669,7 @@ async function generateTasteStory({force=false, rng=Math.random, variationSeed='
   renderTasteStoryCard();
   try {
     await reserveAiRequest(AI_REQUEST_DELAY_MS);
-    const response=await fetchWithTimeout(AI_TAGGER_URL, {
+    const response=await aiLimiter.run(() => fetchWithTimeout(AI_TAGGER_URL, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify({task:'generate-taste-story', profile:{
@@ -9652,7 +9677,7 @@ async function generateTasteStory({force=false, rng=Math.random, variationSeed='
         previousStoryTitle:tasteStoryTitleHistory(existing)[0] || '',
         previousStoryTitles:tasteStoryTitleHistory(existing)
       }})
-    }, AI_TAGGER_TIMEOUT_MS);
+    }, AI_TAGGER_TIMEOUT_MS));
     if (!response.ok) {
       const error=new Error(`Taste story HTTP ${response.status}`);
       if (response.status === 429) {

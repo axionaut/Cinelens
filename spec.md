@@ -4253,3 +4253,22 @@ This raises the count at commit time; it cannot pin it there. `tagTooCommon` is 
 share of the library, so a tag counted as usable today can cross the threshold as
 the library grows and stop being displayed later, and such a title becomes
 eligible for a bounded top-up rather than silently degrading.
+
+### 31.17 Gemini quota-aware scheduling (v105)
+
+The Gemini project allowance is 15 requests per minute, 250,000 tokens per
+minute and 500 requests per day. This supersedes the v91 Gemini throughput
+assumption of 45 requests per minute and twenty-title client batches.
+
+All browser-originated Gemini work, including title tagging, tag-cloud
+normalization and the generated taste story, now enters the same limiter. It
+admits one request start every four seconds, permits at most four slow requests
+to overlap, and does not use an initial burst. Title-tag payloads contain at
+most two titles so worst-case 14,000-character story inputs plus structured
+tag evidence retain headroom beneath the token-per-minute allowance.
+
+The limiter also records request starts in local storage and stops after 500 in
+a rolling 24-hour window, surviving reloads. This is a client-side safety guard;
+Gemini remains authoritative for quota shared by another browser or device,
+and its rate-limit response continues to activate the existing adaptive
+cooldown without discarding pending titles.
