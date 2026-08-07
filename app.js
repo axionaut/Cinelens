@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 105;
+const APP_VERSION = 106;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -8395,6 +8395,8 @@ function buildCard(movie, opts={}) {
 }
 
 let openCardModalId = '';
+let openCardModalIds = [];
+let movieCardModalGestureAt = 0;
 
 function toggleCardReveal(event, card) {
   const interactive = event?.target?.closest?.('button,a,input,select,textarea,.star,.card-act,.source-link-btn,.genre-chip,.tag-insight-chip');
@@ -8415,11 +8417,32 @@ function ensureMovieCardModal() {
   modal.innerHTML = `
     <div class="movie-card-modal-dialog">
       <button class="movie-card-modal-close" type="button" onclick="closeMovieCardModal()" aria-label="Close title details">×</button>
+      <button class="movie-card-modal-nav previous" type="button" onclick="navigateMovieCardModal(-1)" aria-label="Previous title">&#8249;</button>
       <div class="movie-card-modal-content"></div>
+      <button class="movie-card-modal-nav next" type="button" onclick="navigateMovieCardModal(1)" aria-label="Next title">&#8250;</button>
     </div>`;
   modal.addEventListener('click', event => {
     if (event.target === modal) closeMovieCardModal();
   });
+  modal.addEventListener('wheel', event => {
+    if (Math.abs(event.deltaX) < 36 || Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
+    const now = Date.now();
+    if (now - movieCardModalGestureAt < 450) return;
+    movieCardModalGestureAt = now;
+    if (navigateMovieCardModal(event.deltaX > 0 ? 1 : -1)) event.preventDefault();
+  }, {passive:false});
+  let swipeStart = null;
+  modal.addEventListener('pointerdown', event => {
+    if (event.pointerType === 'touch') swipeStart = {x:event.clientX, y:event.clientY};
+  });
+  modal.addEventListener('pointerup', event => {
+    if (!swipeStart || event.pointerType !== 'touch') return;
+    const dx = event.clientX - swipeStart.x;
+    const dy = event.clientY - swipeStart.y;
+    swipeStart = null;
+    if (Math.abs(dx) >= 55 && Math.abs(dx) > Math.abs(dy)) navigateMovieCardModal(dx < 0 ? 1 : -1);
+  });
+  modal.addEventListener('pointercancel', () => { swipeStart = null; });
   document.body.appendChild(modal);
   return modal;
 }
@@ -8429,6 +8452,9 @@ function openMovieCardModal(card) {
   const content = modal.querySelector('.movie-card-modal-content');
   if (!content) return;
   const clone = card.cloneNode(true);
+  const sourceCards = [...(card.parentElement?.querySelectorAll?.('.movie-card') || [])]
+    .filter(source => !source.closest('.movie-card-modal'));
+  if (sourceCards.length) openCardModalIds = sourceCards.map(source => source.id.replace(/^card-/, ''));
   openCardModalId = card.id.replace(/^card-/, '');
   clone.id = `modal-card-${openCardModalId}`;
   clone.removeAttribute('onclick');
@@ -8440,7 +8466,31 @@ function openMovieCardModal(card) {
   content.replaceChildren(clone);
   modal.hidden = false;
   document.body.classList.add('movie-modal-open');
+  updateMovieCardModalNavigation();
   modal.querySelector('.movie-card-modal-close')?.focus();
+}
+
+function updateMovieCardModalNavigation() {
+  const modal = document.getElementById('movieCardModal');
+  if (!modal) return;
+  const index = openCardModalIds.indexOf(openCardModalId);
+  const previous = modal.querySelector('.movie-card-modal-nav.previous');
+  const next = modal.querySelector('.movie-card-modal-nav.next');
+  if (previous) previous.disabled = index <= 0;
+  if (next) next.disabled = index < 0 || index >= openCardModalIds.length - 1;
+}
+
+function navigateMovieCardModal(direction) {
+  const modal = document.getElementById('movieCardModal');
+  if (!modal || modal.hidden) return false;
+  const index = openCardModalIds.indexOf(openCardModalId);
+  const nextId = openCardModalIds[index + Math.sign(Number(direction) || 0)];
+  if (!nextId) return false;
+  const source = document.getElementById(`card-${nextId}`);
+  if (!source || source.closest('.movie-card-modal')) return false;
+  openMovieCardModal(source);
+  modal.querySelector(`.movie-card-modal-nav.${direction < 0 ? 'previous' : 'next'}`)?.focus();
+  return true;
 }
 
 function refreshOpenMovieCardModal() {
@@ -8463,11 +8513,17 @@ function closeMovieCardModal() {
   document.body.classList.remove('movie-modal-open');
   const opener = document.getElementById(`card-${openCardModalId}`);
   openCardModalId = '';
+  openCardModalIds = [];
   opener?.focus?.();
 }
 
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') closeMovieCardModal();
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    const modal = document.getElementById('movieCardModal');
+    const typing = event.target?.matches?.('input,textarea,select,[contenteditable="true"]');
+    if (!modal?.hidden && !typing && navigateMovieCardModal(event.key === 'ArrowRight' ? 1 : -1)) event.preventDefault();
+  }
 });
 
 function renderGenres(movie, matchedGenres=null) {

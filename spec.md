@@ -4272,3 +4272,12 @@ a rolling 24-hour window, surviving reloads. This is a client-side safety guard;
 Gemini remains authoritative for quota shared by another browser or device,
 and its rate-limit response continues to activate the existing adaptive
 cooldown without discarding pending titles.
+
+### 31.18 Horizontal title navigation in the card modal (v106)
+
+Opening a title card captures the order of the cards in that rendered grid.
+The detail modal provides previous and next side controls and supports the Left
+and Right arrow keys, horizontal mouse-wheel or trackpad gestures, and
+left/right touch swipes. Navigation follows the current rendered order, so it
+respects the active view, sort and filters. The controls disable at the first
+and last title rather than wrapping to the opposite end.
