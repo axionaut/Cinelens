@@ -4281,3 +4281,17 @@ and Right arrow keys, horizontal mouse-wheel or trackpad gestures, and
 left/right touch swipes. Navigation follows the current rendered order, so it
 respects the active view, sort and filters. The controls disable at the first
 and last title rather than wrapping to the opposite end.
+
+### 31.19 Authoritative Gemini cooldown admission (v107)
+
+A Gemini request checks the persisted cooldown only after the shared limiter
+grants its actual start slot. Work queued before a sibling receives a rate-limit
+response therefore cannot reach the Apps Script during the newly established
+cooldown, and deferred collection batches stop entering the lane as soon as the
+cooldown exists. A rejected preflight does not consume the local daily-request
+allowance because no upstream request was made.
+
+Successful work that was already in flight when another request was throttled
+must not clear that newer cooldown. Success resets the escalation count only
+after the active cooldown has naturally elapsed; pending titles remain queued
+and resume through the normal scheduler afterward.

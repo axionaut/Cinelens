@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 106;
+const APP_VERSION = 107;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -165,18 +165,6 @@ class AdaptiveLimiter {
       if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
       const wait = this.delayUntilReady();
       if (wait === 0) {
-        if (this.dailyLimit) {
-          const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-          this.dailyStarts = this.dailyStarts.filter(stamp => stamp > cutoff);
-          if (this.dailyStarts.length >= this.dailyLimit) {
-            const error = new Error('Daily CineLens tagging limit reached');
-            error.cinelensRateLimited = true;
-            error.retryAfterMs = Math.max(1000, this.dailyStarts[0] + 24 * 60 * 60 * 1000 - Date.now());
-            throw error;
-          }
-          this.dailyStarts.push(Date.now());
-          try { localStorage.setItem(this.dailyStorageKey, JSON.stringify(this.dailyStarts)); } catch (_) {}
-        }
         this.tokens -= 1;
         this.active++;
         return;
@@ -220,6 +208,20 @@ class AdaptiveLimiter {
   }
 
   recordFailure() { this.stats.failed++; this.wins = 0; }
+
+  recordDailyStart() {
+    if (!this.dailyLimit) return;
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    this.dailyStarts = this.dailyStarts.filter(stamp => stamp > cutoff);
+    if (this.dailyStarts.length >= this.dailyLimit) {
+      const error = new Error('Daily CineLens tagging limit reached');
+      error.cinelensRateLimited = true;
+      error.retryAfterMs = Math.max(1000, this.dailyStarts[0] + 24 * 60 * 60 * 1000 - Date.now());
+      throw error;
+    }
+    this.dailyStarts.push(Date.now());
+    try { localStorage.setItem(this.dailyStorageKey, JSON.stringify(this.dailyStarts)); } catch (_) {}
+  }
 
   async run(fn) {
     await this.acquire();
@@ -1715,7 +1717,7 @@ async function normalizeTagCloudWithAi(opts={}) {
   tagCloudNormalizationAttemptedCount = rawCount;
   try {
     await reserveAiRequest(AI_REQUEST_DELAY_MS);
-    const response = await aiLimiter.run(() => fetchWithTimeout(AI_TAGGER_URL, {
+    const response = await runAiRequest(() => fetchWithTimeout(AI_TAGGER_URL, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify({
@@ -2135,7 +2137,7 @@ async function postAiTaggerBatch(items, partials, opts={}) {
   // v91: admission control lives in aiLimiter, so up to
   // AI_TAG_LANE_CONCURRENCY of these batches are genuinely in flight at once
   // and a 429 halves the lane instead of stopping the app.
-  return aiLimiter.run(() => postAiTaggerBatchRequest(items, partials, opts));
+  return runAiRequest(() => postAiTaggerBatchRequest(items, partials, opts));
 }
 
 async function postAiTaggerBatchRequest(items, partials, opts={}) {
@@ -4318,6 +4320,9 @@ function registerAiRateLimit() {
 
 function clearAiRateLimitAfterSuccess() {
   if (!state.meta) return;
+  // A request admitted before a sibling hit 429 may finish successfully after
+  // the cooldown was registered. That older success must not reopen the lane.
+  if (aiRateLimitRemaining()) return;
   state.meta.aiRateLimitUntil=0;
   state.meta.aiRateLimitCount=0;
 }
@@ -4330,6 +4335,16 @@ function clearAiRateLimitAfterSuccess() {
 async function reserveAiRequest(_requestDelay=AI_REQUEST_DELAY_MS) {
   if (fetchAbortRequested) throw new DOMException('Aborted','AbortError');
   if (aiRateLimitRemaining()) throw aiRateLimitError();
+}
+
+async function runAiRequest(request) {
+  return aiLimiter.run(async () => {
+    // Check only after the limiter grants a real start slot. A batch can wait
+    // here behind another request that registers a cooldown in the meantime.
+    await reserveAiRequest();
+    aiLimiter.recordDailyStart();
+    return request();
+  });
 }
 
 async function expandPool(manual=true) {
@@ -4465,6 +4480,7 @@ async function expandPool(manual=true) {
   const kickTagBatches = ({drain = false} = {}) => {
     while (
       !fetchAbortRequested &&
+      !aiRateLimitRemaining() &&
       pendingAiMovies.length >= (drain ? 1 : AI_TAG_BATCH_SIZE) &&
       inFlightTagBatches.size < AI_TAG_LANE_CONCURRENCY * 2
     ) {
@@ -9725,7 +9741,7 @@ async function generateTasteStory({force=false, rng=Math.random, variationSeed='
   renderTasteStoryCard();
   try {
     await reserveAiRequest(AI_REQUEST_DELAY_MS);
-    const response=await aiLimiter.run(() => fetchWithTimeout(AI_TAGGER_URL, {
+    const response=await runAiRequest(() => fetchWithTimeout(AI_TAGGER_URL, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify({task:'generate-taste-story', profile:{
