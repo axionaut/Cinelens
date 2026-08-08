@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 108;
+const APP_VERSION = 109;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -3617,15 +3617,21 @@ function sortMovies(rows, fallback='title') {
   }
   direction = direction === 'asc' ? 1 : -1;
   const compare = (a, b) => (a - b) * direction;
+  const compareOptional = (a, b) => {
+    const aKnown = Number.isFinite(a) && a > 0;
+    const bKnown = Number.isFinite(b) && b > 0;
+    if (aKnown !== bKnown) return aKnown ? -1 : 1;
+    return aKnown ? compare(a, b) : 0;
+  };
   const sorted = [...rows];
   if (effective === 'random') {
     const seed = String(state.settings.shuffleSeed || 1);
     return sorted.sort((a,b)=>stableHash(`${seed}:${a.id || a.key || a.title}`)-stableHash(`${seed}:${b.id || b.key || b.title}`));
   }
   if (effective === 'rating') return sorted.sort((a,b)=>compare(Number(a.rating||0),Number(b.rating||0))||titleSortKey(a).localeCompare(titleSortKey(b)));
-  if (effective === 'year') return sorted.sort((a,b)=>compare(Number(a.year||0),Number(b.year||0))||titleSortKey(a).localeCompare(titleSortKey(b)));
-  if (effective === 'ratedAt') return sorted.sort((a,b)=>compare(ratingTimestamp(a) || 0,ratingTimestamp(b) || 0)||titleSortKey(a).localeCompare(titleSortKey(b)));
-  if (effective === 'addedAt') return sorted.sort((a,b)=>compare(movieAddedTime(a),movieAddedTime(b))||titleSortKey(a).localeCompare(titleSortKey(b)));
+  if (effective === 'year') return sorted.sort((a,b)=>compareOptional(Number(a.year||0),Number(b.year||0))||titleSortKey(a).localeCompare(titleSortKey(b)));
+  if (effective === 'ratedAt') return sorted.sort((a,b)=>compareOptional(ratingTimestamp(a),ratingTimestamp(b))||titleSortKey(a).localeCompare(titleSortKey(b)));
+  if (effective === 'addedAt') return sorted.sort((a,b)=>compareOptional(movieAddedTime(a),movieAddedTime(b))||titleSortKey(a).localeCompare(titleSortKey(b)));
   return sorted.sort((a,b)=>titleSortKey(a).localeCompare(titleSortKey(b)) * direction);
 }
 
@@ -7232,8 +7238,18 @@ function updateControlDeck() {
   const sortDirectionBtn=document.getElementById('sortDirectionBtn');
   if (sortDirectionBtn) {
     const ascending = state.settings.sortDirection === 'asc';
+    const mode = state.settings.sortMode || 'recommended';
+    const descriptions = {
+      recommended:ascending ? 'Lowest match / reverse view order first' : 'Best match / normal view order first',
+      rating:ascending ? 'Lowest rating first' : 'Highest rating first',
+      year:ascending ? 'Oldest release first' : 'Newest release first',
+      ratedAt:ascending ? 'Earliest rated first' : 'Last rated first',
+      addedAt:ascending ? 'Earliest added first' : 'Latest added first',
+      title:ascending ? 'Title A to Z' : 'Title Z to A'
+    };
     sortDirectionBtn.textContent = ascending ? '↑' : '↓';
-    sortDirectionBtn.title = ascending ? 'Sort ascending' : 'Sort descending';
+    sortDirectionBtn.disabled = mode === 'random';
+    sortDirectionBtn.title = mode === 'random' ? 'Shuffle has no ascending or descending direction' : descriptions[mode] || (ascending ? 'Sort ascending' : 'Sort descending');
     sortDirectionBtn.setAttribute('aria-label', sortDirectionBtn.title);
   }
   const shuffleBtn=document.getElementById('shuffleAgainBtn');
@@ -7376,6 +7392,7 @@ function filterByGenreFromCard(genre, event) {
 
 function updateSortMode(mode) {
   state.settings.sortMode = mode || 'recommended';
+  if (state.settings.sortMode !== 'random') state.settings.sortDirection = state.settings.sortMode === 'title' ? 'asc' : 'desc';
   if (state.settings.sortMode === 'random') refreshShuffleSeed();
   saveViewState();
   renderActiveCards();

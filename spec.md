@@ -4295,3 +4295,16 @@ Successful work that was already in flight when another request was throttled
 must not clear that newer cooldown. Success resets the escalation count only
 after the active cooldown has naturally elapsed; pending titles remain queued
 and resume through the normal scheduler afterward.
+
+### 31.20 Explicit sort direction and missing-value semantics (v109)
+
+Choosing a sort field resets it to its natural first view: Title uses A to Z;
+Best match, rating, release year, rating date and date added use descending order.
+The adjacent arrow describes that concrete order. It is disabled for Surprise
+me because a shuffle has no ascending or descending direction.
+
+Last rated date uses `ratedAt`, which changes whenever the user's star rating
+for a title changes. On the Rated view, Best match / view default is already
+newest-rated-first, so those two modes can intentionally produce the same order.
+Unknown years and missing rating/added dates remain at the end in both sort
+directions instead of jumping to the top in ascending order.
