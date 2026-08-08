@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 107;
+const APP_VERSION = 108;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -7376,7 +7376,7 @@ function filterByGenreFromCard(genre, event) {
 
 function updateSortMode(mode) {
   state.settings.sortMode = mode || 'recommended';
-  if (state.settings.sortMode === 'random' && !state.settings.shuffleSeed) state.settings.shuffleSeed = Date.now();
+  if (state.settings.sortMode === 'random') refreshShuffleSeed();
   saveViewState();
   renderActiveCards();
   updateControlDeck();
@@ -7391,10 +7391,15 @@ function toggleSortDirection() {
 
 function shuffleAgain() {
   state.settings.sortMode = 'random';
-  state.settings.shuffleSeed = Date.now();
+  refreshShuffleSeed();
   saveViewState();
   renderActiveCards();
   updateControlDeck();
+}
+
+function refreshShuffleSeed() {
+  const previous = Number(state.settings.shuffleSeed) || 0;
+  state.settings.shuffleSeed = Math.max(Date.now(), previous + 1);
 }
 
 function syncUnifiedSearchClearButton() {
