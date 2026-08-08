@@ -4308,3 +4308,10 @@ for a title changes. On the Rated view, Best match / view default is already
 newest-rated-first, so those two modes can intentionally produce the same order.
 Unknown years and missing rating/added dates remain at the end in both sort
 directions instead of jumping to the top in ascending order.
+
+### 31.21 Release asset cache invalidation (v110)
+
+The stylesheet and application-script query versions in `index.html` advance
+with `APP_VERSION`. A deployed release therefore requests a new asset URL and
+cannot remain on an older CineLens version because the browser cached the prior
+JavaScript response.
