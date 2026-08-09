@@ -4315,3 +4315,40 @@ The stylesheet and application-script query versions in `index.html` advance
 with `APP_VERSION`. A deployed release therefore requests a new asset URL and
 cannot remain on an older CineLens version because the browser cached the prior
 JavaScript response.
+
+### 31.22 Tag-first collection backpressure (v111)
+
+Automatic and manual pool expansion are subordinate to recommendation-ready AI
+tag coverage. Tag debt is the number of active titles for which
+`hasCurrentAiTags()` is false; retry backoff, source refresh, cooldown and an
+in-flight request do not hide that debt. The loose historical `movie.tagged`
+flag is not an admission signal, and the header's Tagged count now uses the same
+current verified-tag definition as the recommendation pipeline.
+
+Collection and tagging may overlap by at most two normal AI waves. At 16 titles
+of debt, new discovery stops and remains stopped until debt drains to 8 or
+fewer. This 16/8 hysteresis preserves bounded lane overlap without fetch/tag
+ping-pong. An active discovery window also checks the gate before each worker
+claims another candidate and reserves debt capacity before its network request,
+so concurrent workers cannot push retained debt beyond the 16-title ceiling.
+The closed mid-band state is persisted, so a reload at 9–15 titles cannot bypass
+the required drain to 8.
+Explicit Expand Pool obeys the same rule; it resumes tagging and reports the
+debt instead of adding another collection run. Adding one specific title by
+search remains a direct user action and is not blocked.
+
+Gemini cooldown and the rolling daily request allowance also close collection.
+Their expiry, a completed AI wave and a scheduled per-title retry all re-evaluate
+the collection gate without requiring a reload or foreground event. Backed-off
+failures receive an explicit future wake-up, including the first two-minute
+retry tier, and due underfilled-tag top-ups use the same scheduler.
+
+Concurrent Gemini batches settle independently. A failed request marks only
+its still-unresolved titles for retry; successful titles committed earlier in
+that same request or a sibling batch are retained. Titles missing Wikipedia
+story text enter a bounded source-recovery lane, and reception/TMDB completion
+wakes tagging as soon as required source evidence becomes ready. Hard untagged
+debt always runs before optional top-ups of already-current tag sets. A
+known-exhausted daily allowance rejects before an upstream request is made, so
+queued batches do not remain parked inside a collection run until the rolling
+24-hour slot reopens.

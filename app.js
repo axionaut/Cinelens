@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 110;
+const APP_VERSION = 111;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -160,9 +160,24 @@ class AdaptiveLimiter {
     return this.ratePerMs > 0 ? Math.ceil((1 - this.tokens) / this.ratePerMs) : Infinity;
   }
 
+  dailyRetryAfter(now = Date.now()) {
+    if (!this.dailyLimit) return 0;
+    const cutoff = now - 24 * 60 * 60 * 1000;
+    this.dailyStarts = this.dailyStarts.filter(stamp => stamp > cutoff);
+    if (this.dailyStarts.length < this.dailyLimit) return 0;
+    return Math.max(1, this.dailyStarts[0] + 24 * 60 * 60 * 1000 - now);
+  }
+
   async acquire() {
     for (;;) {
       if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
+      const dailyWait = this.dailyRetryAfter();
+      if (dailyWait) {
+        const error = new Error('Daily CineLens tagging limit reached');
+        error.cinelensRateLimited = true;
+        error.retryAfterMs = dailyWait;
+        throw error;
+      }
       const wait = this.delayUntilReady();
       if (wait === 0) {
         this.tokens -= 1;
@@ -463,6 +478,7 @@ let selectedTag = '';
 let tagDetailView = 'all';
 let tagDetailVisibleLimit = 40;
 let poolExpansionInProgress = false;
+let collectionWaitingForAiTags = false;
 let fetchAbortRequested = false;
 let lastAutoExpandAt = 0;
 // v91: the fixed Wikipedia stopwatch/pause pair (850ms between requests, a
@@ -537,6 +553,12 @@ const COLLECTION_FETCH_CONCURRENCY = 12;
 // How many candidates to pull from discovery per window. Large enough that the
 // worker pool never starves waiting on the next discovery round-trip.
 const COLLECTION_DISCOVERY_WINDOW = 60;
+// Collection may overlap a small amount of Gemini work, but it must never run
+// far enough ahead to turn CineLens into an untagged title database. Two full
+// AI waves are the maximum debt; once reached, collection stays closed until
+// one wave or less remains. The gap prevents fetch/tag ping-pong at one title.
+const COLLECTION_TAG_DEBT_HIGH_WATER = AI_TAG_LANE_CONCURRENCY * AI_BACKGROUND_BATCH_SIZE * 2;
+const COLLECTION_TAG_DEBT_LOW_WATER = AI_TAG_LANE_CONCURRENCY * AI_BACKGROUND_BATCH_SIZE;
 // ─────────────────────────────────────────────
 // v94 — SOURCE TEXT SHEDDING
 //
@@ -1393,7 +1415,9 @@ function buildStoryTagSet(storyText, meta={}, stats=descriptorCorpusStats(), opt
 // itself (V8 caches a string's hash code, so repeat lookups are cheap) and
 // holds only references to strings the records already own.
 const storyHashMemo = new Map();
-const STORY_HASH_MEMO_CAP = 4000;
+// Keep at least a full large library resident. Clearing this below the active
+// pool size makes consecutive debt/health scans re-hash every story forever.
+const STORY_HASH_MEMO_CAP = 12000;
 function aiStoryHash(storyText='') {
   const text = String(storyText || '').trim();
   const cached = storyHashMemo.get(text);
@@ -4296,6 +4320,14 @@ function aiRateLimitRemaining(now=Date.now()) {
   return Math.max(0,(Number(state.meta?.aiRateLimitUntil || 0) || 0) - now);
 }
 
+function effectiveAiCooldownRemaining(now=Date.now()) {
+  return Math.max(
+    aiRateLimitRemaining(now),
+    Math.max(0, Number(aiLimiter.cooldownUntil || 0) - now),
+    aiLimiter.dailyRetryAfter(now)
+  );
+}
+
 function aiRateLimitError() {
   const error=new Error('Gemini rate-limit cooldown active');
   error.cinelensRateLimited=true;
@@ -4359,13 +4391,26 @@ async function expandPool(manual=true) {
     showToast('Connect Drive first to restore this device before collecting titles.', '');
     return;
   }
-  if (!manual && (autoFetchPaused || !shouldRunBackgroundCollection())) return;
 
   if (manual) {
     autoFetchPaused = false;
     state.meta = state.meta || {};
     state.meta.collectionActive = true;
   }
+  const initialTagDebt = activeAiTagDebtCount();
+  if (collectionBlockedByAiTags(initialTagDebt)) {
+    state.meta.collectionActive = false;
+    scheduleBackgroundAiQueue();
+    updateLibraryHealth();
+    if (manual) showToast(
+      initialTagDebt
+        ? `Tagging ${initialTagDebt} pending titles before collecting more.`
+        : 'Gemini is cooling down; collection will resume when tagging is available.',
+      ''
+    );
+    return;
+  }
+  if (!manual && (autoFetchPaused || !shouldRunBackgroundCollection())) return;
 
   poolExpansionInProgress = true;
   fetchAbortRequested = false;
@@ -4382,18 +4427,16 @@ async function expandPool(manual=true) {
   const parserReasons = {};
   const seenThisRun = new Set();
   const pendingAiMovies = [];
-  // v91: tagging no longer blocks collection. Before, every 3rd kept title the
-  // fetch loop stopped dead and awaited a full Gemini round trip (12s admission
-  // gate + 10-30s of Apps Script and model latency), so the collection rate was
-  // really the *tagging* rate — the single biggest reason the library grew as
-  // slowly as it did. Batches are now dispatched into the AI lane and tracked
-  // here; the fetch workers keep going, and the run only waits for outstanding
-  // batches once, at the end.
+  // Tagging overlaps collection only inside the bounded debt window. Batches
+  // are dispatched without making every fetch wait on a Gemini round trip;
+  // the 16/8 gate prevents that overlap becoming a title-only backlog.
   const inFlightTagBatches = new Set();
   let added = 0;
   let attempts = 0;
   let aiFailure = '';
   let collectionSatisfied = false;
+  let liveTagDebt = initialTagDebt;
+  let reservedTagDebt = 0;
   let pendingCollectionSaveIds = new Set();
 
   const noteCollectionSave = movie => {
@@ -4439,6 +4482,7 @@ async function expandPool(manual=true) {
 
     try {
       const result = await requestAiTags(movies, manual ? {} : {deferUi:true});
+      liveTagDebt = Math.max(0, liveTagDebt - Number(result?.tagged || 0));
       outcomes.ai += Number(result?.failed || 0);
       if (manual) {
         rebuildTagBrain();
@@ -4447,10 +4491,21 @@ async function expandPool(manual=true) {
         deferRecommendationRefresh();
       }
       saveCollectionState();
-      if (!manual && !shouldRunBackgroundCollection()) collectionSatisfied = true;
+      if (collectionBlockedByAiTags(liveTagDebt)) collectionSatisfied = true;
     } catch (error) {
       const message = String(error?.message || error);
-      outcomes.ai += movies.length;
+      // Results commit per title before sparse siblings recurse. Preserve any
+      // completed titles if a later sibling or continuation fails.
+      const unresolved = movies.filter(movie => !hasCurrentAiTags(movie));
+      const newlyResolved = movies.length - unresolved.length;
+      if (newlyResolved) {
+        liveTagDebt = Math.max(0, liveTagDebt - newlyResolved);
+        if (manual) {
+          rebuildTagBrain();
+          computeTagWeights();
+        } else deferRecommendationRefresh();
+      }
+      outcomes.ai += unresolved.length;
       if (isExternalRateLimitError(error)) {
         if (!aiRateLimitRemaining()) registerAiRateLimit();
         saveLocalState({silentUi:true,preserveUpdatedAt:true,driveProfileOnly:true});
@@ -4460,20 +4515,7 @@ async function expandPool(manual=true) {
         return;
       }
 
-      movies.forEach(movie => {
-        movie.aiTagging = {
-          ...(movie.aiTagging || {}),
-          status:'building',
-          promptVersion:AI_TAG_PROMPT_VERSION,
-          storyHash:aiStoryHash(aiTagSourceText(movie)),
-          error:message,
-          failCount:Number(movie.aiTagging?.failCount || 0) + 1,
-          attemptedAt:nowStamp()
-        };
-        movie.retagStatus = 'needs-ai-tags';
-        movie.retagMessage = 'AI retry pending';
-        touchRecord(movie);
-      });
+      unresolved.forEach(movie => markAiBatchRetryFailure(movie, error));
       saveCollectionState();
       console.warn('Background AI tagging deferred for this batch:', message);
       if (manual) aiFailure = message;
@@ -4486,7 +4528,7 @@ async function expandPool(manual=true) {
   const kickTagBatches = ({drain = false} = {}) => {
     while (
       !fetchAbortRequested &&
-      !aiRateLimitRemaining() &&
+      !effectiveAiCooldownRemaining() &&
       pendingAiMovies.length >= (drain ? 1 : AI_TAG_BATCH_SIZE) &&
       inFlightTagBatches.size < AI_TAG_LANE_CONCURRENCY * 2
     ) {
@@ -4497,7 +4539,9 @@ async function expandPool(manual=true) {
   };
 
   const awaitTagBatches = async () => {
-    while (inFlightTagBatches.size) {
+    while (!fetchAbortRequested && (pendingAiMovies.length || inFlightTagBatches.size)) {
+      kickTagBatches({drain:true});
+      if (!inFlightTagBatches.size) break;
       await Promise.allSettled([...inFlightTagBatches]);
     }
   };
@@ -4534,6 +4578,7 @@ async function expandPool(manual=true) {
       let aborted = false;
 
       const exhausted = () => fetchAbortRequested || collectionSatisfied ||
+        collectionBlockedByAiTags(liveTagDebt) ||
         attempts >= attemptBudget || added >= FETCH_MAX_ADDED_PER_RUN;
 
       const runCandidate = async candidate => {
@@ -4578,8 +4623,13 @@ async function expandPool(manual=true) {
             noteDiscoveryEncounter(candidate, 'excluded-after-fetch', 'manual removal identity');
           } else if (movie && meetsYearCutoff(movie) && matchesExpansionMode(movie, fetchMode) && (!lane || laneMatchesMovie(movie, lane))) {
             const existingMovie = state.movies[movie.id] || findExistingMovieByIdentity(movie);
+            const existingWasCurrent = existingMovie ? hasCurrentAiTags(existingMovie) : false;
             const stored = upsertMoviePreservingUserState(movie, existingMovie);
+            const storedIsCurrent = hasCurrentAiTags(stored);
             noteCollectionSave(stored);
+
+            if (!existingMovie && !storedIsCurrent) liveTagDebt++;
+            else if (existingMovie && existingWasCurrent !== storedIsCurrent) liveTagDebt += storedIsCurrent ? -1 : 1;
 
             if (existingMovie) outcomes.duplicate++;
             else {
@@ -4590,6 +4640,7 @@ async function expandPool(manual=true) {
             // to be the collection loop's stall point.
             if (!hasCurrentAiTags(stored)) pendingAiMovies.push({movie:stored, lane});
             kickTagBatches();
+            if (collectionBlockedByAiTags(liveTagDebt)) collectionSatisfied = true;
             noteDiscoveryEncounter(candidate, existingMovie ? 'duplicate' : 'added');
           } else if (movie) {
             outcomes.filtered++;
@@ -4606,9 +4657,23 @@ async function expandPool(manual=true) {
 
       const fetchWorker = async () => {
         while (!exhausted() && !aborted) {
+          // Reserve capacity before the network wait. Without this, all twelve
+          // workers could pass a 15-title debt check together and retain twelve
+          // more records before the first completion closed the gate.
+          // Reconcile with the real library too: reception/TMDB maintenance can
+          // invalidate an existing story hash while this collection run waits.
+          liveTagDebt = Math.max(liveTagDebt, activeAiTagDebtCount());
+          if (liveTagDebt + reservedTagDebt >= COLLECTION_TAG_DEBT_HIGH_WATER) {
+            return;
+          }
           const candidate = queue.shift();
           if (!candidate) return;
-          await runCandidate(candidate);
+          reservedTagDebt++;
+          try {
+            await runCandidate(candidate);
+          } finally {
+            reservedTagDebt = Math.max(0, reservedTagDebt - 1);
+          }
           // One cheap progress tick per completion, throttled inside
           // showFetchProgress; no forced layout, no grid rebuild.
           if (!(attempts % 4)) progress('Collecting titles…', candidate?.title || '');
@@ -5801,7 +5866,9 @@ async function runReceptionBackfill() {
   } finally {
     receptionBackfillInProgress = false;
     settleBackgroundPipelineProgress(receptionBackfillPendingCount() ? 10000 : 0);
+    scheduleBackgroundAiQueue(700);
     scheduleReceptionBackfill(9000);
+    maybeAutoExpandPool();
   }
 }
 
@@ -6943,14 +7010,17 @@ function aiTagCandidates() {
     ...Object.values(state.hiddenTitles || {}).filter(movie => movie.storyText)
   ]
     .filter(movie => movie.title && (!hasCurrentAiTags(movie) || needsTagTopUp(movie)))
-    .filter(aiSourceDataReady)
+    .filter(movie => aiSourceDataReady(movie, now))
     .filter(movie => aiBackgroundRetryReady(movie, now))
     .sort((a,b) => {
+      const aTopUp = Number(hasCurrentAiTags(a));
+      const bTopUp = Number(hasCurrentAiTags(b));
       const aAttempt = Date.parse(a.aiTagging?.attemptedAt || '') || 0;
       const bAttempt = Date.parse(b.aiTagging?.attemptedAt || '') || 0;
       const aRank = recommendationRank.get(String(a.id));
       const bRank = recommendationRank.get(String(b.id));
-      return Number(!!aAttempt) - Number(!!bAttempt)
+      return aTopUp - bTopUp
+        || Number(!!aAttempt) - Number(!!bAttempt)
         || (Number.isInteger(aRank) ? aRank : Number.MAX_SAFE_INTEGER) - (Number.isInteger(bRank) ? bRank : Number.MAX_SAFE_INTEGER)
         || aAttempt - bAttempt
         || Number(b.rating || 0) - Number(a.rating || 0)
@@ -6982,9 +7052,9 @@ async function enrichLegacyTitleForAi(movie) {
     return applyFreshWikiMovie(movie.id, fresh, movie);
   } catch(e) {
     movie.needsManualUrl = false;
+    markAiBatchRetryFailure(movie, e);
     movie.retagStatus = 'needs-refresh';
     movie.retagMessage = 'automatic Wikipedia refresh pending';
-    touchRecord(movie);
     return null;
   }
 }
@@ -7020,21 +7090,26 @@ function markAiBatchRetryFailure(movie, error) {
 }
 
 async function tagAllUntagged() {
+  const collectionWasUserPaused = autoFetchPaused;
   // AI tagging owns the same request/abort machinery as pool expansion.
   // Stop the worker itself, wait for it to release, then continue automatically.
   if (poolExpansionInProgress || autoExpandTimer) {
     stopFetching({silent:true});
     await waitForPoolIdle(10000);
+    autoFetchPaused = collectionWasUserPaused;
+    fetchAbortRequested = false;
   }
 
   if (poolExpansionInProgress) {
     showToast('Pool expansion is still stopping. Try again in a moment.', 'error');
+    if (!collectionWasUserPaused) maybeAutoExpandPool();
     return;
   }
 
   const queue = aiTagCandidates();
   if (!queue.length) {
     showToast(aiTagCandidateCount() ? 'Pending titles are still completing their source refresh' : 'All eligible titles have AI tags', '');
+    if (!collectionWasUserPaused) maybeAutoExpandPool();
     return;
   }
 
@@ -7115,13 +7190,17 @@ async function tagAllUntagged() {
                 result.failed += Number(fallback?.failed || 0);
               } catch (fallbackError) {
                 if (isExternalRateLimitError(fallbackError)) throw fallbackError;
-                fallbackBatch.forEach(movie => markAiBatchRetryFailure(movie, fallbackError));
-                result.failed += fallbackBatch.length;
+                const unresolved = fallbackBatch.filter(movie => !hasCurrentAiTags(movie));
+                result.tagged += fallbackBatch.length - unresolved.length;
+                unresolved.forEach(movie => markAiBatchRetryFailure(movie, fallbackError));
+                result.failed += unresolved.length;
               }
             }
           } else {
-            tagBatch.forEach(movie => markAiBatchRetryFailure(movie, batchError));
-            result.failed = tagBatch.length;
+            const unresolved = tagBatch.filter(movie => !hasCurrentAiTags(movie));
+            result.tagged = tagBatch.length - unresolved.length;
+            unresolved.forEach(movie => markAiBatchRetryFailure(movie, batchError));
+            result.failed = unresolved.length;
           }
         }
         tagged += Number(result?.tagged || 0);
@@ -7157,9 +7236,11 @@ async function tagAllUntagged() {
     showToast(`AI tagging stopped: ${message}`, 'error');
   } finally {
     fetchAbortRequested = false;
+    autoFetchPaused = collectionWasUserPaused;
     hideFetchProgress();
     if (btn) btn.disabled = false;
     updateAiTagButton();
+    if (!collectionWasUserPaused) maybeAutoExpandPool();
   }
 }
 
@@ -7623,6 +7704,32 @@ function taggedUnseenPoolCount() {
   ).length;
 }
 
+// Recommendation-ready coverage, not the loose historical `movie.tagged`
+// flag, is what controls collection. Backoff, source refresh and an in-flight
+// request do not erase the debt: the title cannot inform recommendations until
+// hasCurrentAiTags() is true.
+function activeAiTagDebtCount() {
+  let count = 0;
+  Object.values(state.movies || {}).forEach(movie => {
+    if (movie?.title && !movie.hidden && !hasCurrentAiTags(movie)) count++;
+  });
+  return count;
+}
+
+function collectionBlockedByAiTags(tagDebt=activeAiTagDebtCount(), now=Date.now()) {
+  state.meta = state.meta || {};
+  if (!collectionWaitingForAiTags && state.meta.collectionWaitingForAiTags) {
+    collectionWaitingForAiTags = true;
+  }
+  if (effectiveAiCooldownRemaining(now) > 0 || tagDebt >= COLLECTION_TAG_DEBT_HIGH_WATER) {
+    collectionWaitingForAiTags = true;
+  } else if (tagDebt <= COLLECTION_TAG_DEBT_LOW_WATER) {
+    collectionWaitingForAiTags = false;
+  }
+  state.meta.collectionWaitingForAiTags = collectionWaitingForAiTags;
+  return collectionWaitingForAiTags;
+}
+
 // Escalating backoff so a title AI tagging can't finish (a story too thin to
 // ground even the reduced minimum, or repeated model failures) stops churning
 // every 2 minutes forever. It never gives up entirely — the final tier retries
@@ -7658,7 +7765,7 @@ function aiBackgroundRetryReady(movie, now) {
   const attemptedAt = Date.parse(movie.aiTagging?.attemptedAt || '') || 0;
   if (!attemptedAt) return true;
   const fails = Math.max(0, Number(movie.aiTagging?.failCount || 0));
-  const cooldown = AI_BACKGROUND_RETRY_BACKOFF_MS[Math.min(fails, AI_BACKGROUND_RETRY_BACKOFF_MS.length - 1)];
+  const cooldown = AI_BACKGROUND_RETRY_BACKOFF_MS[Math.min(Math.max(0, fails - 1), AI_BACKGROUND_RETRY_BACKOFF_MS.length - 1)];
   return now - attemptedAt >= cooldown;
 }
 
@@ -7672,11 +7779,14 @@ function pendingBackgroundAiMovies() {
     .filter(movie => aiSourceDataReady(movie,now))
     .filter(movie => aiBackgroundRetryReady(movie, now))
     .sort((a, b) => {
+      const aTopUp = Number(hasCurrentAiTags(a));
+      const bTopUp = Number(hasCurrentAiTags(b));
       const aTime = Date.parse(a.aiTagging?.attemptedAt || '') || 0;
       const bTime = Date.parse(b.aiTagging?.attemptedAt || '') || 0;
       const aRank = recommendationRank.get(String(a.id));
       const bRank = recommendationRank.get(String(b.id));
-      return Number(!!aTime) - Number(!!bTime)
+      return aTopUp - bTopUp
+        || Number(!!aTime) - Number(!!bTime)
         || (Number.isInteger(aRank) ? aRank : Number.MAX_SAFE_INTEGER) - (Number.isInteger(bRank) ? bRank : Number.MAX_SAFE_INTEGER)
         || aTime - bTime
         || Number(b.rating || 0) - Number(a.rating || 0)
@@ -7685,13 +7795,62 @@ function pendingBackgroundAiMovies() {
     });
 }
 
+function pendingBackgroundSourceRecoveryMovies(now=Date.now()) {
+  return Object.values(state.movies || {})
+    .filter(movie => movie?.title && !movie.hidden && !movie.storyText && !hasCurrentAiTags(movie))
+    .filter(movie => aiBackgroundRetryReady(movie, now))
+    .sort((a, b) =>
+      (Date.parse(a.aiTagging?.attemptedAt || '') || 0) - (Date.parse(b.aiTagging?.attemptedAt || '') || 0)
+      || Number(b.rating || 0) - Number(a.rating || 0)
+      || movieAddedTime(b) - movieAddedTime(a)
+      || String(a.id).localeCompare(String(b.id))
+    );
+}
+
 function pendingBackgroundAiCount() {
-  const now=Date.now();
-  let count=0;
+  const now = Date.now();
+  let count = 0;
   Object.values(state.movies || {}).forEach(movie => {
-    if (movie?.storyText && !movie.hidden && !hasCurrentAiTags(movie) && aiSourceDataReady(movie,now) && aiBackgroundRetryReady(movie,now)) count++;
+    if (!movie?.title || movie.hidden || aiTagInFlight(movie)) return;
+    if (!movie.storyText) {
+      if (!hasCurrentAiTags(movie) && aiBackgroundRetryReady(movie, now)) count++;
+      return;
+    }
+    if (!aiSourceDataReady(movie, now)) return;
+    if (!hasCurrentAiTags(movie) && aiBackgroundRetryReady(movie, now)) count++;
+    else if (needsTagTopUp(movie) && tagTopUpBackoffReady(movie, now)) count++;
   });
   return count;
+}
+
+function nextBackgroundAiQueueDelay(now=Date.now()) {
+  let nextAt = Infinity;
+  Object.values(state.movies || {}).forEach(movie => {
+    if (!movie?.title || movie.hidden || aiTagInFlight(movie)) return;
+    if (!movie.storyText) {
+      if (hasCurrentAiTags(movie)) return;
+      const attemptedAt = Date.parse(movie.aiTagging?.attemptedAt || '') || 0;
+      if (!attemptedAt) { nextAt = now; return; }
+      const fails = Math.max(0, Number(movie.aiTagging?.failCount || 0));
+      const cooldown = AI_BACKGROUND_RETRY_BACKOFF_MS[Math.min(Math.max(0, fails - 1), AI_BACKGROUND_RETRY_BACKOFF_MS.length - 1)];
+      nextAt = Math.min(nextAt, attemptedAt + cooldown);
+      return;
+    }
+    if (!aiSourceDataReady(movie, now)) return;
+    if (!hasCurrentAiTags(movie)) {
+      const attemptedAt = Date.parse(movie.aiTagging?.attemptedAt || '') || 0;
+      if (!attemptedAt) { nextAt = now; return; }
+      const fails = Math.max(0, Number(movie.aiTagging?.failCount || 0));
+      const cooldown = AI_BACKGROUND_RETRY_BACKOFF_MS[Math.min(Math.max(0, fails - 1), AI_BACKGROUND_RETRY_BACKOFF_MS.length - 1)];
+      nextAt = Math.min(nextAt, attemptedAt + cooldown);
+      return;
+    }
+    if (needsTagTopUp(movie)) {
+      const attemptedAt = Date.parse(movie.aiTagging?.lastTopUpAt || movie.aiTagging?.taggedAt || '') || 0;
+      nextAt = Math.min(nextAt, attemptedAt ? attemptedAt + AI_TAG_TOPUP_COOLDOWN_MS : now);
+    }
+  });
+  return Number.isFinite(nextAt) ? Math.max(0, nextAt - now) : null;
 }
 
 // Short-lived cache: collectionHealth is a read-only status roll-up but each
@@ -7712,6 +7871,7 @@ function collectionHealth() {
   const status = recommendationFetchStatus();
   const taggedUnseen = taggedUnseenPoolCount();
   const pendingTags = aiTagCandidateCount();
+  const tagDebt = activeAiTagDebtCount();
   const personalized = personalizedEnough();
 
   collectionHealthCache = {
@@ -7719,6 +7879,8 @@ function collectionHealth() {
     personalized,
     taggedUnseen,
     pendingTags,
+    tagDebt,
+    waitingForTags:collectionBlockedByAiTags(tagDebt, now),
     collectionActive: !!state.meta?.collectionActive
   };
   collectionHealthCacheAt = now;
@@ -7727,8 +7889,9 @@ function collectionHealth() {
 
 function shouldRunBackgroundCollection() {
   state.meta = state.meta || {};
-  state.meta.collectionActive = true;
-  return true;
+  const allowed = !collectionBlockedByAiTags();
+  state.meta.collectionActive = allowed;
+  return allowed;
 }
 
 function needsMoreStrongRecommendations(target=40) {
@@ -7754,15 +7917,16 @@ function updateLibraryHealth() {
   if (autoFetchPaused) text = 'Collection paused';
   else if (legacyTagRecoveryInProgress) text = 'Recovering pre-v80 tag sets from Drive history';
   else if (poolExpansionInProgress) { const jy = discoveryJourneyYear(); text = `Collecting ${formatStrongMatchCount(strongMatchCountForDisplay(health))}${jy ? ` · fetching ${jy}` : ''}`; }
-  else if (backgroundAiTaggingInProgress) text = `Tagging ${health.pendingTags} pending titles`;
-  else if (aiRateLimitRemaining()) text = 'Gemini cooling down · other maintenance continues';
+  else if (backgroundAiTaggingInProgress) text = `Tagging catch-up · ${health.tagDebt} titles need tags`;
+  else if (effectiveAiCooldownRemaining()) text = `Gemini cooling down · collection waiting on ${health.tagDebt} tags`;
   else if (!libraryWritesUnlocked && state.drive?.enabled) text = 'Collection waiting for Drive reconnect';
+  else if (health.waitingForTags) text = `Tagging catch-up · ${health.tagDebt} titles need tags`;
   else if (!health.personalized) text = `Building starter pool · ${health.taggedUnseen}/${INITIAL_TAGGED_POOL_FLOOR}`;
   else text = `Collecting while idle · ${formatStrongMatchCount(strongMatchCountForDisplay(health))}`;
 
   if (label) label.textContent = text;
   if (maintenance) {
-    maintenance.textContent = `${text} · ${health.pendingTags} pending AI tags${receptionSegment}${tmdbSegment} · ${drive}`;
+    maintenance.textContent = `${text} · ${health.tagDebt} titles awaiting current AI tags${receptionSegment}${tmdbSegment} · ${drive}`;
   }
   const tmdbBtn = document.getElementById('tmdbBackfillToggleBtn');
   if (tmdbBtn) {
@@ -7808,7 +7972,9 @@ function syncMaintenancePanelPlacement() {
 }
 
 function scheduleBackgroundAiQueue(delay = 700) {
-  const cooldown=aiRateLimitRemaining();
+  const cooldown = effectiveAiCooldownRemaining();
+  const pendingNow = pendingBackgroundAiCount();
+  const retryDelay = pendingNow ? 0 : nextBackgroundAiQueueDelay();
   // v91: poolExpansionInProgress is deliberately no longer a blocker. The AI
   // lane and the Wikipedia/TMDB lanes have separate limiters and separate
   // budgets, so there is nothing to contend over, and refusing to tag while
@@ -7819,7 +7985,7 @@ function scheduleBackgroundAiQueue(delay = 700) {
     legacyTagRecoveryPending() ||
     backgroundAiTaggingInProgress ||
     backgroundAiTimer ||
-    !pendingBackgroundAiCount()
+    (!pendingNow && retryDelay == null && !cooldown)
   ) {
     return;
   }
@@ -7827,7 +7993,7 @@ function scheduleBackgroundAiQueue(delay = 700) {
   backgroundAiTimer = setTimeout(() => {
     backgroundAiTimer = null;
     runBackgroundAiQueue();
-  }, Math.max(delay,cooldown));
+  }, Math.max(delay, cooldown, Number(retryDelay || 0)));
 }
 
 // v91: dispatches several 20-title batches at once instead of one 8-title
@@ -7836,12 +8002,56 @@ function scheduleBackgroundAiQueue(delay = 700) {
 // will accept.
 async function runBackgroundAiQueue() {
   if (backgroundAiTaggingInProgress || autoFetchPaused || legacyTagRecoveryPending()) return;
-  if (aiRateLimitRemaining()) {
-    scheduleBackgroundAiQueue(aiRateLimitRemaining());
+  const cooldown = effectiveAiCooldownRemaining();
+  const hardDebt = activeAiTagDebtCount();
+  let pending = pendingBackgroundAiMovies().filter(movie => !aiTagInFlight(movie));
+  // Current-but-underfilled top-ups never consume the scarce lane while a
+  // genuinely untagged title is keeping collection closed.
+  if (hardDebt) pending = pending.filter(movie => !hasCurrentAiTags(movie));
+
+  // Wikipedia recovery is independent of Gemini. Run it while Gemini cools
+  // down, or whenever no story-ready hard debt can be tagged yet.
+  if (cooldown || !pending.length) {
+    const sourceRecovery = pendingBackgroundSourceRecoveryMovies()
+      .slice(0, AI_TAG_LANE_CONCURRENCY * AI_BACKGROUND_BATCH_SIZE);
+    if (sourceRecovery.length) {
+      backgroundAiTaggingInProgress = true;
+      try {
+        showBackgroundPipelineProgress('Wikipedia', `Recovering source text for ${sourceRecovery.length} titles`);
+        await Promise.all(sourceRecovery.map(movie => enrichLegacyTitleForAi(movie)));
+        // Recovery may replace a legacy ID with the canonical Wikipedia ID.
+        // A full snapshot is required so the new key and removed old key are
+        // both durable before Drive sync or an offline reload.
+        saveLocalState({silentUi:true,preserveUpdatedAt:true});
+        queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
+        checkpointBackgroundUi(sourceRecovery.length);
+        scheduleReceptionBackfill(700);
+        scheduleTmdbBackfill(700);
+      } catch (error) {
+        console.warn('Background source recovery deferred:', error);
+      } finally {
+        backgroundAiTaggingInProgress = false;
+      }
+      pending = pendingBackgroundAiMovies().filter(movie => !aiTagInFlight(movie));
+      if (activeAiTagDebtCount()) pending = pending.filter(movie => !hasCurrentAiTags(movie));
+    }
+  }
+  if (effectiveAiCooldownRemaining()) {
+    settleBackgroundPipelineProgress(effectiveAiCooldownRemaining());
+    scheduleBackgroundAiQueue(effectiveAiCooldownRemaining());
     return;
   }
-  const pending = pendingBackgroundAiMovies().filter(movie => !aiTagInFlight(movie));
-  if (!pending.length) return;
+  if (!pending.length) {
+    const retryDelay = nextBackgroundAiQueueDelay();
+    if (activeAiTagDebtCount()) {
+      scheduleReceptionBackfill(700);
+      scheduleTmdbBackfill(700);
+    }
+    settleBackgroundPipelineProgress(retryDelay == null ? 0 : 10000);
+    if (retryDelay != null) scheduleBackgroundAiQueue(Math.max(1200, retryDelay));
+    maybeAutoExpandPool();
+    return;
+  }
 
   const batches = [];
   for (
@@ -7862,12 +8072,28 @@ async function runBackgroundAiQueue() {
       batchSize:AI_BACKGROUND_BATCH_SIZE,
       requestDelayMs:AI_BACKGROUND_REQUEST_DELAY_MS
     })));
-    const rejected = settled.find(entry => entry.status === 'rejected');
-    if (rejected) throw rejected.reason;
-    const result = settled.reduce((total, entry) => ({
-      tagged:total.tagged + Number(entry.value?.tagged || 0),
-      failed:total.failed + Number(entry.value?.failed || 0)
-    }), {tagged:0, failed:0});
+    const result = {tagged:0, failed:0};
+    let rateLimited = false;
+    settled.forEach((entry, index) => {
+      if (entry.status === 'fulfilled') {
+        result.tagged += Number(entry.value?.tagged || 0);
+        result.failed += Number(entry.value?.failed || 0);
+        return;
+      }
+      const error = entry.reason;
+      if (isExternalRateLimitError(error)) {
+        rateLimited = true;
+        return;
+      }
+      const unresolved = batches[index].filter(movie => !hasCurrentAiTags(movie));
+      unresolved.forEach(movie => markAiBatchRetryFailure(movie, error));
+      result.failed += unresolved.length;
+      console.warn('Background AI tagging deferred:', String(error?.message || error));
+    });
+    if (rateLimited) {
+      if (!aiRateLimitRemaining()) registerAiRateLimit();
+      showToast('Gemini is cooling down; collection is waiting for tagging to resume.', '');
+    }
     if (Number(result?.tagged || 0)) deferRecommendationRefresh();
     saveLocalState({silentUi:true,preserveUpdatedAt:true,changedMovieIds});
     queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
@@ -7876,37 +8102,15 @@ async function runBackgroundAiQueue() {
       console.info('CineLens AI queue retained pending titles for a later retry.', result);
     }
   } catch (error) {
-    const message = String(error?.message || error);
-    if (isExternalRateLimitError(error)) {
-      if (!aiRateLimitRemaining()) registerAiRateLimit();
-      saveLocalState({silentUi:true,preserveUpdatedAt:true,driveProfileOnly:true});
-      queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
-      showToast('Gemini is cooling down; Wikipedia and TMDB work can continue.', '');
-    } else {
-      batch.forEach(movie => {
-        movie.aiTagging = {
-          ...(movie.aiTagging || {}),
-          status:'building',
-          promptVersion:AI_TAG_PROMPT_VERSION,
-          storyHash:aiStoryHash(aiTagSourceText(movie)),
-          error:message,
-          failCount:Number(movie.aiTagging?.failCount || 0) + 1,
-          attemptedAt:nowStamp()
-        };
-        movie.retagStatus='needs-ai-tags';
-        movie.retagMessage='AI retry pending';
-        touchRecord(movie);
-      });
-      saveLocalState({silentUi:true,preserveUpdatedAt:true,changedMovieIds});
-      queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
-      console.warn('Background AI tagging deferred:', message);
-    }
+    console.warn('Background AI queue stopped before its batches settled:', error);
   } finally {
     backgroundAiTaggingInProgress = false;
     const moreBackgroundAi = pendingBackgroundAiCount();
-    settleBackgroundPipelineProgress(moreBackgroundAi ? 10000 : 0);
-    if (moreBackgroundAi) scheduleBackgroundAiQueue(Math.max(1200,aiRateLimitRemaining()));
+    const retryDelay = nextBackgroundAiQueueDelay();
+    settleBackgroundPipelineProgress(moreBackgroundAi || retryDelay != null ? 10000 : 0);
+    if (moreBackgroundAi || retryDelay != null) scheduleBackgroundAiQueue(Math.max(1200,effectiveAiCooldownRemaining()));
     else if (backgroundChangesSinceRender) checkpointBackgroundUi(0, true);
+    maybeAutoExpandPool();
   }
 }
 
@@ -7921,7 +8125,7 @@ function maybeAutoExpandPool() {
     return;
   }
 
-  if (pendingBackgroundAiCount()) scheduleBackgroundAiQueue();
+  if (activeAiTagDebtCount() || pendingBackgroundAiCount() || effectiveAiCooldownRemaining()) scheduleBackgroundAiQueue();
 
   if (!poolExpansionInProgress && !autoExpandTimer && shouldRunBackgroundCollection()) {
     lastAutoExpandAt = Date.now();
@@ -10185,7 +10389,7 @@ const TAG_COUNT_DISPLAY_TTL_MS = 1500;
 function updateStats() {
   const movies=Object.values(state.movies);
   const rated=movies.filter(m=>m.rating>0);
-  const tagged=movies.filter(m=>m.tagged);
+  const tagged=movies.filter(hasCurrentAiTags);
   const avg=rated.length?(rated.reduce((s,m)=>s+m.rating,0)/rated.length).toFixed(1):'—';
   document.getElementById('statRated').textContent=rated.length;
   document.getElementById('statTagged').textContent=tagged.length;
