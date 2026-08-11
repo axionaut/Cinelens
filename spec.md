@@ -4352,3 +4352,21 @@ debt always runs before optional top-ups of already-current tag sets. A
 known-exhausted daily allowance rejects before an upstream request is made, so
 queued batches do not remain parked inside a collection run until the rolling
 24-hour slot reopens.
+
+### 31.23 Local-first session continuity (v112)
+
+The IndexedDB library is rendered immediately on every startup, including a
+Drive-enabled browser whose Google token is expired or whose Drive restore is
+still in progress. Authentication and Drive reconciliation must never replace
+the cached library with a blank screen. A successful restore merges canonical
+records and rerenders; a failed restore leaves cached state usable and visible.
+
+Startup restore, scheduled renewal, foreground resume, sync retry and 401
+recovery all request Google tokens with `prompt:'none'`. They may quietly enter
+the reconnect state but may not open Google account or consent UI. Only an
+explicit click on the Drive control may use an interactive/default prompt.
+
+Pending local persistence flushes to IndexedDB when the document is hidden and
+again on `pagehide`, before a mobile browser can suspend or evict the tab. On
+foreground return, the cached library stays rendered while Drive renewal and
+pending sync resume independently.

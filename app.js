@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 111;
+const APP_VERSION = 112;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -2631,10 +2631,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (startupRemovedHindiShows || startupClearedHorrorExclusions || startupAddedAtMigrated || startupRatedAtMigrated || startupRetiredWatchlist) saveLocalState({preserveUpdatedAt:true});
   startupInitialLibraryPresent = libraryRecordCount() > 0;
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
-  // A Drive-enabled device must not treat a catalogue-only cache as a usable
-  // personal library. The authoritative profile is restored before normal UI
-  // work and collection are unlocked below.
-  if (!state.drive.enabled || ratedTitleCount() > 0) render();
+  // The browser cache is the immediate, durable UI source. Drive reconciliation
+  // must never blank an already-loaded library while Google auth or the network
+  // is settling; a successful restore can merge and rerender afterward.
+  render();
 
   // A previously connected browser may restore silently. A new browser remains
   // read-only until the user taps Drive, so it cannot manufacture a newer local
@@ -2650,7 +2650,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Until Drive has been checked, a browser-local starter/partial library has no
   // authority to start collection. Existing offline-only libraries can still run
   // when Drive was never enabled on that browser.
-  finalizeStartupAfterDrive({allowCollection: restored || (!state.drive.enabled && startupInitialLibraryPresent)});
+  finalizeStartupAfterDrive({allowCollection: restored || startupInitialLibraryPresent});
   window.addEventListener('scroll', onScrollEvent, {passive:true});
 });
 
@@ -10555,6 +10555,13 @@ function queueIndexedDbSave(delay=450, changedMovieIds=null) {
   localDbSaveTimer=setTimeout(() => persistStateToIndexedDb(), Math.max(0, Number(delay)||0));
 }
 
+function flushLocalStatePersistence() {
+  if (!pendingFullSave && !pendingDirtyMovieIds.size) return;
+  clearTimeout(localDbSaveTimer);
+  localDbSaveTimer=null;
+  persistStateToIndexedDb();
+}
+
 async function persistStateToIndexedDb() {
   if (localDbSaveInProgress) { localDbSaveQueued=true; return; }
   localDbSaveInProgress=true;
@@ -11179,21 +11186,15 @@ let driveSilentRenewBlockedUntil=0;
 let driveSilentRenewLastAttemptAt=0;
 let driveTokenRequestInFlight=null;
 let driveTokenRequestPrompt='';
-// True while the in-flight GIS token request is an AUTOMATIC one (startup
-// restore / renewal) rather than one the user asked for by tapping Drive.
-// Tracked separately from the prompt string because both paths now send the
-// same prompt value — see DRIVE_AUTO_PROMPT.
+// True while the in-flight GIS token request is automatic rather than one the
+// user asked for by tapping Drive. A manual tap may wait for this request but
+// must never be confused with it.
 let driveTokenRequestIsAuto=false;
-// Google's token client treats prompt:'none' as *strictly* non-interactive: if
-// it cannot mint a token purely from an already-visible Google session it fails
-// immediately with interaction_required. On mobile, where third-party cookies
-// to accounts.google.com are blocked by default, that is essentially always —
-// which is why automatic reconnect kept dead-ending in "Tap Drive to reconnect".
-// The empty/default prompt lets Google complete the flow for a user who has
-// already granted consent, without surfacing an account picker. This mirrors
-// the Rocket Scanner app on these same devices, which reconnects unattended
-// using exactly this value and never uses 'none'.
-const DRIVE_AUTO_PROMPT='';
+// Every automatic path is strictly non-interactive. Google's empty/default
+// prompt may open account UI, so it is reserved for an explicit Drive-button
+// gesture. Failed silent renewal only changes the Drive connection status; the
+// cached IndexedDB library remains visible and usable.
+const DRIVE_AUTO_PROMPT='none';
 
 
 function rememberDriveToken(token, expiresInSeconds=3300) {
@@ -11294,7 +11295,12 @@ function kickBackgroundLoopsOnForeground() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState !== 'visible') return;
+  if (document.visibilityState !== 'visible') {
+    // Start the IndexedDB commit before a mobile browser freezes or evicts the
+    // backgrounded page instead of waiting for the normal save debounce.
+    flushLocalStatePersistence();
+    return;
+  }
   kickBackgroundLoopsOnForeground();
   if (!state.drive.enabled) return;
   const expiry = Number(localStorage.getItem(DRIVE_TOKEN_EXPIRY_KEY) || 0);
@@ -11302,6 +11308,8 @@ document.addEventListener('visibilitychange', () => {
   if (silentDriveRenewalBlocked(now) || now - driveSilentRenewLastAttemptAt < DRIVE_SILENT_RENEW_DEBOUNCE_MS) return;
   if (!libraryWritesUnlocked || !expiry || expiry - now < DRIVE_TOKEN_REFRESH_LEEWAY_MS) silentlyRenewDriveToken();
 });
+
+window.addEventListener('pagehide', flushLocalStatePersistence);
 
 function getStoredDriveToken() {
   try {
