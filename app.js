@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 112;
+const APP_VERSION = 113;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -675,7 +675,7 @@ const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // the fixed matcher below. Records matched by the old popularity fallback are
 // carrying the wrong poster, genres, reception and review text, and only a
 // re-search can find that out.
-const TMDB_DATA_VERSION = 7;
+const TMDB_DATA_VERSION = 8;
 // Minimum title similarity (see tmdbTitleSimilarity) for a TMDB search result
 // to be accepted as the same title. Unrelated results sharing one common word
 // score 0.5, so this rejects them while tolerating subtitle and punctuation
@@ -816,7 +816,7 @@ let state = {
   movies: {},
   tagWeights: {},
   genreWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', genreFilters:[], genreMatchMode:'or', ratingFilter:'all', sortMode:'recommended', sortDirection:'desc', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, formatPreference:DEFAULT_FORMAT_PREFERENCE, tmdbBackfillPaused:false },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', genreFilters:[], genreMatchMode:'or', ratingFilter:'all', contentMaxSex:'any', contentMaxViolence:'any', contentMaxLanguage:'any', sortMode:'recommended', sortDirection:'desc', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, formatPreference:DEFAULT_FORMAT_PREFERENCE, tmdbBackfillPaused:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', manifestFileId:'', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   wrongPicks: {},
@@ -901,6 +901,8 @@ const GENRE_RULES = [
   ['war', /\bwar(?:-|\s)(?:film|drama|series)\b/],
   ['western', /\bwestern(?:-|\s)(?:film|drama|series)\b/]
 ];
+const SITCOM_GENRE = 'sitcom';
+const SITCOM_METADATA_PATTERN = /\b(?:sitcoms?|situation comed(?:y|ies))\b/;
 const GENRE_SCORE_FACTOR = 0.35;
 
 // TMDB genre IDs (stable, documented in their API reference — movie and TV
@@ -934,6 +936,7 @@ const TMDB_GENRE_MAP = {
 const CANONICAL_GENRE_TAGS = new Set([
   ...Object.values(TMDB_GENRE_MAP).flat(),
   ...GENRE_RULES.map(([genre]) => genre),
+  SITCOM_GENRE,
   // Spellings the tagger reaches for that mean exactly a canonical genre.
   'sci-fi', 'scifi', 'animated', 'documentary-film', 'romantic'
 ]);
@@ -950,15 +953,26 @@ function tmdbGenresToCanonical(genres) {
   return [...out];
 }
 
-function deriveGenres(leadText='', categories=[]) {
+function deriveGenres(leadText='', categories=[], format=null) {
   const categoryText = Array.isArray(categories) ? categories.join(' ') : String(categories || '');
   const metadata = `${leadText} ${categoryText}`.toLowerCase();
-  return GENRE_RULES.filter(([, pattern]) => pattern.test(metadata)).map(([genre]) => genre);
+  const genres = GENRE_RULES.filter(([, pattern]) => pattern.test(metadata)).map(([genre]) => genre);
+  // TMDB exposes only broad TV Comedy. Sitcom is narrower, so accept it only
+  // for a show whose Wikipedia lead/categories explicitly name the format.
+  if (format && SITCOM_METADATA_PATTERN.test(metadata)) {
+    if (!genres.includes('comedy')) genres.push('comedy');
+    genres.push(SITCOM_GENRE);
+  }
+  return genres;
 }
 
 function movieGenres(movie) {
   const stored = Array.isArray(movie?.genres) ? movie.genres : [];
-  return [...new Set(stored.length ? stored : deriveGenres(movie?.leadText || '', movie?.categoryText || ''))];
+  const derived = deriveGenres(movie?.leadText || '', movie?.categoryText || '', movie?.format || null);
+  // A TMDB refresh replaces broad genres with structured TMDB values. Preserve
+  // the explicit Wikipedia sitcom subtype alongside that authoritative list.
+  const sitcomSupplement = derived.includes(SITCOM_GENRE) ? ['comedy', SITCOM_GENRE] : [];
+  return [...new Set(stored.length ? [...stored, ...sitcomSupplement] : derived)];
 }
 
 function normaliseTagName(tag) {
@@ -5321,6 +5335,8 @@ function clearTmdbIdentity(movie) {
   delete movie.watchAvailability;
   delete movie.tmdbReviewText;
   delete movie.tmdbReviewCount;
+  delete movie.contentKeywords;
+  delete movie.contentCertification;
   // The TMDB audience score fed the reception record; drop that contribution
   // but keep any Wikipedia-derived aggregator data, which is still valid.
   if (movie.reception && typeof movie.reception === 'object') {
@@ -5447,9 +5463,35 @@ function compactTmdbReviewText(reviewsPayload) {
   return pieces.join('\n').slice(0,TMDB_REVIEW_TEXT_MAX_CHARS);
 }
 
+function compactTmdbContentKeywords(keywordsPayload) {
+  const rows=keywordsPayload?.keywords || keywordsPayload?.results || [];
+  return [...new Set(rows.map(item => String(item?.name || '').trim().toLowerCase()).filter(Boolean))].slice(0,80);
+}
+
+function tmdbRegionalCertification(data, mediaType) {
+  const countries=['IN','US','GB'];
+  if (mediaType === 'tv') {
+    const rows=data?.content_ratings?.results || [];
+    for (const country of countries) {
+      const found=rows.find(row => row?.iso_3166_1 === country && String(row?.rating || '').trim());
+      if (found) return {country, rating:String(found.rating).trim()};
+    }
+    return null;
+  }
+  const regions=data?.release_dates?.results || [];
+  for (const country of countries) {
+    const region=regions.find(row => row?.iso_3166_1 === country);
+    const releases=(region?.release_dates || []).filter(row => String(row?.certification || '').trim());
+    const found=releases.find(row => Number(row?.type) === 3) || releases[0];
+    if (found) return {country, rating:String(found.certification).trim()};
+  }
+  return null;
+}
+
 async function tmdbDetailsWithAvailability(id, mediaType) {
   const endpoint = mediaType === 'tv' ? 'tv' : 'movie';
-  const params = new URLSearchParams({ api_key: TMDB_API_KEY, append_to_response: 'watch/providers,reviews' });
+  const ratingEndpoint = mediaType === 'tv' ? 'content_ratings' : 'release_dates';
+  const params = new URLSearchParams({ api_key: TMDB_API_KEY, append_to_response: `watch/providers,reviews,keywords,${ratingEndpoint}` });
   const data = await tmdbApiJson(`https://api.themoviedb.org/3/${endpoint}/${id}?${params.toString()}`);
   if (!data) return null;
   const posterPath = data.poster_path || '';
@@ -5469,6 +5511,8 @@ async function tmdbDetailsWithAvailability(id, mediaType) {
     tmdbYear: tmdbCandidateYear(data, mediaType) || null,
     voteAverage: Number.isFinite(Number(data.vote_average)) && Number(data.vote_average) > 0 ? Number(data.vote_average) : null,
     voteCount: Math.max(0, parseInt(data.vote_count, 10) || 0),
+    contentKeywords:compactTmdbContentKeywords(data.keywords),
+    contentCertification:tmdbRegionalCertification(data, mediaType),
     reviewText:compactTmdbReviewText(data.reviews),
     reviewCount:Math.max(0,parseInt(data.reviews?.total_results,10) || (data.reviews?.results || []).length)
   };
@@ -5497,6 +5541,8 @@ async function fetchTmdbDetailsById(tmdbId, mediaType) {
     voteCount: details.voteCount,
     reviewText: details.reviewText || '',
     reviewCount: details.reviewCount || 0,
+    contentKeywords:details.contentKeywords || [],
+    contentCertification:details.contentCertification || null,
     detailsFetched: true
   };
 }
@@ -5533,6 +5579,8 @@ async function fetchTmdbDetails(title, year, format) {
       voteCount: details?.voteAverage != null ? details.voteCount : Math.max(0, parseInt(candidate.vote_count, 10) || 0),
       reviewText:details?.reviewText || '',
       reviewCount:details?.reviewCount || 0,
+      contentKeywords:details?.contentKeywords || [],
+      contentCertification:details?.contentCertification || null,
       detailsFetched:!!details
     };
   } catch(_) {
@@ -5564,6 +5612,8 @@ function applyTmdbDetails(movie, tmdb) {
     if (tmdb.detailsFetched) {
       movie.tmdbReviewText=String(tmdb.reviewText || '');
       movie.tmdbReviewCount=Math.max(0,Number(tmdb.reviewCount || 0));
+      movie.contentKeywords=Array.isArray(tmdb.contentKeywords) ? tmdb.contentKeywords : [];
+      movie.contentCertification=tmdb.contentCertification || null;
       movie.tmdbDataVersion = TMDB_DATA_VERSION;
     }
     if (tmdb.voteAverage != null) applyTmdbReceptionSignal(movie, {voteAverage:tmdb.voteAverage, voteCount:tmdb.voteCount});
@@ -6277,7 +6327,7 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
 
   if (!year || !title || !wikiPageId) return rejectWikiParse(diagnostics, 'missing release year, title or Wikipedia page ID');
 
-  const genres = deriveGenres(leadText, cats);
+  const genres = deriveGenres(leadText, cats, format);
   const candidate = {
     id, title, year, director, language, country, format: format||null,
     genres, categoryText: cats.join(' '),
@@ -7314,6 +7364,11 @@ function updateControlDeck() {
   if (languageFilter && languageFilter.value !== (state.settings.languageFilter || 'all')) languageFilter.value=state.settings.languageFilter || 'all';
   const ratingFilter=document.getElementById('ratingFilter');
   if (ratingFilter && ratingFilter.value !== (state.settings.ratingFilter || 'all')) ratingFilter.value=state.settings.ratingFilter || 'all';
+  CONTENT_GUIDE_AXES.forEach(axis => {
+    const key=`contentMax${axis[0].toUpperCase()}${axis.slice(1)}`;
+    const control=document.getElementById(`${axis}ContentMax`);
+    if (control) control.value=String(state.settings[key] ?? 'any');
+  });
   const sortMode=document.getElementById('sortMode');
   if (sortMode && sortMode.value !== (state.settings.sortMode || 'recommended')) sortMode.value=state.settings.sortMode || 'recommended';
   const sortDirectionBtn=document.getElementById('sortDirectionBtn');
@@ -7578,7 +7633,7 @@ function matchesGlobalFilters(movie) {
   // when the search text is a pasted Wikipedia URL that cannot match its title.
   // It remains pinned until that same card is rated, which clears the search.
   if (isPendingManualSearchResult(movie)) return true;
-  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesRatingFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
+  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesRatingFilter(movie) && matchesContentGuideFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
 }
 
 function discoveryPool() {
@@ -7605,6 +7660,81 @@ function matchesRatingFilter(movie) {
   const rating = Number(movie?.rating || 0);
   if (filter === 'unrated') return rating === 0;
   return rating >= Number(filter);
+}
+
+const CONTENT_GUIDE_AXES = ['sex','violence','language'];
+const CONTENT_GUIDE_PATTERNS = {
+  sex:[
+    /\b(?:rape|sexual assault|sexual violence|explicit sex|pornograph\w*)\b/i,
+    /\b(?:nudity|nude scene|sex scene|sexual content|prostitut\w*)\b/i,
+    /\b(?:seduction|sexual relationship|adultery|extramarital affair)\b/i,
+    /\b(?:sensuality|suggestive content|kissing|make-out)\b/i,
+    /\b(?:romance|romantic relationship|dating)\b/i
+  ],
+  violence:[
+    /\b(?:gore|gory|graphic violence|torture|dismember\w*|decapitat\w*|mutilat\w*)\b/i,
+    /\b(?:murder|massacre|shooting|stabbing|serial killer|warfare|bloody violence)\b/i,
+    /\b(?:assault|fighting|combat|kidnapping|explosion|gunfight)\b/i,
+    /\b(?:threat|chase|weapon|gun|knife)\b/i,
+    /\b(?:peril|bullying|scuffle)\b/i
+  ],
+  language:[
+    /\b(?:pervasive language|f-word|fuck\w*)\b/i,
+    /\b(?:strong language|strong profanity|profanity)\b/i,
+    /\b(?:swearing|vulgar language|obscene language)\b/i,
+    /\b(?:crude humor|crude humour|insults)\b/i,
+    /\b(?:mild language|mild profanity)\b/i
+  ]
+};
+
+function contentGuideEvidenceText(movie) {
+  return [
+    ...(movie?.contentKeywords || []),
+    ...(movie?.tags || []),
+    movie?.storyText || '',
+    movie?.tmdbReviewText || ''
+  ].join(' ').replace(/[-_]+/g,' ');
+}
+
+function contentGuideScore(text, patterns) {
+  for (let index=0; index<patterns.length; index++) if (patterns[index].test(text)) return 5-index;
+  return null;
+}
+
+function contentGuideForMovie(movie) {
+  const text=contentGuideEvidenceText(movie);
+  const guide={
+    sex:contentGuideScore(text, CONTENT_GUIDE_PATTERNS.sex),
+    violence:contentGuideScore(text, CONTENT_GUIDE_PATTERNS.violence),
+    language:contentGuideScore(text, CONTENT_GUIDE_PATTERNS.language),
+    certification:movie?.contentCertification || null
+  };
+  const rating=String(guide.certification?.rating || '').toUpperCase().replace(/\s+/g,'');
+  if (/^(?:G|U|TV-Y|TV-G)$/.test(rating)) CONTENT_GUIDE_AXES.forEach(axis => { if (guide[axis] == null) guide[axis]=0; });
+  if (rating === 'TV-Y7' && guide.violence == null) guide.violence=1;
+  return guide;
+}
+
+function contentGuideMaxSetting(axis) {
+  const key=`contentMax${axis[0].toUpperCase()}${axis.slice(1)}`;
+  const value=String(state.settings?.[key] ?? 'any');
+  return value === 'any' ? null : Math.max(0,Math.min(5,Number(value)));
+}
+
+function matchesContentGuideFilter(movie) {
+  const guide=contentGuideForMovie(movie);
+  return CONTENT_GUIDE_AXES.every(axis => {
+    const maximum=contentGuideMaxSetting(axis);
+    return maximum == null || (guide[axis] != null && guide[axis] <= maximum);
+  });
+}
+
+function updateContentGuideFilter(axis, value) {
+  if (!CONTENT_GUIDE_AXES.includes(axis)) return;
+  const key=`contentMax${axis[0].toUpperCase()}${axis.slice(1)}`;
+  state.settings[key]=value === 'any' ? 'any' : String(Math.max(0,Math.min(5,Number(value))));
+  saveViewState();
+  renderActiveCards();
 }
 
 function titleSearchNeedle(value=state.settings.titleSearch) {
@@ -8263,7 +8393,7 @@ function similarTitleResults() {
   return Object.values(state.movies || {})
     .filter(movie => movie.id !== source.id)
     .filter(movie => !movie.skipped && matchesTab(movie) && recommendableTitle(movie))
-    .filter(movie => matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesRatingFilter(movie) && meetsYearCutoff(movie))
+    .filter(movie => matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesRatingFilter(movie) && matchesContentGuideFilter(movie) && meetsYearCutoff(movie))
     .map(movie => {
       const tags = recommendationScoringTags(movie);
       const genres = movieGenres(movie);
@@ -8606,6 +8736,7 @@ function buildCard(movie, opts={}) {
       </div>
       ${renderStars(safeId, movie.rating || 0)}
       ${renderGenres(movie, resolvedMatchedGenres)}
+      ${renderContentGuide(movie)}
       ${renderWatchProviders(movie)}
       ${poolView && movie.retagMessage ? `<div class="pool-card-note">${movie.retagMessage}</div>`:''}
       <div class="card-tags" id="tags-${movie.id}">${renderTagInsightChips(movie, safeId, true, resolvedMatchedTags, contextTag)}</div>
@@ -8776,6 +8907,15 @@ function renderGenres(movie, matchedGenres=null) {
     const safeGenre = String(genre).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     return `<button type="button" class="genre-chip clickable${matched.has?.(genre) ? ' matched' : ''}" onclick="filterByGenreFromCard('${safeGenre}',event)">${genre}</button>`;
   }).join('')}</div>`;
+}
+
+function renderContentGuide(movie) {
+  const guide=contentGuideForMovie(movie);
+  const score=value => value == null ? '?' : String(value);
+  const certificate=guide.certification?.rating
+    ? `<span class="content-cert" title="${attrSafe(guide.certification.country || '')} certification">${attrSafe(guide.certification.rating)}</span>`
+    : '';
+  return `<div class="content-guide" title="Evidence-based 0-5 advisory; ? means insufficient evidence">${certificate}<span>S ${score(guide.sex)}</span><span>V ${score(guide.violence)}</span><span>L ${score(guide.language)}</span></div>`;
 }
 
 // Availability is informational only — it is never a recommendation filter.
@@ -9528,6 +9668,8 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
     watchAvailability:normalisedFresh.watchAvailability || previous.watchAvailability || null,
     tmdbReviewText:normalisedFresh.tmdbReviewText || previous.tmdbReviewText || '',
     tmdbReviewCount:Number(normalisedFresh.tmdbReviewCount || previous.tmdbReviewCount || 0),
+    contentKeywords:normalisedFresh.contentKeywords || previous.contentKeywords || [],
+    contentCertification:normalisedFresh.contentCertification || previous.contentCertification || null,
     tmdbTitle:normalisedFresh.tmdbTitle || previous.tmdbTitle || '',
     tmdbYear:normalisedFresh.tmdbYear || previous.tmdbYear || null,
     tmdbIdVerified:!!(normalisedFresh.tmdbIdVerified || previous.tmdbIdVerified)
@@ -11062,7 +11204,7 @@ function saveLocalState(opts={}) {
   try {
     localStorage.setItem('cinelens_v2_bootstrap',JSON.stringify({
       schema:'cinelens-local-v3',
-      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,genreFilters:state.settings?.genreFilters,genreMatchMode:state.settings?.genreMatchMode,ratingFilter:state.settings?.ratingFilter,sortMode:state.settings?.sortMode,sortDirection:state.settings?.sortDirection,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
+      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,genreFilters:state.settings?.genreFilters,genreMatchMode:state.settings?.genreMatchMode,ratingFilter:state.settings?.ratingFilter,contentMaxSex:state.settings?.contentMaxSex,contentMaxViolence:state.settings?.contentMaxViolence,contentMaxLanguage:state.settings?.contentMaxLanguage,sortMode:state.settings?.sortMode,sortDirection:state.settings?.sortDirection,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
       drive:{enabled:state.drive.enabled,folderId:state.drive.folderId,fileId:state.drive.fileId,manifestFileId:state.drive.manifestFileId||'',lastConnectedAt:state.drive.lastConnectedAt},
       updatedAt:state.meta?.updatedAt || nowStamp()
     }));

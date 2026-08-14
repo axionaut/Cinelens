@@ -7,7 +7,7 @@
 <style>html,body{margin:0;min-height:100%;background:#080808;color:#f2f2f3}</style>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230a0a0a'/%3E%3Ccircle cx='32' cy='32' r='21' fill='none' stroke='%23e5383b' stroke-width='6'/%3E%3Ccircle cx='32' cy='32' r='7' fill='%23e5383b'/%3E%3Cpath d='M32 11v10M32 43v10M11 32h10M43 32h10' stroke='%23e5383b' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=111">
+<link rel="stylesheet" href="styles.css?v=113">
 </head>
 <body>
 
@@ -107,6 +107,7 @@
       <option value="adventure">Adventure</option>
       <option value="animation">Animation</option>
       <option value="comedy">Comedy</option>
+      <option value="sitcom">Sitcom</option>
       <option value="crime">Crime</option>
       <option value="documentary">Documentary</option>
       <option value="drama">Drama</option>
@@ -147,6 +148,12 @@
       <option value="2">2 stars &amp; above</option>
       <option value="1">1 star &amp; above</option>
     </select>
+    <label>Content max</label>
+    <div class="content-filter-control">
+      <select class="platform-select" id="sexContentMax" onchange="updateContentGuideFilter('sex',this.value)" aria-label="Maximum sexual content"><option value="any">S any</option><option value="0">S 0</option><option value="1">S 1</option><option value="2">S 2</option><option value="3">S 3</option><option value="4">S 4</option><option value="5">S 5</option></select>
+      <select class="platform-select" id="violenceContentMax" onchange="updateContentGuideFilter('violence',this.value)" aria-label="Maximum violence"><option value="any">V any</option><option value="0">V 0</option><option value="1">V 1</option><option value="2">V 2</option><option value="3">V 3</option><option value="4">V 4</option><option value="5">V 5</option></select>
+      <select class="platform-select" id="languageContentMax" onchange="updateContentGuideFilter('language',this.value)" aria-label="Maximum language"><option value="any">L any</option><option value="0">L 0</option><option value="1">L 1</option><option value="2">L 2</option><option value="3">L 3</option><option value="4">L 4</option><option value="5">L 5</option></select>
+    </div>
     <label>Sort</label>
     <div class="sort-control">
      <select class="platform-select" id="sortMode" onchange="updateSortMode(this.value)">
@@ -271,6 +278,6 @@
 <button class="go-top-btn" id="goTopBtn" onclick="goToTop()" title="Go to top">↑</button>
 
 <script async src="https://accounts.google.com/gsi/client"></script>
-<script src="app.js?v=112"></script>
+<script src="app.js?v=113"></script>
 </body>
 </html>

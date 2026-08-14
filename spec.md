@@ -4370,3 +4370,42 @@ Pending local persistence flushes to IndexedDB when the document is hidden and
 again on `pagehide`, before a mobile browser can suspend or evict the tab. On
 foreground return, the cached library stays rendered while Drive renewal and
 pending sync resume independently.
+
+### 31.24 Explicit sitcom genre (v113)
+
+Sitcom is a canonical CineLens genre and is available in the genre selector,
+genre chips, tag brain, preference learning and recommendation explanations.
+It is a narrower subtype of Comedy, so a sitcom carries both `comedy` and
+`sitcom`.
+
+TMDB's TV taxonomy exposes only the broad Comedy genre and is not sufficient
+to identify sitcoms. CineLens assigns Sitcom only to shows whose Wikipedia lead
+or category metadata explicitly contains `sitcom`, `sitcoms`, `situation
+comedy`, or `situation comedies`. Plot tone, humorous keywords and TMDB Comedy
+alone must not trigger it. The explicit Wikipedia subtype supplements rather
+than being overwritten by a later structured TMDB genre refresh.
+
+### 31.25 Compact content guide (v113)
+
+CineLens provides its own compact evidence-based content advisory; it does not
+copy or claim affiliation with Kids-In-Mind or another commercial review
+provider. Cards show three 0-5 axes: `S` for sexual content, `V` for violence,
+and `L` for language. `?` means the available sources do not support a score;
+missing evidence must never be presented as zero.
+
+The existing single TMDB details request appends keywords plus movie release
+certifications or TV content ratings. It stores only compact keyword names and
+one preferred certificate, choosing India first, then the US and Great Britain.
+No new API key, service, request round trip or Gemini deployment is required.
+Structured TMDB keywords are combined with grounded CineLens tags, Wikipedia
+story text and the already-fetched compact TMDB review corpus. Explicit content
+signals determine the strongest supported 0-5 level. Only unambiguously
+all-ages certificates (`G`, `U`, `TV-Y`, `TV-G`) may fill otherwise unknown
+axes with zero; `TV-Y7` may supply a violence floor of one.
+
+The filter deck exposes independent maximum S, V and L scales. `Any` leaves an
+axis unrestricted. Once a maximum is active, titles with a higher score or an
+unknown score on that axis are excluded conservatively. The settings persist
+locally and through the normal Drive profile. Raising `TMDB_DATA_VERSION` to 8
+causes the existing background refresh to enrich older titles once without a
+new pipeline.
