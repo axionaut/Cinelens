@@ -4458,3 +4458,14 @@ English movies, Hindi movies and English shows retain independent cursors. The
 displayed discovery year is the newest (least advanced) of those cursors, so it
 never implies that all lanes completed a later year merely because one faster
 lane already travelled much further back.
+
+### 31.29 Empty search results consume no layout space (v116)
+
+The unified TMDB and Wikipedia result containers use the HTML `hidden`
+attribute when there are no results. Their flexbox styling must not override
+that state: a hidden result container is `display: none` and therefore adds no
+empty row, border, padding, or vertical gap to the control deck.
+
+Unified local-title matching uses accent-insensitive canonical text. A plain
+keyboard query such as `amelie` therefore matches a stored `Amélie` record,
+using the same forgiving title identity expected during external discovery.
