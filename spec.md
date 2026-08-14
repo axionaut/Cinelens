@@ -4409,3 +4409,13 @@ unknown score on that axis are excluded conservatively. The settings persist
 locally and through the normal Drive profile. Raising `TMDB_DATA_VERSION` to 8
 causes the existing background refresh to enrich older titles once without a
 new pipeline.
+
+### 31.26 Exact content-level filters (v114)
+
+The v113 wording and maximum-threshold behavior are superseded. The S, V and L
+selectors are exact-level filters: choosing `S 5` shows only titles whose
+sexual-content score is exactly 5, not scores 0 through 5. Violence and
+language use the same exact-match rule. `Any` remains the only unrestricted
+choice, and an unknown `?` score does not match any numbered selection. The
+filter deck label is `Content level`; accessibility labels must not describe
+the controls as maximum thresholds.

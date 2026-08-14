@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 113;
+const APP_VERSION = 114;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -7724,8 +7724,8 @@ function contentGuideMaxSetting(axis) {
 function matchesContentGuideFilter(movie) {
   const guide=contentGuideForMovie(movie);
   return CONTENT_GUIDE_AXES.every(axis => {
-    const maximum=contentGuideMaxSetting(axis);
-    return maximum == null || (guide[axis] != null && guide[axis] <= maximum);
+    const selectedLevel=contentGuideMaxSetting(axis);
+    return selectedLevel == null || guide[axis] === selectedLevel;
   });
 }
 
