@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 114;
+const APP_VERSION = 115;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -652,8 +652,8 @@ const TMDB_SEARCH_REGION = 'IN';
 // member. Wikipedia is then consulted only for the rich plot/episode text the
 // tagger needs.
 const TMDB_DISCOVER_VOTE_FLOOR = 12;   // enough notability to warrant a Wikipedia page + real reviews
-const TMDB_DISCOVER_PAGE_CAP = 5;      // up to ~100 titles per year per lane before walking to the prior year
-const TMDB_DISCOVERY_CURSOR_VERSION = 1;
+const TMDB_DISCOVER_PAGE_CAP = 500;    // exhaust TMDB's complete eligible year result before walking backward
+const TMDB_DISCOVERY_CURSOR_VERSION = 2;
 // v91: was 10 titles fetched one at a time. TMDB is the cheapest upstream here
 // and tolerates far more than this; tmdbLimiter meters it.
 const TMDB_BACKFILL_BATCH_SIZE = 80;
@@ -3754,8 +3754,8 @@ function collectionMaxYear() {
 }
 
 // How far back through the year-by-year discovery journey collection has
-// reached. Lanes walk newest→oldest independently; the furthest-back (min)
-// year is the honest "where are we now" for the whole sweep.
+// reached. Lanes walk newest→oldest independently, so the newest/least-advanced
+// cursor is the honest year: only years above it are complete in every lane.
 function discoveryJourneyYear() {
   // TMDB /discover now drives the year-by-year sweep, so its cursor is the
   // authoritative "how far back have we reached"; fall back to the legacy
@@ -3765,7 +3765,7 @@ function discoveryJourneyYear() {
     : state.discoveryCursor;
   if (!cursors || typeof cursors !== 'object') return null;
   const years = Object.values(cursors).map(cursor => Number(cursor?.year)).filter(Number.isFinite);
-  return years.length ? Math.min(...years) : null;
+  return years.length ? Math.max(...years) : null;
 }
 
 function discoverySourcesForYear(laneKey, year) {
@@ -4006,7 +4006,7 @@ async function tmdbDiscover(mediaType, language, year, page) {
     include_adult: 'false',
     include_video: 'false',
     language: 'en-US',
-    sort_by: 'popularity.desc',
+    sort_by: mediaType === 'tv' ? 'first_air_date.desc' : 'primary_release_date.desc',
     with_original_language: language,
     'vote_count.gte': String(TMDB_DISCOVER_VOTE_FLOOR),
     page: String(Math.max(1, page))
@@ -7583,9 +7583,12 @@ function updateTitleSearch(value) {
   state.settings.titleSearch = String(value || '').trim();
   syncUnifiedSearchClearButton();
   if (!state.settings.titleSearch || state.settings.titleSearch !== wikiSearchQuery) {
+    wikiSearchQuery = '';
     wikiSearchResults = [];
+    tmdbSearchResults = [];
     localBlockedSearchResults = [];
     renderWikiSearchResults();
+    renderTmdbSearchResults();
   }
   recVisibleLimit = Math.max(parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
   poolVisibleLimit = 80;

@@ -4419,3 +4419,42 @@ language use the same exact-match rule. `Any` remains the only unrestricted
 choice, and an unknown `?` score does not match any numbered selection. The
 filter deck label is `Content level`; accessibility labels must not describe
 the controls as maximum thresholds.
+
+### 31.27 Search-result layout containment (v115)
+
+Opening unified TMDB/Wikipedia search results must not resize the desktop
+control-deck columns or vertically centre the statistics across the newly
+created result rows. The statistics occupy only the first explicit grid cell;
+the filter controls, both search-result rows and maintenance panel occupy the
+bounded second column. That column uses `minmax(0,1fr)`, and result choices may
+wrap inside it instead of contributing an unbounded intrinsic width. Showing
+or hiding search results therefore changes only the result area height and
+cannot squeeze the filters against the right edge, stretch the statistics
+across the page or create horizontal overflow.
+
+Clearing or changing the unified-search input immediately clears and hides
+both the TMDB and Wikipedia result rows. Results belong to the exact submitted
+query and must not remain actionable after the field no longer contains it.
+
+### 31.28 Exhaustive newest-to-oldest discovery (v115)
+
+The earlier TMDB sweep was not exhaustive: each lane sorted a year by
+popularity and stopped after five pages (roughly 100 candidates), then moved to
+the previous year. Consequently a cursor at 2014 did not mean later years were
+complete; lower-popularity eligible titles in those years had never been
+visited. Concurrent hydration also meant records were committed in network
+completion order, so database insertion order did not describe traversal.
+
+Each movie/show lane now requests release-date-descending order within a year
+and exhausts every TMDB page available through the API's 500-page boundary
+before moving to the preceding year. The eligibility boundary remains explicit:
+adult results, excluded non-narrative TV genres, wrong-language results and
+titles below the existing 12-vote notability floor are outside the sweep, and
+Wikipedia validation can still reject an eligible TMDB candidate. Cursor
+version 2 restarts existing installations at the newest year so pages skipped
+by the former five-page cap are recovered rather than waiting for a full cycle.
+
+English movies, Hindi movies and English shows retain independent cursors. The
+displayed discovery year is the newest (least advanced) of those cursors, so it
+never implies that all lanes completed a later year merely because one faster
+lane already travelled much further back.

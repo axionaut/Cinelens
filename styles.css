@@ -472,8 +472,8 @@
 
   @media(min-width:769px){
     .control-deck{padding:12px 18px;gap:10px}
-    .control-content{display:grid;grid-template-columns:auto 1fr;gap:10px 18px;align-items:center}
-    .stats-bar{grid-row:1 / span 2;display:grid;grid-template-columns:repeat(5,auto);gap:22px;align-items:center;border-bottom:0;margin:0;padding:0 18px 0 0;border-right:1px solid rgba(var(--accent-rgb),.13)}
+    .control-content{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:10px 18px;align-items:start}
+    .stats-bar{grid-column:1;grid-row:1;display:grid;grid-template-columns:repeat(5,auto);gap:22px;align-items:center;border-bottom:0;margin:0;padding:0 18px 0 0;border-right:1px solid rgba(var(--accent-rgb),.13)}
     .stat-val{font-size:26px}
     .stat-label{font-size:9px}
     /* The filter row holds fixed-width controls (year, genre, sort, search) that
@@ -482,6 +482,9 @@
        by body{overflow-x:hidden}, so those controls became unreachable. Wrapping
        keeps every control on screen at any width. */
     .settings-bar{grid-column:2;display:flex;align-items:center;flex-wrap:wrap;gap:8px 8px;margin:0!important;min-width:0}
+    .wiki-search-results{grid-column:2;min-width:0;max-width:100%;max-height:160px;overflow-x:hidden;overflow-y:auto;align-self:start}
+    .wiki-search-choice{min-width:0;max-width:100%}
+    .wiki-search-result{min-width:0;overflow-wrap:anywhere}
     .settings-bar label{font-size:10px;white-space:nowrap}
     .settings-bar .platform-select{min-width:110px;max-width:150px}
     .settings-bar .year-input{width:74px}
