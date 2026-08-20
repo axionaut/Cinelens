@@ -28,8 +28,9 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 118;
-const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v4-moods';
+const APP_VERSION = 119;
+const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
+const MOOD_PROMPT_VERSION = 'cinelens-moods-v1';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
 // After every retry is exhausted, a title that still couldn't reach 10 grounded
@@ -790,6 +791,8 @@ let sourceShedInProgress = false;
 let receptionCalibrationTimer = null;
 let backgroundAiTaggingInProgress = false;
 let backgroundAiTimer = null;
+let moodBackfillTimer = null;
+let moodBackfillInProgress = false;
 let startupDriveRestoreDone = false;
 // A browser with no local library must restore Drive before background work can
 // create titles or advance the dataset timestamp.
@@ -1476,6 +1479,18 @@ function hasCurrentAiTags(movie) {
   // would read as stale and the whole library would queue for retagging.
   if (movie.sourceShed) return true;
   return movie.aiTagging.storyHash === aiStoryHash(aiTagSourceText(movie));
+}
+
+function moodStoryHash(movie) {
+  return String(stableHash(`${MOOD_PROMPT_VERSION}:${aiTagSourceText(movie)}`));
+}
+
+function hasCurrentMoods(movie) {
+  if (!movie?.moodTagging || movie.moodTagging.status !== 'verified') return false;
+  if (movie.moodTagging.promptVersion !== MOOD_PROMPT_VERSION) return false;
+  if (!Array.isArray(movie.moods) || !movie.moods.length) return false;
+  if (movie.sourceShed) return true;
+  return movie.moodTagging.storyHash === moodStoryHash(movie);
 }
 
 function clearGeneratedTags(movie) {
@@ -2625,6 +2640,7 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
     scheduleTagCloudNormalization(1800);
     scheduleReceptionBackfill(4500);
     scheduleTmdbBackfill(4500);
+    scheduleMoodBackfill(6000);
     // Only acts once the stored source text is genuinely large; a no-op below
     // the threshold, so a small library keeps its text and retags for free.
     scheduleSourceShed(12000);
@@ -7119,6 +7135,76 @@ function aiTagCandidateCount() {
   return count;
 }
 
+function moodBackfillPendingCount() {
+  return Object.values(state.movies || {}).filter(movie => movie?.storyText && !hasCurrentMoods(movie)).length;
+}
+
+function moodBackfillStatusText() {
+  const remaining = moodBackfillPendingCount();
+  if (!remaining) return '';
+  return `${moodBackfillInProgress ? 'Mood backfill running' : 'Mood backfill queued'} · ${remaining} pending`;
+}
+
+function scheduleMoodBackfill(delay=5000) {
+  if (!libraryWritesUnlocked || moodBackfillInProgress || moodBackfillTimer || !moodBackfillPendingCount()) return;
+  moodBackfillTimer = setTimeout(() => {
+    moodBackfillTimer = null;
+    runMoodBackfill();
+  }, Math.max(0, Number(delay) || 0));
+}
+
+async function postAiMoodBatch(movies) {
+  const response = await fetchWithTimeout(AI_TAGGER_URL, {
+    method:'POST',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body:JSON.stringify({
+      task:'mood-titles',
+      items:movies.map(movie => ({id:movie.id, title:movie.title, storyText:aiTagSourceText(movie)}))
+    })
+  }, AI_TAGGER_TIMEOUT_MS);
+  if (!response.ok) throw new Error(`AI mood backfill HTTP ${response.status}`);
+  const payload = await response.json();
+  if (!payload.ok) throw new Error(payload.error || 'AI mood backfill failed');
+  return payload;
+}
+
+async function runMoodBackfill() {
+  if (moodBackfillInProgress || autoFetchPaused || !libraryWritesUnlocked) {
+    scheduleMoodBackfill(10000);
+    return;
+  }
+  const batch = Object.values(state.movies || {})
+    .filter(movie => movie?.storyText && !hasCurrentMoods(movie))
+    .slice(0, 20);
+  if (!batch.length) return;
+  moodBackfillInProgress = true;
+  try {
+    const payload = await postAiMoodBatch(batch);
+    const byId = new Map((payload.results || []).map(result => [String(result.id), result]));
+    const changed = [];
+    batch.forEach(movie => {
+      const result = byId.get(String(movie.id));
+      if (!result) return;
+      movie.moods = cleanMoodArray((result.moods || []).map(item => item.mood));
+      movie.moodEvidence = Object.fromEntries((result.moods || []).map(item => [normaliseTagName(item.mood), {confidence:Number(item.confidence), evidence:String(item.evidence || '')}]));
+      movie.moodTagging = {status:'verified', promptVersion:MOOD_PROMPT_VERSION, storyHash:moodStoryHash(movie), taggedAt:nowStamp()};
+      touchRecord(movie);
+      changed.push(String(movie.id));
+    });
+    if (changed.length) {
+      saveLocalState({silentUi:true, preserveUpdatedAt:true, changedMovieIds:changed});
+      queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
+      invalidateTagCaches();
+      render();
+    }
+  } catch (error) {
+    console.warn('Mood backfill deferred:', error);
+  } finally {
+    moodBackfillInProgress = false;
+    scheduleMoodBackfill(moodBackfillPendingCount() ? 10000 : 0);
+  }
+}
+
 async function enrichLegacyTitleForAi(movie) {
   if (!movie || hasCurrentAiTags(movie)) return movie;
   if (movie.storyText) return movie;
@@ -8113,6 +8199,8 @@ function updateLibraryHealth() {
   const receptionSegment = receptionStatus ? ` · ${receptionStatus}` : '';
   const tmdbStatus = tmdbBackfillStatusText();
   const tmdbSegment = tmdbStatus ? ` · ${tmdbStatus}` : '';
+  const moodStatus = moodBackfillStatusText();
+  const moodSegment = moodStatus ? ` · ${moodStatus}` : '';
 
   let text;
   if (autoFetchPaused) text = 'Collection paused';
@@ -8127,7 +8215,7 @@ function updateLibraryHealth() {
 
   if (label) label.textContent = text;
   if (maintenance) {
-    maintenance.textContent = `${text} · ${health.tagDebt} titles awaiting current AI tags${receptionSegment}${tmdbSegment} · ${drive}`;
+    maintenance.textContent = `${text} · ${health.tagDebt} titles awaiting current AI tags${receptionSegment}${tmdbSegment}${moodSegment} · ${drive}`;
   }
   const tmdbBtn = document.getElementById('tmdbBackfillToggleBtn');
   if (tmdbBtn) {

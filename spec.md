@@ -4500,3 +4500,14 @@ may restore Drive before enabling collection. If the token is absent or
 expired, the local library is rendered immediately and Drive remains available
 through the explicit Drive reconnect action. This prevents the header from
 remaining at `Starting library...` while the app waits for silent OAuth.
+
+### 31.32 Independent mood backfill (v119)
+
+Mood extraction uses the separate `mood-titles` Apps Script task and
+`cinelens-moods-v1` provenance. It must not bump `AI_TAG_PROMPT_VERSION` or
+invalidate existing narrative tags. Titles without current mood metadata are
+processed by a bounded background lane in batches of 20, with its own pending
+count and maintenance status. Successful mood results persist `moods`,
+`moodEvidence`, and `moodTagging`; failures leave the title pending for a later
+retry. The narrative AI backlog and mood backlog remain independent.
+
