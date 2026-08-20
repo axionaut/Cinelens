@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 120;
+const APP_VERSION = 121;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v1';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
@@ -9395,10 +9395,11 @@ function trainTasteModel(excludeMovieId='', targetFormatClass='all') {
       row.genres.forEach(genre => {
         rawPredictions[index] += (genreDeltas[genre] || 0) * GENRE_SCORE_FACTOR;
       });
-      rawPredictions[index] = clamp(rawPredictions[index], 1, 5);
     });
-  }
 
+    // Moods are the third residual lane, and like tags and genres it belongs
+    // INSIDE the pass loop: it fits against the residual the tag and genre
+    // lanes just left behind, and the next pass must see its contribution.
     const moodStats = {};
     rows.forEach((row, index) => {
       const weight = formatTasteWeight(row, targetFormatClass);
@@ -9409,20 +9410,31 @@ function trainTasteModel(excludeMovieId='', targetFormatClass='all') {
         stat.strength += MOOD_SCORE_FACTOR * MOOD_SCORE_FACTOR * weight;
       });
     });
+
     const moodDeltas = {};
     Object.entries(moodStats).forEach(([mood, stat]) => {
-      const delta = clamp((stat.sum / (stat.strength + TASTE_MODEL_GENRE_REGULARIZATION)) * TASTE_MODEL_GENRE_LEARNING_RATE, -0.20, 0.20);
+      const delta = clamp(
+        (stat.sum / (stat.strength + TASTE_MODEL_GENRE_REGULARIZATION)) * TASTE_MODEL_GENRE_LEARNING_RATE,
+        -0.20,
+        0.20
+      );
       if (!delta) return;
       model.moodEffects[mood] = (model.moodEffects[mood] || 0) + delta;
       moodDeltas[mood] = delta;
     });
+    // The single clamp for the whole pass lands here, after the last lane has
+    // applied its deltas, so no lane is silently truncated mid-pass.
+    rows.forEach((row, index) => {
+      row.moods.forEach(mood => {
+        rawPredictions[index] += (moodDeltas[mood] || 0) * MOOD_SCORE_FACTOR;
+      });
+      rawPredictions[index] = clamp(rawPredictions[index], 1, 5);
+    });
+  }
 
   // Calibrate the learned raw score against the actual 1–5 ratings. This makes
   // the displayed percentage a rating prediction rather than a relative overlap
   // score that merely makes the top title look like 100%.
-      row.moods.forEach(mood => {
-        rawPredictions[index] += (moodDeltas[mood] || 0) * MOOD_SCORE_FACTOR;
-      });
   const calibrationWeight = totalWeight || rows.length || 1;
   const meanRaw = rawPredictions.reduce((sum, value, index) => sum + value * formatTasteWeight(rows[index], targetFormatClass), 0) / calibrationWeight;
   const meanActual = rows.reduce((sum, row) => sum + row.rating * formatTasteWeight(row, targetFormatClass), 0) / calibrationWeight;

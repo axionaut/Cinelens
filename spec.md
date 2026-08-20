@@ -4539,3 +4539,35 @@ Two invariants follow, and they apply to any future view setting:
 
 A render path must never be the thing that discovers a setting is malformed.
 Persisted view state is untrusted input.
+
+### 31.34 The mood lane belongs inside the training pass loop (v121)
+
+The mood residual lane in `trainTasteModel()` was pasted after the closing brace
+of the `for (let pass...)` loop rather than inside it, and its apply-deltas step
+lost its `rows.forEach((row, index) => ...)` wrapper entirely — the surviving
+fragment was left stranded below the calibration comment, referencing `row` and
+`index` with nothing binding them. `node --check` passes on this, because it is
+valid syntax; it fails only when the code actually runs.
+
+The result was a `ReferenceError: row is not defined` thrown from
+`trainTasteModel()` on any library with enough rating evidence to enter the pass
+loop, which is why it never reproduced on a small or unpersonalized fixture.
+`trainTasteModel()` sits under `render()` via `renderRecs()` →
+`recommendationCandidates()`, and under the Drive restore path, so the same
+defect blanked the library *and* surfaced as the toast `Drive sign-in failed:
+row is not defined` — `driveErrorMessage()` formats `e.message`, so an ordinary
+programming error inside the Drive call stack is reported as a sign-in failure.
+
+Invariants:
+
+- Every residual lane — tags, genres, moods — is fitted **inside** the pass
+  loop. A lane outside it fits against a residual no later pass can see, which
+  silently changes the model even when it does not throw.
+- One clamp per pass, after the last lane has applied its deltas. The clamp
+  previously sat on the genre lane; with moods appended it would have truncated
+  predictions before the mood lane ever contributed.
+- A fixture that does not clear `recommendationScoringTags()`' 10%
+  presentability ceiling produces zero evidence rows, so `trainTasteModel()`
+  returns at the `rows.length < 3` guard and the pass loop is never entered. A
+  taste-model regression test needs a tag vocabulary wide enough to survive that
+  filter, or it silently asserts nothing — see `dev/assert-v121.mjs`.
