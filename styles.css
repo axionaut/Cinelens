@@ -267,6 +267,7 @@
   .star:hover,.star.active{color:var(--accent)}
   .card-tags{gap:4px;margin-top:6px}
   .genre-row{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin:7px 0 3px}
+  .mood-row{margin-top:3px}.mood-chip{border-color:rgba(232,197,71,.35);color:var(--accent)}
   .genre-label{font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted2);margin-right:2px}
   .genre-chip{font-size:9px;color:var(--tag-text,var(--muted));border:1px solid var(--tag-border,var(--border));border-radius:10px;padding:2px 7px;text-transform:capitalize;background:var(--palette-chip-bg,transparent);font-family:inherit;line-height:inherit}.genre-chip.clickable{cursor:pointer}.genre-chip.clickable:hover,.genre-chip.clickable:focus-visible{color:var(--accent);border-color:var(--accent2);background:color-mix(in srgb,var(--accent) 12%,transparent);outline:none}
   .genre-chip.matched{color:var(--accent);border-color:var(--accent2);background:color-mix(in srgb,var(--accent) 12%,transparent)}

@@ -4469,3 +4469,25 @@ empty row, border, padding, or vertical gap to the control deck.
 Unified local-title matching uses accent-insensitive canonical text. A plain
 keyboard query such as `amelie` therefore matches a stored `Amélie` record,
 using the same forgiving title identity expected during external discovery.
+
+### 31.30 Canonical moods (v117)
+
+Every title carries a separate `moods` list alongside `genres` and narrative
+`tags`. The AI tagger may return up to two evidence-backed moods from the
+canonical vocabulary `happy`, `sad`, `romantic`, `funny`, `scary`, `tense`,
+`calm`, `dark` and `mixed`. Records without a usable returned mood normalize to
+`mixed`, so old and partially migrated titles remain displayable and
+filterable. Moods are not merged into `movie.tags` and do not participate in
+tag-cloud normalization.
+
+Cards display moods in their own row. The mood filter supports multiple values
+with the same OR/AND behavior as the genre filter. Mood chips open the existing
+tag detail and preference workflow, and moods appear in the Tags brain without
+being removable through tag-delete mode. Learned mood effects contribute to
+recommendations at a lower factor than genre effects; explicit mood
+preferences use the shared preference controls. Similar-title matching also
+uses mood overlap.
+
+The client AI prompt/schema version is `cinelens-tags-v4-moods` and the client
+release is v117. The Apps Script source must be redeployed manually whenever
+this backend schema or prompt changes.

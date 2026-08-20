@@ -130,6 +130,13 @@
       <option value="and">AND</option>
     </select>
      </div>
+    <label>Mood</label>
+    <div class="genre-control">
+     <select class="platform-select genre-filter-select" id="moodFilter" multiple size="1" onchange="updateMoodFilter()" aria-label="Moods" title="Select one or more moods">
+      <option value="happy">Happy</option><option value="sad">Sad</option><option value="romantic">Romantic</option><option value="funny">Funny</option><option value="scary">Scary</option><option value="tense">Tense</option><option value="calm">Calm</option><option value="dark">Dark</option><option value="mixed">Mixed</option>
+     </select>
+     <select class="platform-select genre-match-select" id="moodMatchMode" onchange="updateMoodMatchMode(this.value)" aria-label="Mood match mode" title="Match any or all selected moods"><option value="or">OR</option><option value="and">AND</option></select>
+    </div>
     <label>Format</label>
     <select class="platform-select" id="formatPreference" onchange="updateFormatPreference(this.value)" aria-label="Format preference" title="How much weight shows carry against movies in recommendations">
       <option value="balanced">Movies &amp; shows equally</option>

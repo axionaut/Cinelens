@@ -28,8 +28,8 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 116;
-const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
+const APP_VERSION = 117;
+const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v4-moods';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
 // After every retry is exhausted, a title that still couldn't reach 10 grounded
@@ -47,6 +47,9 @@ const AI_TAG_TOPUP_ATTEMPT_LIMIT = 3;
 const AI_TAG_TOPUP_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 const AI_TAG_MAX_COUNT = 24;
 const AI_TAG_MIGRATION_VERSION = 1;
+const MOOD_VALUES = ['happy','sad','romantic','funny','scary','tense','calm','dark','mixed'];
+const MOOD_MIN_CONFIDENCE = 0.55;
+const MOOD_SCORE_FACTOR = 0.18;
 // v91 pipeline rebuild — batch sizes are now the server's real ceiling
 // Apps Script still accepts 20 items, but the configured 250K TPM budget makes
 // two worst-case story payloads the safe client batch. Pacing is owned by
@@ -816,7 +819,8 @@ let state = {
   movies: {},
   tagWeights: {},
   genreWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', genreFilters:[], genreMatchMode:'or', ratingFilter:'all', contentMaxSex:'any', contentMaxViolence:'any', contentMaxLanguage:'any', sortMode:'recommended', sortDirection:'desc', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, formatPreference:DEFAULT_FORMAT_PREFERENCE, tmdbBackfillPaused:false },
+  moodWeights: {},
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', genreFilters:[], genreMatchMode:'or', moodFilters:[], moodMatchMode:'or', ratingFilter:'all', contentMaxSex:'any', contentMaxViolence:'any', contentMaxLanguage:'any', sortMode:'recommended', sortDirection:'desc', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, formatPreference:DEFAULT_FORMAT_PREFERENCE, tmdbBackfillPaused:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', manifestFileId:'', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   wrongPicks: {},
@@ -977,6 +981,11 @@ function movieGenres(movie) {
 
 function normaliseTagName(tag) {
   return String(tag || '').toLowerCase().trim().replace(/\s+/g, '-');
+}
+
+function cleanMoodArray(moods) {
+  const clean = [...new Set((moods || []).map(normaliseTagName).filter(mood => MOOD_VALUES.includes(mood)))];
+  return clean.length ? clean.slice(0, 2) : ['mixed'];
 }
 
 const CANONICAL_FUNCTION_WORDS = new Set('a an the and or but nor so yet of in on at to from into onto by for with without as is are was were be been being has have had do does did will would can could may might must shall should this that these those it its he she they them his her their who whom whose which what when where while after before during then than also just still already again ever never very more most less least much many some any each every both either neither keeps keep kept starts start started begins begin began continues continue continued tries try tried'.split(' '));
@@ -1546,7 +1555,12 @@ function cleanAiTagResults(result, movie) {
     tags.push(cleaned);
     evidence[cleaned] = { confidence, evidence:support };
   });
-  return {tags:tags.slice(0, AI_TAG_MAX_COUNT), evidence};
+  const moods = [...new Set((result?.moods || [])
+    .filter(item => MOOD_VALUES.includes(normaliseTagName(item?.mood)))
+    .filter(item => Number(item?.confidence) >= MOOD_MIN_CONFIDENCE)
+    .filter(item => normaliseTagName(item?.mood) === 'mixed' || evidenceSupportedByStory(String(item?.evidence || ''), aiTagSourceText(movie)))
+    .map(item => normaliseTagName(item.mood)))].slice(0, 2);
+  return {tags:tags.slice(0, AI_TAG_MAX_COUNT), evidence, moods:cleanMoodArray(moods)};
 }
 
 function buildTagVocabularyCache() {
@@ -2069,6 +2083,7 @@ function commitAiTagSet(movie, cleaned, model='', opts={}) {
   movie.rawDescriptors = [];
   movie.tagged = true;
   movie.aiTagEvidence = reconciled.evidence;
+  movie.moods = cleanMoodArray(cleaned?.moods);
   delete movie.aiTagPartial;
   movie.aiTagging = {
     status:'verified',
@@ -2103,7 +2118,7 @@ function applyAiTagResult(movie, result, model='') {
 
 function mergeAiTagPartials(previous={tags:[], evidence:{}}, next={tags:[], evidence:{}}) {
   const tags = [...new Set([...(previous.tags || []), ...(next.tags || [])])].slice(0, AI_TAG_MAX_COUNT);
-  return {tags, evidence:{...(previous.evidence || {}), ...(next.evidence || {})}};
+  return {tags, evidence:{...(previous.evidence || {}), ...(next.evidence || {})}, moods:cleanMoodArray(next.moods || previous.moods)};
 }
 
 function aiTagFailureMessage(error, movie=null) {
@@ -2223,6 +2238,7 @@ async function postAiTaggerBatchRequest(items, partials, opts={}) {
             format:movie.format ? 'show' : 'movie',
             language:movie.language,
             genres:movieGenres(movie),
+            moods:cleanMoodArray(movie.moods),
             storyText:`${sourceText}${coverageInstruction}${continuationInstruction}`,
             existingTags,
             minimumTags,
@@ -2301,7 +2317,7 @@ async function requestAiTagsInner(items, opts={}) {
     if (savedPartials[id] || opts.partials?.[id] || !needsTagTopUp(movie)) return;
     const existing = rawScoringTags(movie);
     if (!existing.length) return;
-    savedPartials[id] = {tags:[...existing], evidence:{...(movie.aiTagEvidence || {})}};
+    savedPartials[id] = {tags:[...existing], evidence:{...(movie.aiTagEvidence || {})}, moods:cleanMoodArray(movie.moods)};
     movie.aiTagging = {
       ...movie.aiTagging,
       topUpAttempts:Number(movie.aiTagging?.topUpAttempts || 0) + 1,
@@ -2929,6 +2945,7 @@ function normaliseStoredTitleRecord(movie) {
     movie.source = 'wikipedia';
     movie.wikiVerified = true;
     movie.tags = cleanTagArray(movie.tags || movie.coreTags || movie.plotTags || movie.descriptorTags || [], movie, false);
+    movie.moods = cleanMoodArray(movie.moods);
     movie.coreTags = cleanTagArray(movie.coreTags && movie.coreTags.length ? movie.coreTags : movie.tags, movie, false);
     movie.plotTags = cleanTagArray(movie.plotTags && movie.plotTags.length ? movie.plotTags : movie.tags, movie, false);
     movie.descriptorTags = cleanTagArray(movie.descriptorTags && movie.descriptorTags.length ? movie.descriptorTags : movie.tags, movie, false);
@@ -2944,6 +2961,7 @@ function normaliseStoredTitleRecord(movie) {
   } else if (isWikiRecord) {
     movie.source = 'wikipedia';
     movie.tags = cleanTagArray(movie.tags || movie.coreTags || movie.plotTags || movie.descriptorTags || [], movie, false);
+    movie.moods = cleanMoodArray(movie.moods);
     movie.coreTags = cleanTagArray(movie.coreTags && movie.coreTags.length ? movie.coreTags : movie.tags, movie, false);
     movie.plotTags = cleanTagArray(movie.plotTags || [], movie, false);
     movie.descriptorTags = cleanTagArray(movie.descriptorTags || [], movie, false);
@@ -7362,6 +7380,13 @@ function updateControlDeck() {
     const selected = new Set(selectedGenreFilters());
     [...genreFilter.options].forEach(option => { option.selected = selected.has(option.value); });
   }
+  const moodFilter=document.getElementById('moodFilter');
+  if (moodFilter) {
+    const selected = new Set(selectedMoodFilters());
+    [...moodFilter.options].forEach(option => { option.selected = selected.has(option.value); });
+  }
+  const moodMatchMode=document.getElementById('moodMatchMode');
+  if (moodMatchMode) moodMatchMode.value=state.settings.moodMatchMode || 'or';
   const genreMatchMode=document.getElementById('genreMatchMode');
   if (genreMatchMode) genreMatchMode.value=state.settings.genreMatchMode || 'or';
   const formatPreference=document.getElementById('formatPreference');
@@ -7642,7 +7667,7 @@ function matchesGlobalFilters(movie) {
   // when the search text is a pasted Wikipedia URL that cannot match its title.
   // It remains pinned until that same card is rated, which clears the search.
   if (isPendingManualSearchResult(movie)) return true;
-  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesRatingFilter(movie) && matchesContentGuideFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
+  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesMoodFilter(movie) && matchesRatingFilter(movie) && matchesContentGuideFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
 }
 
 function discoveryPool() {
@@ -7661,6 +7686,38 @@ function matchesGenreFilter(movie) {
   return state.settings.genreMatchMode === 'and'
     ? filters.every(filter => genres.includes(filter))
     : filters.some(filter => genres.includes(filter));
+}
+
+function selectedMoodFilters() {
+  return [...new Set((state.settings?.moodFilters || []).map(normaliseTagName).filter(mood => MOOD_VALUES.includes(mood)))];
+}
+
+function setMoodFilters(moods) {
+  state.settings.moodFilters = [...new Set((moods || []).map(normaliseTagName).filter(mood => MOOD_VALUES.includes(mood)))];
+  saveViewState();
+  renderActiveCards();
+  updateControlDeck();
+}
+
+function updateMoodFilter() {
+  const control=document.getElementById('moodFilter');
+  setMoodFilters(control ? [...control.selectedOptions].map(option => option.value) : []);
+}
+
+function updateMoodMatchMode(mode) {
+  state.settings.moodMatchMode = mode === 'and' ? 'and' : 'or';
+  saveViewState();
+  renderActiveCards();
+  updateControlDeck();
+}
+
+function matchesMoodFilter(movie) {
+  const filters = selectedMoodFilters();
+  if (!filters.length) return true;
+  const moods = cleanMoodArray(movie?.moods);
+  return state.settings.moodMatchMode === 'and'
+    ? filters.every(filter => moods.includes(filter))
+    : filters.some(filter => moods.includes(filter));
 }
 
 function matchesRatingFilter(movie) {
@@ -8389,7 +8446,8 @@ function similarTitleActive() {
 function similarFingerprint(movie) {
   return new Set([
     ...recommendationScoringTags(movie),
-    ...movieGenres(movie).map(genre => `genre:${genre}`)
+    ...movieGenres(movie).map(genre => `genre:${genre}`),
+    ...cleanMoodArray(movie.moods).map(mood => `mood:${mood}`)
   ]);
 }
 
@@ -8398,6 +8456,7 @@ function similarTitleResults() {
   if (!source) return [];
   const sourceTags = new Set(recommendationScoringTags(source));
   const sourceGenres = new Set(movieGenres(source));
+  const sourceMoods = new Set(cleanMoodArray(source.moods));
   const sourceAll = similarFingerprint(source);
   return Object.values(state.movies || {})
     .filter(movie => movie.id !== source.id)
@@ -8408,11 +8467,12 @@ function similarTitleResults() {
       const genres = movieGenres(movie);
       const matchedTags = new Set(tags.filter(tag => sourceTags.has(tag)));
       const matchedGenres = new Set(genres.filter(genre => sourceGenres.has(genre)));
+      const matchedMoods = new Set(cleanMoodArray(movie.moods).filter(mood => sourceMoods.has(mood)));
       const targetAll = similarFingerprint(movie);
       let union = new Set([...sourceAll, ...targetAll]).size || 1;
       let shared = 0;
       targetAll.forEach(token => { if (sourceAll.has(token)) shared++; });
-      const similarity = (shared / union) + (matchedTags.size * 0.08) + (matchedGenres.size * 0.04);
+      const similarity = (shared / union) + (matchedTags.size * 0.08) + (matchedGenres.size * 0.04) + (matchedMoods.size * 0.03);
       return {movie, matchedTags, matchedGenres, similarity, shared};
     })
     .filter(item => item.shared > 0)
@@ -8745,6 +8805,7 @@ function buildCard(movie, opts={}) {
       </div>
       ${renderStars(safeId, movie.rating || 0)}
       ${renderGenres(movie, resolvedMatchedGenres)}
+      ${renderMoods(movie)}
       ${renderContentGuide(movie)}
       ${renderWatchProviders(movie)}
       ${poolView && movie.retagMessage ? `<div class="pool-card-note">${movie.retagMessage}</div>`:''}
@@ -8916,6 +8977,19 @@ function renderGenres(movie, matchedGenres=null) {
     const safeGenre = String(genre).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
     return `<button type="button" class="genre-chip clickable${matched.has?.(genre) ? ' matched' : ''}" onclick="filterByGenreFromCard('${safeGenre}',event)">${genre}</button>`;
   }).join('')}</div>`;
+}
+
+function renderMoods(movie) {
+  const moods = cleanMoodArray(movie?.moods);
+  return `<div class="genre-row mood-row"><span class="genre-label">Moods</span>${moods.map(mood => {
+    const safeMood = String(mood).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return `<button type="button" class="genre-chip clickable mood-chip" onclick="filterByMoodFromCard('${safeMood}',event)">${mood}</button>`;
+  }).join('')}</div>`;
+}
+
+function filterByMoodFromCard(mood, event) {
+  if (event) event.stopPropagation();
+  openTagFromCard(moodTagKey(mood));
 }
 
 function renderContentGuide(movie) {
@@ -9111,7 +9185,8 @@ function ratingEvidenceRows(excludeMovieId='') {
       rating:Number(movie.rating),
       formatClass:formatClass(movie),
       tags:fitScoringTags(movie),
-      genres:movieGenres(movie)
+      genres:movieGenres(movie),
+      moods:cleanMoodArray(movie.moods)
     }));
 }
 
@@ -9137,6 +9212,7 @@ function trainTasteModel(excludeMovieId='', targetFormatClass='all') {
     baseline:fallbackRating,
     tagEffects:{},
     genreEffects:{},
+    moodEffects:{},
     calibrationSlope:1,
     calibrationIntercept:0,
     tagMassPivot:TAG_MASS_PIVOT_FALLBACK,
@@ -9222,9 +9298,30 @@ function trainTasteModel(excludeMovieId='', targetFormatClass='all') {
     });
   }
 
+    const moodStats = {};
+    rows.forEach((row, index) => {
+      const weight = formatTasteWeight(row, targetFormatClass);
+      const residual = row.rating - rawPredictions[index];
+      row.moods.forEach(mood => {
+        const stat = moodStats[mood] || (moodStats[mood] = {sum:0, strength:0});
+        stat.sum += residual * MOOD_SCORE_FACTOR * weight;
+        stat.strength += MOOD_SCORE_FACTOR * MOOD_SCORE_FACTOR * weight;
+      });
+    });
+    const moodDeltas = {};
+    Object.entries(moodStats).forEach(([mood, stat]) => {
+      const delta = clamp((stat.sum / (stat.strength + TASTE_MODEL_GENRE_REGULARIZATION)) * TASTE_MODEL_GENRE_LEARNING_RATE, -0.20, 0.20);
+      if (!delta) return;
+      model.moodEffects[mood] = (model.moodEffects[mood] || 0) + delta;
+      moodDeltas[mood] = delta;
+    });
+
   // Calibrate the learned raw score against the actual 1–5 ratings. This makes
   // the displayed percentage a rating prediction rather than a relative overlap
   // score that merely makes the top title look like 100%.
+      row.moods.forEach(mood => {
+        rawPredictions[index] += (moodDeltas[mood] || 0) * MOOD_SCORE_FACTOR;
+      });
   const calibrationWeight = totalWeight || rows.length || 1;
   const meanRaw = rawPredictions.reduce((sum, value, index) => sum + value * formatTasteWeight(rows[index], targetFormatClass), 0) / calibrationWeight;
   const meanActual = rows.reduce((sum, row) => sum + row.rating * formatTasteWeight(row, targetFormatClass), 0) / calibrationWeight;
@@ -9419,6 +9516,20 @@ function predictTasteFit(movie, model=null, opts={}) {
     }
   });
 
+  cleanMoodArray(movie.moods).forEach(mood => {
+    const contribution = moodIsNeutralized(mood)
+      ? 0
+      : Number(activeModel?.moodEffects?.[mood] || 0) * MOOD_SCORE_FACTOR + manualMoodPreferenceEffect(mood);
+    rawRating += contribution;
+    if (contribution > 0.012) {
+      posOverlap++;
+      positiveScore += contribution;
+    } else if (contribution < -0.012) {
+      negativeOverlap++;
+      negativePenalty += Math.abs(contribution);
+    }
+  });
+
   // v101: a stated FORMAT preference, applied to the learned taste signal only
   // (the distance from baseline), never to the baseline itself. Scaling the
   // whole score would drag every show toward 1 star; scaling the signal means a
@@ -9482,6 +9593,7 @@ function computeTagWeights() {
   const model = getTasteModel();
   const weights = {};
   const genres = {};
+  const moods = {};
   Object.entries(model.tagEffects || {}).forEach(([tag, effect]) => {
     const value = tagIsNeutralized(tag) ? 0 : Number(effect || 0) + manualTagPreferenceEffect(tag);
     if (Math.abs(value) > 0.001) weights[tag] = value;
@@ -9500,8 +9612,14 @@ function computeTagWeights() {
       : Number(model.genreEffects?.[genre] || 0) * GENRE_SCORE_FACTOR + manualGenrePreferenceEffect(genre);
     if (Math.abs(value) > 0.001) genres[genre] = value;
   });
+  MOOD_VALUES.forEach(mood => {
+    const key=moodTagKey(mood);
+    const value=moodIsNeutralized(mood) ? 0 : Number(model.moodEffects?.[mood] || 0) * MOOD_SCORE_FACTOR + manualMoodPreferenceEffect(mood);
+    if (Math.abs(value) > 0.001) moods[mood]=value;
+  });
   state.tagWeights = weights;
   state.genreWeights = genres;
+  state.moodWeights = moods;
 }
 
 function scoreMovies() {
@@ -10233,6 +10351,11 @@ function renderTagBrain() {
       if (!map[key]) map[key]={weight:state.genreWeights[genre]||0,preference:Number(state.settings.tagPreferences[key]||0),stated:hasStatedPreference(key),movieCount:0,movies:[],isGenre:true};
       map[key].movieCount++; map[key].movies.push(m);
     });
+    cleanMoodArray(m.moods).forEach(mood => {
+      const key=moodTagKey(mood);
+      if (!map[key]) map[key]={weight:state.moodWeights?.[mood]||0,preference:Number(state.settings.tagPreferences[key]||0),stated:hasStatedPreference(key),movieCount:0,movies:[],isMood:true};
+      map[key].movieCount++; map[key].movies.push(m);
+    });
   });
   let entries=Object.entries(map);
   if (!entries.length) { grid.innerHTML='<span style="font-size:12px;color:var(--muted)">No useful tags yet.</span>'; countEl.textContent='rate movies to populate'; return; }
@@ -10257,11 +10380,13 @@ function renderTagBrain() {
     const name=tagDisplayName(tag);
     // Delete mode strips a tag off titles, which is meaningless for a genre —
     // those chips stay inert rather than silently doing nothing surprising.
-    const removable = state.settings.tagDeleteMode && !data.isGenre;
+    const removable = state.settings.tagDeleteMode && !data.isGenre && !data.isMood;
     const title = removable
       ? `Remove "${name}" from ${data.movieCount} ${data.movieCount === 1 ? 'title' : 'titles'}`
       : data.isGenre
         ? `Explore genre "${name}"`
+        : data.isMood
+          ? `Explore mood "${name}"`
         : `Explore "${name}"`;
     return `<span class="tb-tag ${cls}${removable ? ' remove-mode' : ''}" title="${title}" onclick="handleTagBrainClick('${safe}',event)">${name}<span class="tb-weight">${ws}</span>${pref}<span class="tb-count">${data.movieCount}</span></span>`;
   }).join('');
@@ -10273,7 +10398,7 @@ function handleTagBrainClick(tag, event) {
   // A genre is derived from TMDB/Wikipedia classification, not from the tagger,
   // so it cannot be "removed from titles" the way a story tag can. Open it for
   // preference-setting instead of failing silently.
-  if (state.settings.tagDeleteMode && !isGenreTagKey(tag)) removeTagFromBrain(tag);
+  if (state.settings.tagDeleteMode && !isGenreTagKey(tag) && !isMoodTagKey(tag)) removeTagFromBrain(tag);
   else openTagPanel(tag);
 }
 
@@ -10351,9 +10476,22 @@ function showMoreTagTitles() {
 // already filters bare genre words out of the cloud, but this makes it
 // structural rather than incidental).
 const GENRE_TAG_PREFIX = 'genre:';
+const MOOD_TAG_PREFIX = 'mood:';
 
 function genreTagKey(genre) {
   return GENRE_TAG_PREFIX + normaliseTagName(genre);
+}
+
+function moodTagKey(mood) {
+  return MOOD_TAG_PREFIX + normaliseTagName(mood);
+}
+
+function isMoodTagKey(value) {
+  return String(value || '').startsWith(MOOD_TAG_PREFIX);
+}
+
+function moodFromTagKey(value) {
+  return isMoodTagKey(value) ? String(value).slice(MOOD_TAG_PREFIX.length) : '';
 }
 
 function isGenreTagKey(value) {
@@ -10367,7 +10505,7 @@ function genreFromTagKey(value) {
 // Display name for either kind of key — genres show as plain "thriller", not
 // "genre:thriller", so the cloud reads as one mixed list.
 function tagDisplayName(value) {
-  return isGenreTagKey(value) ? genreFromTagKey(value) : String(value || '');
+  return isGenreTagKey(value) ? genreFromTagKey(value) : isMoodTagKey(value) ? moodFromTagKey(value) : String(value || '');
 }
 
 // v93: "no opinion" and "explicitly neutral" are now different states.
@@ -10385,7 +10523,7 @@ function tagDisplayName(value) {
 // never stored a 0 (it was always deleted), so presence of a 0 is unambiguous
 // and no migration is needed.
 function preferenceKey(tag) {
-  return isGenreTagKey(tag) ? genreTagKey(genreFromTagKey(tag)) : normaliseTagName(tag);
+  return isGenreTagKey(tag) ? genreTagKey(genreFromTagKey(tag)) : isMoodTagKey(tag) ? moodTagKey(moodFromTagKey(tag)) : normaliseTagName(tag);
 }
 
 function hasStatedPreference(tag) {
@@ -10405,9 +10543,17 @@ function genreIsNeutralized(genre) {
   return isNeutralizedPreference(genreTagKey(genre));
 }
 
+function moodIsNeutralized(mood) {
+  return isNeutralizedPreference(moodTagKey(mood));
+}
+
 function manualGenrePreferenceEffect(genre) {
   const preference = Number(state.settings?.tagPreferences?.[genreTagKey(genre)] || 0);
   return clamp(preference, -4, 4) * TASTE_MODEL_MANUAL_PREFERENCE_UNIT;
+}
+
+function manualMoodPreferenceEffect(mood) {
+  return clamp(Number(state.settings?.tagPreferences?.[moodTagKey(mood)] || 0), -4, 4) * TASTE_MODEL_MANUAL_PREFERENCE_UNIT;
 }
 
 function tagPreferenceValue(tag) {
@@ -10420,6 +10566,10 @@ function titlesForTagKey(key, collection) {
   if (isGenreTagKey(key)) {
     const genre = genreFromTagKey(key);
     return rows.filter(movie => movieGenres(movie).includes(genre));
+  }
+  if (isMoodTagKey(key)) {
+    const mood = moodFromTagKey(key);
+    return rows.filter(movie => cleanMoodArray(movie.moods).includes(mood));
   }
   return rows.filter(movie => movie.tagged && scoringTags(movie).includes(key));
 }
@@ -10466,7 +10616,7 @@ function renderTagPreferenceControls(tag) {
   const stated = hasStatedPreference(tag);
   const current = tagPreferenceValue(tag);
   const safe = String(tag).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-  const kind = isGenreTagKey(tag) ? 'genre' : 'tag';
+  const kind = isGenreTagKey(tag) ? 'genre' : isMoodTagKey(tag) ? 'mood' : 'tag';
   const options = [
     [-4,'Avoid',`Strongly steer away from this ${kind}`],
     [-2,'Dislike',`Steer away from this ${kind}`],
@@ -10497,10 +10647,11 @@ function renderTagDetail() {
   detail.hidden=false;
   computeTagWeights();
   const isGenre=isGenreTagKey(selectedTag);
+  const isMood=isMoodTagKey(selectedTag);
   document.getElementById('tagDetailName').textContent=tagDisplayName(selectedTag);
   const activeMovies=titlesForTagKey(selectedTag);
   const all=activeMovies.map(movie=>({movie,status:movie.rating>0?'rated':'pool'}));
-  const weight=(isGenre ? state.genreWeights[genreFromTagKey(selectedTag)] : state.tagWeights[selectedTag])||0;
+  const weight=(isGenre ? state.genreWeights[genreFromTagKey(selectedTag)] : isMood ? state.moodWeights?.[moodFromTagKey(selectedTag)] : state.tagWeights[selectedTag])||0;
   const preference=tagPreferenceValue(selectedTag);
   // Long floats read as noise in a status line; two decimals matches the
   // precision the cloud chips already show.
@@ -11213,7 +11364,7 @@ function saveLocalState(opts={}) {
   try {
     localStorage.setItem('cinelens_v2_bootstrap',JSON.stringify({
       schema:'cinelens-local-v3',
-      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,genreFilters:state.settings?.genreFilters,genreMatchMode:state.settings?.genreMatchMode,ratingFilter:state.settings?.ratingFilter,contentMaxSex:state.settings?.contentMaxSex,contentMaxViolence:state.settings?.contentMaxViolence,contentMaxLanguage:state.settings?.contentMaxLanguage,sortMode:state.settings?.sortMode,sortDirection:state.settings?.sortDirection,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
+      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,genreFilters:state.settings?.genreFilters,genreMatchMode:state.settings?.genreMatchMode,moodFilters:state.settings?.moodFilters,moodMatchMode:state.settings?.moodMatchMode,ratingFilter:state.settings?.ratingFilter,contentMaxSex:state.settings?.contentMaxSex,contentMaxViolence:state.settings?.contentMaxViolence,contentMaxLanguage:state.settings?.contentMaxLanguage,sortMode:state.settings?.sortMode,sortDirection:state.settings?.sortDirection,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
       drive:{enabled:state.drive.enabled,folderId:state.drive.folderId,fileId:state.drive.fileId,manifestFileId:state.drive.manifestFileId||'',lastConnectedAt:state.drive.lastConnectedAt},
       updatedAt:state.meta?.updatedAt || nowStamp()
     }));
