@@ -28,9 +28,9 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 121;
+const APP_VERSION = 122;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
-const MOOD_PROMPT_VERSION = 'cinelens-moods-v1';
+const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
 // After every retry is exhausted, a title that still couldn't reach 10 grounded
@@ -48,7 +48,7 @@ const AI_TAG_TOPUP_ATTEMPT_LIMIT = 3;
 const AI_TAG_TOPUP_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 const AI_TAG_MAX_COUNT = 24;
 const AI_TAG_MIGRATION_VERSION = 1;
-const MOOD_VALUES = ['happy','sad','romantic','funny','scary','tense','calm','dark','mixed'];
+const MOOD_VALUES = ['happy','sad','romantic','funny','scary','tense','calm','dark'];
 const MOOD_MIN_CONFIDENCE = 0.55;
 const MOOD_SCORE_FACTOR = 0.18;
 // v91 pipeline rebuild — batch sizes are now the server's real ceiling
@@ -988,7 +988,7 @@ function normaliseTagName(tag) {
 
 function cleanMoodArray(moods) {
   const clean = [...new Set((moods || []).map(normaliseTagName).filter(mood => MOOD_VALUES.includes(mood)))];
-  return clean.length ? clean.slice(0, 2) : ['mixed'];
+  return clean.length ? [clean[0]] : ['calm'];
 }
 
 const CANONICAL_FUNCTION_WORDS = new Set('a an the and or but nor so yet of in on at to from into onto by for with without as is are was were be been being has have had do does did will would can could may might must shall should this that these those it its he she they them his her their who whom whose which what when where while after before during then than also just still already again ever never very more most less least much many some any each every both either neither keeps keep kept starts start started begins begin began continues continue continued tries try tried'.split(' '));
@@ -1570,11 +1570,12 @@ function cleanAiTagResults(result, movie) {
     tags.push(cleaned);
     evidence[cleaned] = { confidence, evidence:support };
   });
-  const moods = [...new Set((result?.moods || [])
+  const moods = [...(result?.moods || [])
     .filter(item => MOOD_VALUES.includes(normaliseTagName(item?.mood)))
     .filter(item => Number(item?.confidence) >= MOOD_MIN_CONFIDENCE)
-    .filter(item => normaliseTagName(item?.mood) === 'mixed' || evidenceSupportedByStory(String(item?.evidence || ''), aiTagSourceText(movie)))
-    .map(item => normaliseTagName(item.mood)))].slice(0, 2);
+    .filter(item => evidenceSupportedByStory(String(item?.evidence || ''), aiTagSourceText(movie)))
+    .sort((left, right) => Number(right.confidence) - Number(left.confidence))
+    .map(item => normaliseTagName(item.mood))];
   return {tags:tags.slice(0, AI_TAG_MAX_COUNT), evidence, moods:cleanMoodArray(moods)};
 }
 
@@ -7185,8 +7186,10 @@ async function runMoodBackfill() {
     batch.forEach(movie => {
       const result = byId.get(String(movie.id));
       if (!result) return;
-      movie.moods = cleanMoodArray((result.moods || []).map(item => item.mood));
-      movie.moodEvidence = Object.fromEntries((result.moods || []).map(item => [normaliseTagName(item.mood), {confidence:Number(item.confidence), evidence:String(item.evidence || '')}]));
+      const mood = cleanMoodArray((result.moods || []).map(item => item.mood))[0];
+      movie.moods = [mood];
+      const moodResult = (result.moods || []).find(item => normaliseTagName(item.mood) === mood);
+      movie.moodEvidence = moodResult ? {[mood]: {confidence:Number(moodResult.confidence), evidence:String(moodResult.evidence || '')}} : {};
       movie.moodTagging = {status:'verified', promptVersion:MOOD_PROMPT_VERSION, storyHash:moodStoryHash(movie), taggedAt:nowStamp()};
       touchRecord(movie);
       changed.push(String(movie.id));

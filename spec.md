@@ -4571,3 +4571,14 @@ Invariants:
   returns at the `rows.length < 3` guard and the pass loop is never entered. A
   taste-model regression test needs a tag vocabulary wide enough to survive that
   filter, or it silently asserts nothing — see `dev/assert-v121.mjs`.
+
+### 31.35 One canonical mood per title (v122)
+
+Every title stores exactly one canonical mood. The mood vocabulary is `happy`,
+`sad`, `romantic`, `funny`, `scary`, `tense`, `calm` and `dark`; `mixed` is not
+a valid mood. The AI prompt and structured response schema require one mood,
+and when several candidates are returned the client and Apps Script retain the
+highest-confidence candidate. Legacy or malformed mood arrays are collapsed to
+their first valid mood, with `calm` as the displayable fallback. Mood evidence
+is persisted only for that selected mood. Existing mood records are reprocessed
+under `cinelens-moods-v2`.
