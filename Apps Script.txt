@@ -477,14 +477,18 @@ function sanitizeTaggingResults(results, cleanItems, maximumTags) {
         .filter(function (item, index, values) {
           return ['happy', 'sad', 'romantic', 'funny', 'scary', 'tense', 'calm', 'dark', 'mixed'].indexOf(item.mood) >= 0 &&
             item.evidence && isFinite(item.confidence) && item.confidence >= 0.55 && item.confidence <= 1 &&
-            values.findIndex(value => value.mood === item.mood) === index;
+            values.findIndex(function (value) { return value.mood === item.mood; }) === index;
         })
         .slice(0, 2);
 
       return {
         id: id,
         tags: tags,
-        moods: moods.length ? moods : [{mood: 'mixed', confidence: 0.55, evidence: 'The supplied plot presents a mixed emotional experience.'}]
+        moods: moods.length ? moods : [{
+          mood: 'mixed',
+          confidence: 0.55,
+          evidence: 'The supplied plot presents a mixed emotional experience.'
+        }]
       };
     });
 }
