@@ -11835,6 +11835,10 @@ function tokenRequest(prompt, opts={}) {
       rememberDriveToken(resp.access_token, resp.expires_in || 3300);
       finish(resolve, resp.access_token);
     };
+    driveTokenClient.error_callback = err => {
+      console.error('Drive token error', err);
+      finish(reject, err || {error:'unknown_oauth_error'});
+    };
     try { driveTokenClient.requestAccessToken({prompt}); }
     catch(e) { finish(reject, e); }
   });
