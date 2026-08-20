@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 122;
+const APP_VERSION = 123;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
@@ -752,8 +752,41 @@ const COUNTRY_NAMES = {
   TH:'Thailand', TR:'Turkey', TW:'Taiwan', UA:'Ukraine', US:'United States', VE:'Venezuela',
   VN:'Vietnam', ZA:'South Africa'
 };
+const COUNTRY_LOCATIONS = {
+  AD:[42.5,1.5], AE:[24.5,54.4], AR:[-34.6,-58.4], AT:[48.2,16.4], AU:[-35.3,149.1],
+  BE:[50.8,4.4], BG:[42.7,23.3], BR:[-15.8,-47.9], CA:[45.4,-75.7], CH:[46.9,7.4],
+  CL:[-33.4,-70.7], CO:[4.7,-74.1], CZ:[50.1,14.4], DE:[52.5,13.4], DK:[55.7,12.6],
+  EC:[-0.2,-78.5], EE:[59.4,24.8], EG:[30,31.2], ES:[40.4,-3.7], FI:[60.2,24.9],
+  FR:[48.9,2.3], GB:[51.5,-0.1], GR:[38,23.7], HK:[22.3,114.2], HR:[45.8,16],
+  HU:[47.5,19], ID:[-6.2,106.8], IE:[53.3,-6.3], IL:[31.8,35.2], IN:[28.6,77.2],
+  IS:[64.1,-21.9], IT:[41.9,12.5], JP:[35.7,139.7], KR:[37.6,127], LT:[54.7,25.3],
+  LU:[49.6,6.1], LV:[56.9,24.1], MX:[19.4,-99.1], MY:[3.1,101.7], NL:[52.4,4.9],
+  NO:[59.9,10.8], NZ:[-41.3,174.8], PE:[-12,-77], PH:[14.6,121], PK:[33.7,73.1],
+  PL:[52.2,21], PT:[38.7,-9.1], RO:[44.4,26.1], RU:[55.8,37.6], SA:[24.7,46.7],
+  SE:[59.3,18.1], SG:[1.3,103.8], SK:[48.1,17.1], TH:[13.8,100.5], TR:[39.9,32.9],
+  TW:[25,121.5], UA:[50.5,30.5], US:[38.9,-77], VE:[10.5,-66.9], VN:[21,-105.8], ZA:[-33.9,18.4]
+};
+let viewerLocation = null;
 function countryName(code) {
   return COUNTRY_NAMES[String(code || '').toUpperCase()] || String(code || '');
+}
+function requestViewerLocation() {
+  if (!navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition(position => {
+    viewerLocation = [position.coords.latitude, position.coords.longitude];
+    renderActiveCards();
+  }, () => {}, {maximumAge: 24 * 60 * 60 * 1000, timeout: 10000});
+}
+function countryDistance(code) {
+  if (!viewerLocation || !COUNTRY_LOCATIONS[code]) return Number.POSITIVE_INFINITY;
+  const [latitude, longitude] = COUNTRY_LOCATIONS[code];
+  const [viewerLatitude, viewerLongitude] = viewerLocation;
+  const toRadians = value => value * Math.PI / 180;
+  const latitudeDelta = toRadians(latitude - viewerLatitude);
+  const longitudeDelta = toRadians(longitude - viewerLongitude);
+  const a = Math.sin(latitudeDelta / 2) ** 2
+    + Math.cos(toRadians(viewerLatitude)) * Math.cos(toRadians(latitude)) * Math.sin(longitudeDelta / 2) ** 2;
+  return 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 let tmdbBackfillTimer = null;
 let tmdbBackfillInProgress = false;
@@ -2688,6 +2721,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // must never blank an already-loaded library while Google auth or the network
   // is settling; a successful restore can merge and rerender afterward.
   render();
+  requestViewerLocation();
 
   // A previously connected browser may restore silently. A new browser remains
   // read-only until the user taps Drive, so it cannot manufacture a newer local
@@ -9122,7 +9156,11 @@ function renderWatchProviders(movie) {
   // Full country names, uncapped — the expanded card layout has the width
   // for it now, unlike the old flip card's fixed poster-shaped box.
   const rows = matches.map(({platform, countries}) => {
-    const names = countries.map(countryName).sort().join(', ');
+    const names = countries
+      .map(code => ({code, name:countryName(code)}))
+      .sort((a, b) => countryDistance(a.code) - countryDistance(b.code) || a.name.localeCompare(b.name))
+      .map(country => country.name)
+      .join(', ');
     const url = ottSearchUrl(platform, movie.title);
     const chip = url
       ? `<a class="watch-chip" href="${attrSafe(url)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Open ${attrSafe(movie.title)} on ${attrSafe(platform)}">${attrSafe(platform)}</a>`
