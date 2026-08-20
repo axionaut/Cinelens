@@ -4511,3 +4511,31 @@ count and maintenance status. Successful mood results persist `moods`,
 `moodEvidence`, and `moodTagging`; failures leave the title pending for a later
 retry. The narrative AI backlog and mood backlog remain independent.
 
+
+### 31.33 View settings must survive a malformed stored profile (v120)
+
+`moodFilters` was read as an array without ever being proven to be one. Settings
+are merged back from the Drive and IndexedDB profiles raw — `applyDriveProfile()`
+and `replaceStateFromDataset()` both spread `incoming.settings` with no
+normalisation — so a stored profile carrying a truthy non-array value made
+`selectedMoodFilters()` throw `.map is not a function` out of
+`updateControlDeck()`. That aborted `render()` before `updateLibraryHealth()` and
+`renderRecs()`, so the whole library went blank: no cards, and the header,
+maintenance line and For You count all frozen at their static `index.html`
+defaults (`Starting library...`, `Checking library health...`, `rate movies to
+unlock`) while the stats bar still showed live counts, because `updateStats()`,
+`updateAiTagButton()` and `setDriveStatus()` are also driven from background
+paths outside `render()`.
+
+Two invariants follow, and they apply to any future view setting:
+
+- `normaliseFilterAndSortSettings()` coerces the setting on load, next to the
+  existing `genreFilters` clause. Every multi-value filter restored from a
+  profile gets the same treatment; `moodMatchMode` is pinned alongside
+  `genreMatchMode`.
+- The reader itself does not trust the stored shape. `|| []` only defends
+  against nullish values, not against a string, number or object, which is the
+  shape a stale or foreign profile actually delivers.
+
+A render path must never be the thing that discovers a setting is malformed.
+Persisted view state is untrusted input.

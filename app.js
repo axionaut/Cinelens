@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 119;
+const APP_VERSION = 120;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v1';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
@@ -7545,6 +7545,8 @@ function normaliseFilterAndSortSettings() {
     state.settings.genreFilters = legacyGenre && legacyGenre !== 'all' ? [legacyGenre] : [];
   }
   state.settings.genreMatchMode = state.settings.genreMatchMode === 'and' ? 'and' : 'or';
+  if (!Array.isArray(state.settings.moodFilters)) state.settings.moodFilters = [];
+  state.settings.moodMatchMode = state.settings.moodMatchMode === 'and' ? 'and' : 'or';
   state.settings.formatPreference = formatPreferenceKey();
   const legacySortModes = {
     'rating-desc':['rating','desc'], 'year-desc':['year','desc'], 'year-asc':['year','asc'],
@@ -7780,7 +7782,13 @@ function matchesGenreFilter(movie) {
 }
 
 function selectedMoodFilters() {
-  return [...new Set((state.settings?.moodFilters || []).map(normaliseTagName).filter(mood => MOOD_VALUES.includes(mood)))];
+  // Never assume the stored value is an array. Settings are merged back from
+  // the Drive/IndexedDB profile raw (applyDriveProfile, replaceStateFromDataset),
+  // so a profile holding a truthy non-array here used to throw straight out of
+  // updateControlDeck() and abort every render before renderRecs() ran — the
+  // whole library went blank while the stats bar still showed live counts.
+  const stored = Array.isArray(state.settings?.moodFilters) ? state.settings.moodFilters : [];
+  return [...new Set(stored.map(normaliseTagName).filter(mood => MOOD_VALUES.includes(mood)))];
 }
 
 function setMoodFilters(moods) {
