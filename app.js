@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 117;
+const APP_VERSION = 118;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v4-moods';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
@@ -2677,9 +2677,14 @@ window.addEventListener('DOMContentLoaded', async () => {
   // dataset before Drive is checked.
   let restored = false;
   try {
-    // Startup restore is authoritative: Drive must populate this browser before
-    // timestamp-based merging or background collection is allowed.
-    restored = await restoreDriveSession(false, {preferDrive:true});
+    // Do not make the local library wait for a silent OAuth round-trip when the
+    // cached token is already expired or absent. The user can reconnect from
+    // the Drive button; startup should remain usable while Google auth settles.
+    const cachedDriveToken = state.drive.accessToken || getStoredDriveToken();
+    if (cachedDriveToken) {
+      // Startup restore is authoritative when a valid token is available.
+      restored = await restoreDriveSession(false, {preferDrive:true});
+    }
   } catch (error) {
     console.warn('Drive startup restore failed', error);
   }

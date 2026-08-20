@@ -4489,5 +4489,14 @@ preferences use the shared preference controls. Similar-title matching also
 uses mood overlap.
 
 The client AI prompt/schema version is `cinelens-tags-v4-moods` and the client
-release is v117. The Apps Script source must be redeployed manually whenever
+release is v118. The Apps Script source must be redeployed manually whenever
 this backend schema or prompt changes.
+
+### 31.31 Local-first startup with Drive reconnect (v118)
+
+Startup must not block the already-loaded IndexedDB library on a silent Google
+Drive authentication round-trip. If a valid cached Drive token exists, startup
+may restore Drive before enabling collection. If the token is absent or
+expired, the local library is rendered immediately and Drive remains available
+through the explicit Drive reconnect action. This prevents the header from
+remaining at `Starting library...` while the app waits for silent OAuth.
