@@ -7,11 +7,11 @@
 <style>html,body{margin:0;min-height:100%;background:#080808;color:#f2f2f3}</style>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230a0a0a'/%3E%3Ccircle cx='32' cy='32' r='21' fill='none' stroke='%23e5383b' stroke-width='6'/%3E%3Ccircle cx='32' cy='32' r='7' fill='%23e5383b'/%3E%3Cpath d='M32 11v10M32 43v10M11 32h10M43 32h10' stroke='%23e5383b' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=116">
+<link rel="stylesheet" href="styles.css?v=125">
 </head>
 <body>
 
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <div class="modal-overlay hidden" id="manualRatingModal">
   <div class="modal">
@@ -62,9 +62,9 @@
     </div>
   </div>
   <div class="header-right">
-    <button class="library-status" type="button" onclick="toggleMaintenancePanel()" aria-label="Open library maintenance">
-      <span class="drive-dot" id="driveDot"></span>
-      <span id="driveLabel">not connected</span>
+    <button class="library-status" type="button" onclick="handleLibraryStatusClick()" title="Open library maintenance">
+      <span class="drive-dot pending" id="driveDot"></span>
+      <span id="driveLabel">Starting…</span>
       <span class="library-health-label" id="libraryHealthLabel">Starting library…</span>
     </button>
   </div>
@@ -75,7 +75,7 @@
 
   <div class="fetch-progress" id="fetchProgress" aria-live="polite" aria-busy="false">
     <div class="fetch-label" id="fetchLabel">Working…</div>
-    <div class="fetch-bar"><div class="fetch-fill" id="fetchFill" style="width:0%"></div></div>
+    <div class="fetch-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div class="fetch-fill" id="fetchFill" style="width:0%"></div></div>
     <div class="fetch-sub" id="fetchSub"></div>
     <button class="btn btn-sm btn-warning fetch-stop" onclick="stopFetching()">Pause collection</button>
   </div>
@@ -132,10 +132,9 @@
      </div>
     <label>Mood</label>
     <div class="genre-control">
-     <select class="platform-select genre-filter-select" id="moodFilter" multiple size="1" onchange="updateMoodFilter()" aria-label="Moods" title="Select one or more moods">
-      <option value="happy">Happy</option><option value="sad">Sad</option><option value="romantic">Romantic</option><option value="funny">Funny</option><option value="scary">Scary</option><option value="tense">Tense</option><option value="calm">Calm</option><option value="dark">Dark</option><option value="mixed">Mixed</option>
+     <select class="platform-select genre-filter-select" id="moodFilter" multiple size="1" onchange="updateMoodFilter()" aria-label="Moods" title="Show titles whose mood is any of these">
+      <option value="happy">Happy</option><option value="sad">Sad</option><option value="romantic">Romantic</option><option value="funny">Funny</option><option value="scary">Scary</option><option value="tense">Tense</option><option value="calm">Calm</option><option value="dark">Dark</option>
      </select>
-     <select class="platform-select genre-match-select" id="moodMatchMode" onchange="updateMoodMatchMode(this.value)" aria-label="Mood match mode" title="Match any or all selected moods"><option value="or">OR</option><option value="and">AND</option></select>
     </div>
     <label>Format</label>
     <select class="platform-select" id="formatPreference" onchange="updateFormatPreference(this.value)" aria-label="Format preference" title="How much weight shows carry against movies in recommendations">
@@ -187,7 +186,6 @@
     <summary>Library maintenance</summary>
     <div class="maintenance-health" id="maintenanceHealth">Checking library health…</div>
     <div class="maintenance-actions">
-      <button class="platform-btn" onclick="connectDrive()">Drive</button>
       <button class="platform-btn" onclick="stopOrExpandPool()" id="expandBtn">Expand now</button>
       <button class="platform-btn" id="tagUntaggedBtn" onclick="tagAllUntagged()" style="display:none">Retry pending AI tags</button>
       <button class="platform-btn" id="normalizeTagCloudBtn" onclick="consolidateTagCloud()">Consolidate tags now</button>
@@ -285,6 +283,6 @@
 <button class="go-top-btn" id="goTopBtn" onclick="goToTop()" title="Go to top">↑</button>
 
 <script async src="https://accounts.google.com/gsi/client"></script>
-<script src="app.js?v=124"></script>
+<script src="app.js?v=125"></script>
 </body>
 </html>

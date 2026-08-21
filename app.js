@@ -28,9 +28,16 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 124;
+const APP_VERSION = 125;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
+const MOOD_BACKFILL_BATCH_SIZE = 20;
+// The gap between mood batches was a flat 10s, so a library with a few thousand
+// untagged moods needed most of an hour of wall clock with no way to tell it was
+// progressing. The lane is rate-limited by AdaptiveLimiter like every other
+// upstream, so the fixed gate was only ever slowing down work the limiter is
+// already pacing correctly.
+const MOOD_BACKFILL_BATCH_DELAY_MS = 1200;
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
 // After every retry is exhausted, a title that still couldn't reach 10 grounded
@@ -856,7 +863,7 @@ let state = {
   tagWeights: {},
   genreWeights: {},
   moodWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', genreFilters:[], genreMatchMode:'or', moodFilters:[], moodMatchMode:'or', ratingFilter:'all', contentMaxSex:'any', contentMaxViolence:'any', contentMaxLanguage:'any', sortMode:'recommended', sortDirection:'desc', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, formatPreference:DEFAULT_FORMAT_PREFERENCE, tmdbBackfillPaused:false },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', genreFilters:[], genreMatchMode:'or', moodFilters:[], ratingFilter:'all', contentMaxSex:'any', contentMaxViolence:'any', contentMaxLanguage:'any', sortMode:'recommended', sortDirection:'desc', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, formatPreference:DEFAULT_FORMAT_PREFERENCE, tmdbBackfillPaused:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', manifestFileId:'', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   wrongPicks: {},
@@ -3849,6 +3856,7 @@ function stopFetching(opts={}) {
   if (currentAiTagAbortController) currentAiTagAbortController.abort();
   if (currentTmdbAbortController) currentTmdbAbortController.abort();
   if (currentSleepCancel) currentSleepCancel();
+  resetPipelineProgress();
   hideFetchProgress();
   const btn = document.getElementById('expandBtn');
   if (btn) { btn.disabled = false; btn.textContent = '＋ Expand Pool'; }
@@ -6086,7 +6094,7 @@ async function runReceptionBackfill() {
       // Per-title pause check so "Pause collection" stops this within one
       // title instead of finishing the whole batch first.
       index++;
-      showBackgroundPipelineProgress('Wikipedia', `${index}/${batch.length} · ${movie.title}`);
+      pipelineStageProgress('wikipedia', receptionBackfillPendingCount(), movie.title);
       try {
         const mode = movie.format ? 'shows' : 'movies';
         const fresh = movie.wikiPageId
@@ -6158,7 +6166,9 @@ async function runReceptionBackfill() {
     console.warn('Reception backfill paused', error);
   } finally {
     receptionBackfillInProgress = false;
-    settleBackgroundPipelineProgress(receptionBackfillPendingCount() ? 10000 : 0);
+    const receptionLeft = receptionBackfillPendingCount();
+    if (receptionLeft) pipelineStageProgress('wikipedia', receptionLeft);
+    else pipelineStageFinished('wikipedia');
     scheduleBackgroundAiQueue(700);
     scheduleReceptionBackfill(9000);
     maybeAutoExpandPool();
@@ -6289,7 +6299,7 @@ async function runSourceShed() {
       changedMovieIds.push(String(movie.id));
     }
     if (changedMovieIds.length) {
-      showBackgroundPipelineProgress('Compacting', `${changedMovieIds.length} titles · ${((startBytes - bytes) / 1048576).toFixed(1)}MB reclaimed`);
+      pipelineStageProgress('compacting', null, `${changedMovieIds.length} titles · ${((startBytes - bytes) / 1048576).toFixed(1)}MB reclaimed`);
       saveLocalState({preserveUpdatedAt:true, changedMovieIds, silentUi:true});
       queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
       console.info('CineLens shed source text', {
@@ -6302,7 +6312,7 @@ async function runSourceShed() {
     console.warn('Source shed paused', error);
   } finally {
     sourceShedInProgress = false;
-    settleBackgroundPipelineProgress(0);
+    pipelineStageFinished('compacting');
     // Re-enter until under target; sourceShedDue() stops the loop.
     if (changedMovieIds.length && sourceShedDue()) scheduleSourceShed(6000);
   }
@@ -6426,7 +6436,7 @@ async function runTmdbBackfill() {
     const queue = batch.slice();
     const refreshOne = async movie => {
       index++;
-      showBackgroundPipelineProgress('TMDB', `${index}/${batch.length} · ${movie.title} · posters, genres, availability, audience evidence`);
+      pipelineStageProgress('tmdb', tmdbBackfillPendingCount(), movie.title);
       try {
         const versionBefore = Number(movie.tmdbDataVersion || 0);
         const tmdbIdBefore = String(movie.tmdbId || '');
@@ -6478,7 +6488,9 @@ async function runTmdbBackfill() {
     console.warn('TMDB backfill paused', error);
   } finally {
     tmdbBackfillInProgress = false;
-    settleBackgroundPipelineProgress(tmdbBackfillPendingCount() ? 10000 : 0);
+    const tmdbLeft = tmdbBackfillPendingCount();
+    if (tmdbLeft) pipelineStageProgress('tmdb', tmdbLeft);
+    else pipelineStageFinished('tmdb');
     if (pendingBackgroundAiCount()) scheduleBackgroundAiQueue(700);
     scheduleTmdbBackfill(6000);
   }
@@ -7253,24 +7265,46 @@ function nextPaint() {
 // v64 removes that measurement and custom property entirely. The activity
 // surface is fixed outside document flow; ticks only update changed values and
 // never shift sticky offsets or invalidate the card grid.
-function showFetchProgress(label, pct, sub) {
+// Who currently owns the progress bar. A title the user is adding or retagging
+// right now must not have its progress overwritten by a background sweep that
+// happens to tick — both wrote to the same element and whichever fired last
+// won, which is why the bar flicked between unrelated messages.
+let fetchProgressOwner = '';
+
+// pct === null renders an indeterminate bar. That is what a real app does when
+// the size of the job is genuinely unknown; a made-up number that never moves
+// is worse than admitting it, because a frozen 45% reads as a hang.
+function showFetchProgress(label, pct, sub, owner='foreground') {
   const el = document.getElementById('fetchProgress');
   if (!el) return;
+  if (owner !== 'foreground' && fetchProgressOwner === 'foreground') return;
+  fetchProgressOwner = owner;
   clearTimeout(fetchProgressHideTimer);
   fetchProgressHideTimer = null;
-  const safePct = Math.max(0, Math.min(100, Number(pct) || 0));
+  const indeterminate = pct === null;
+  const safePct = indeterminate ? 0 : Math.max(0, Math.min(100, Number(pct) || 0));
   // classList.add rewrites the class attribute even when the token is already
   // present, so an unguarded add is a real attribute mutation on every tick.
   if (!el.classList.contains('visible')) el.classList.add('visible');
+  if (!document.body.classList.contains('pipeline-active')) document.body.classList.add('pipeline-active');
   if (el.getAttribute('aria-busy') !== 'true') el.setAttribute('aria-busy', 'true');
   const labelEl = document.getElementById('fetchLabel');
+  const barEl = el.querySelector('.fetch-bar');
   const fillEl = document.getElementById('fetchFill');
   const subEl = document.getElementById('fetchSub');
   const nextLabel = label || 'Working…';
   const nextSub = sub || '';
-  const nextWidth = `${safePct}%`;
   if (labelEl && labelEl.textContent !== nextLabel) labelEl.textContent = nextLabel;
-  if (fillEl && fillEl.style.width !== nextWidth) fillEl.style.width = nextWidth;
+  if (barEl && barEl.classList.contains('indeterminate') !== indeterminate) barEl.classList.toggle('indeterminate', indeterminate);
+  if (fillEl) {
+    const nextWidth = indeterminate ? '' : `${safePct.toFixed(1)}%`;
+    if (fillEl.style.width !== nextWidth) fillEl.style.width = nextWidth;
+  }
+  if (barEl) {
+    const valueNow = indeterminate ? '' : String(Math.round(safePct));
+    if (valueNow && barEl.getAttribute('aria-valuenow') !== valueNow) barEl.setAttribute('aria-valuenow', valueNow);
+    else if (!valueNow && barEl.hasAttribute('aria-valuenow')) barEl.removeAttribute('aria-valuenow');
+  }
   if (subEl && subEl.textContent !== nextSub) subEl.textContent = nextSub;
 }
 let fetchProgressHideTimer = null;
@@ -7280,44 +7314,117 @@ function hideFetchProgress(delay=0) {
   fetchProgressHideTimer = null;
   const hide = () => {
     fetchProgressHideTimer = null;
+    fetchProgressOwner = '';
     if (!el) return;
     el.classList.remove('visible');
+    document.body.classList.remove('pipeline-active');
     el.setAttribute('aria-busy', 'false');
+    const bar = el.querySelector('.fetch-bar');
+    if (bar) bar.classList.remove('indeterminate');
   };
+  if (delay <= 0) fetchProgressOwner = '';
   if (delay > 0) fetchProgressHideTimer = setTimeout(hide, delay);
   else hide();
 }
 
-function backgroundPipelineStages(extra='') {
-  const stages=[];
-  if (receptionBackfillInProgress) stages.push('Wikipedia');
-  if (tmdbBackfillInProgress) stages.push('TMDB');
-  if (backgroundAiTaggingInProgress) stages.push('Gemini');
-  if (sourceShedInProgress) stages.push('Compacting');
-  if (extra && !stages.includes(extra)) stages.push(extra);
-  return stages;
+// ─────────────────────────────────────────────
+// BACKGROUND PIPELINE PROGRESS
+//
+// The bar used to be handed a hardcoded percentage — 45% for one active stage,
+// 55% for two — so it could not move however much work had been done, and a
+// four-thousand-title catch-up looked exactly like a hang. It also stayed on
+// screen for ten seconds after the work finished, and the mood backfill, by far
+// the longest-running sweep, reported nothing at all.
+//
+// Each stage now reports the one number it genuinely knows: how much work is
+// still outstanding. `done` accumulates from the decreases in that number, so
+// it never runs backwards, and the denominator is `done + remaining`, so a
+// queue that grows mid-run widens the bar honestly instead of resetting it. A
+// stage that cannot know its remaining work reports null and the bar renders
+// indeterminate rather than inventing a figure.
+// ─────────────────────────────────────────────
+const PIPELINE_STAGE_ORDER = ['wikipedia', 'gemini', 'moods', 'tmdb', 'compacting'];
+const PIPELINE_STAGE_LABELS = {
+  wikipedia:'Story text',
+  gemini:'AI tagging',
+  moods:'Moods',
+  tmdb:'Posters & availability',
+  compacting:'Compacting'
+};
+const pipelineStages = new Map();
+let pipelineRenderQueued = false;
+
+function pipelineStageProgress(key, remaining, detail='') {
+  let stage = pipelineStages.get(key);
+  if (!stage) {
+    stage = {key, done:0, remaining:null, detail:'', startedAt:Date.now()};
+    pipelineStages.set(key, stage);
+  }
+  if (remaining == null) {
+    stage.remaining = null;
+  } else {
+    const left = Math.max(0, Math.round(Number(remaining) || 0));
+    // Only a decrease counts as work completed. A queue that grows raises the
+    // denominator without ever discarding progress already shown.
+    if (stage.remaining != null && left < stage.remaining) stage.done += stage.remaining - left;
+    stage.remaining = left;
+  }
+  stage.detail = detail || '';
+  schedulePipelineProgressRender();
 }
 
-function showBackgroundPipelineProgress(stage, detail='') {
-  const stages=backgroundPipelineStages(stage);
-  showFetchProgress(
-    stages.length > 1 ? `Updating library in parallel · ${stages.join(' + ')}` : `${stage} update`,
-    stages.length > 1 ? 55 : 45,
-    detail
-  );
+function pipelineStageFinished(key) {
+  if (!pipelineStages.delete(key)) return;
+  schedulePipelineProgressRender();
 }
 
-function settleBackgroundPipelineProgress(delay=10000) {
-  const stages=backgroundPipelineStages();
-  if (stages.length) {
-    showFetchProgress(
-      stages.length > 1 ? `Updating library in parallel · ${stages.join(' + ')}` : `${stages[0]} update`,
-      stages.length > 1 ? 55 : 45,
-      ''
-    );
+function schedulePipelineProgressRender() {
+  if (pipelineRenderQueued) return;
+  pipelineRenderQueued = true;
+  const run = () => { pipelineRenderQueued = false; renderPipelineProgress(); };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+  else setTimeout(run, 16);
+}
+
+function formatPipelineEta(milliseconds) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 45000) return '';
+  const minutes = Math.round(milliseconds / 60000);
+  if (minutes < 60) return `~${Math.max(1, minutes)} min left`;
+  return `~${Math.round(minutes / 60)} h left`;
+}
+
+function renderPipelineProgress() {
+  const stages = PIPELINE_STAGE_ORDER.map(key => pipelineStages.get(key)).filter(Boolean);
+  if (!stages.length) {
+    // Nothing is running. A short settle keeps the finished bar readable for a
+    // moment rather than vanishing mid-blink — it does not linger for ten
+    // seconds pretending there is still work.
+    hideFetchProgress(900);
     return;
   }
-  hideFetchProgress(delay);
+  const measured = stages.filter(stage => stage.remaining != null && stage.done + stage.remaining > 0);
+  const done = measured.reduce((sum, stage) => sum + stage.done, 0);
+  const total = measured.reduce((sum, stage) => sum + stage.done + stage.remaining, 0);
+  const determinate = measured.length === stages.length && total > 0;
+
+  const names = stages.map(stage => PIPELINE_STAGE_LABELS[stage.key] || stage.key);
+  const label = stages.length > 1 ? `Updating library · ${names.join(' + ')}` : names[0];
+
+  const parts = stages.map((stage, index) => {
+    if (stage.remaining == null) return `${names[index]} · working`;
+    const stageTotal = stage.done + stage.remaining;
+    return `${names[index]} ${stage.done.toLocaleString()}/${stageTotal.toLocaleString()}`;
+  });
+
+  // A rate only means anything once enough has finished for it to mean anything.
+  const elapsed = Date.now() - Math.min(...stages.map(stage => stage.startedAt));
+  const eta = determinate && done >= 5 && elapsed > 15000
+    ? formatPipelineEta((total - done) * (elapsed / done))
+    : '';
+  const detail = stages.map(stage => stage.detail).filter(Boolean)[0] || '';
+  const sub = [parts.join('  ·  '), eta, detail].filter(Boolean).join('  ·  ');
+
+  showFetchProgress(label, determinate ? (done / total) * 100 : null, sub, 'pipeline');
 }
 
 function aiSourceDataReady(movie, now=Date.now()) {
@@ -7399,14 +7506,19 @@ async function postAiMoodBatch(movies) {
 
 async function runMoodBackfill() {
   if (moodBackfillInProgress || autoFetchPaused || !libraryWritesUnlocked) {
+    pipelineStageFinished('moods');
     scheduleMoodBackfill(10000);
     return;
   }
   const batch = Object.values(state.movies || {})
     .filter(movie => movie?.storyText && !hasCurrentMoods(movie))
-    .slice(0, 20);
-  if (!batch.length) return;
+    .slice(0, MOOD_BACKFILL_BATCH_SIZE);
+  if (!batch.length) {
+    pipelineStageFinished('moods');
+    return;
+  }
   moodBackfillInProgress = true;
+  pipelineStageProgress('moods', moodBackfillPendingCount());
   try {
     const payload = await postAiMoodBatch(batch);
     const byId = new Map((payload.results || []).map(result => [String(result.id), result]));
@@ -7432,7 +7544,13 @@ async function runMoodBackfill() {
     console.warn('Mood backfill deferred:', error);
   } finally {
     moodBackfillInProgress = false;
-    scheduleMoodBackfill(moodBackfillPendingCount() ? 10000 : 0);
+    const moodsLeft = moodBackfillPendingCount();
+    if (moodsLeft) {
+      pipelineStageProgress('moods', moodsLeft);
+      scheduleMoodBackfill(MOOD_BACKFILL_BATCH_DELAY_MS);
+    } else {
+      pipelineStageFinished('moods');
+    }
   }
 }
 
@@ -7483,6 +7601,14 @@ function markAiBatchRetryFailure(movie, error) {
   movie.retagStatus = 'needs-ai-tags';
   movie.retagMessage = aiTagFailureMessage(error, movie);
   touchRecord(movie);
+}
+
+// Clears every background stage. Used by the paths that stop or replace the
+// whole pipeline, so a stale stage cannot keep a finished bar on screen.
+function resetPipelineProgress() {
+  if (!pipelineStages.size) return;
+  pipelineStages.clear();
+  schedulePipelineProgressRender();
 }
 
 async function tagAllUntagged() {
@@ -7654,6 +7780,10 @@ function setTab(tab, btn) {
   document.querySelector('.tab-bar')?.classList.remove('open');
   recVisibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
   render();
+  // A new tab is a new list. Keeping the old scroll offset dropped the user
+  // into the middle of it, and if the previous tab was scrolled further than
+  // the new one is long, straight onto the infinite-scroll trigger.
+  if (tab !== previousTab) scrollViewToTop();
 }
 function isShow(m) { return !!m.format; }
 function matchesTab(m) {
@@ -7707,8 +7837,6 @@ function updateControlDeck() {
     const selected = new Set(selectedMoodFilters());
     [...moodFilter.options].forEach(option => { option.selected = selected.has(option.value); });
   }
-  const moodMatchMode=document.getElementById('moodMatchMode');
-  if (moodMatchMode) moodMatchMode.value=state.settings.moodMatchMode || 'or';
   const genreMatchMode=document.getElementById('genreMatchMode');
   if (genreMatchMode) genreMatchMode.value=state.settings.genreMatchMode || 'or';
   const formatPreference=document.getElementById('formatPreference');
@@ -7757,10 +7885,40 @@ function updateControlDeck() {
   updateLibraryHealth();
 }
 
-function updateLanguageFilter(language) {
-  state.settings.languageFilter = language || 'all';
+// Ten filter and sort handlers each hand-rolled their own idea of what to do
+// after a change: some resynced the control deck and some did not, none reset
+// the page count, and none returned to the top. So changing a genre while two
+// hundred cards deep re-rendered two hundred cards of a completely different
+// result set and left the user stranded in the middle of it — often close
+// enough to the bottom to trip the infinite scroll and page in more.
+//
+// One function now owns that transition, and every control goes through it.
+function applyViewChange({resetPaging = true, scrollToTop = true} = {}) {
+  if (resetPaging) {
+    recVisibleLimit = Math.max(parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
+    poolVisibleLimit = 80;
+    ratedVisibleLimit = 40;
+    recentVisibleLimit = 40;
+  }
   saveViewState();
   renderActiveCards();
+  updateControlDeck();
+  if (scrollToTop) scrollViewToTop();
+}
+
+function scrollViewToTop() {
+  if (typeof window === 'undefined' || window.scrollY <= 0) return;
+  const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  try {
+    window.scrollTo({top:0, behavior: reduced ? 'auto' : 'smooth'});
+  } catch (error) {
+    window.scrollTo(0, 0);
+  }
+}
+
+function updateLanguageFilter(language) {
+  state.settings.languageFilter = language || 'all';
+  applyViewChange();
 }
 
 function selectedGenreFilters() {
@@ -7777,7 +7935,9 @@ function normaliseFilterAndSortSettings() {
   }
   state.settings.genreMatchMode = state.settings.genreMatchMode === 'and' ? 'and' : 'or';
   if (!Array.isArray(state.settings.moodFilters)) state.settings.moodFilters = [];
-  state.settings.moodMatchMode = state.settings.moodMatchMode === 'and' ? 'and' : 'or';
+  // v122 made mood single-valued; a stored 'and' from before that would now
+  // filter everything away, so the setting is retired rather than honoured.
+  delete state.settings.moodMatchMode;
   state.settings.formatPreference = formatPreferenceKey();
   const legacySortModes = {
     'rating-desc':['rating','desc'], 'year-desc':['year','desc'], 'year-asc':['year','asc'],
@@ -7793,9 +7953,7 @@ function setGenreFilters(genres) {
   state.settings.genreFilters = clean;
   // Keep the former single-value field for older local and Drive profiles.
   state.settings.genreFilter = clean[0] || 'all';
-  saveViewState();
-  renderActiveCards();
-  updateControlDeck();
+  applyViewChange();
 }
 
 function updateGenreFilter(genre, checked) {
@@ -7826,9 +7984,7 @@ function updateFormatPreference(value) {
 
 function updateGenreMatchMode(mode) {
   state.settings.genreMatchMode = mode === 'and' ? 'and' : 'or';
-  saveViewState();
-  renderActiveCards();
-  updateControlDeck();
+  applyViewChange();
 }
 
 // Card width is fixed (compact only, per Nitin's request — no size picker).
@@ -7856,15 +8012,14 @@ function toggleWatchPlatform(platform, event) {
   const selected = new Set(state.settings.watchPlatforms || []);
   if (selected.has(platform)) selected.delete(platform); else selected.add(platform);
   state.settings.watchPlatforms = [...selected];
-  saveViewState();
-  updateControlDeck();
-  renderActiveCards();
+  // A platform chip lives inside the maintenance panel, so yanking the page to
+  // the top would pull the chip the user is still tapping out from under them.
+  applyViewChange({scrollToTop:false});
 }
 
 function updateRatingFilter(rating) {
   state.settings.ratingFilter = String(rating || 'all');
-  saveViewState();
-  renderActiveCards();
+  applyViewChange();
 }
 
 // v95: a genre chip now behaves EXACTLY like a tag chip — it opens the panel
@@ -7885,24 +8040,18 @@ function updateSortMode(mode) {
   state.settings.sortMode = mode || 'recommended';
   if (state.settings.sortMode !== 'random') state.settings.sortDirection = state.settings.sortMode === 'title' ? 'asc' : 'desc';
   if (state.settings.sortMode === 'random') refreshShuffleSeed();
-  saveViewState();
-  renderActiveCards();
-  updateControlDeck();
+  applyViewChange();
 }
 
 function toggleSortDirection() {
   state.settings.sortDirection = state.settings.sortDirection === 'asc' ? 'desc' : 'asc';
-  saveViewState();
-  renderActiveCards();
-  updateControlDeck();
+  applyViewChange();
 }
 
 function shuffleAgain() {
   state.settings.sortMode = 'random';
   refreshShuffleSeed();
-  saveViewState();
-  renderActiveCards();
-  updateControlDeck();
+  applyViewChange();
 }
 
 function refreshShuffleSeed() {
@@ -8024,9 +8173,7 @@ function selectedMoodFilters() {
 
 function setMoodFilters(moods) {
   state.settings.moodFilters = [...new Set((moods || []).map(normaliseTagName).filter(mood => MOOD_VALUES.includes(mood)))];
-  saveViewState();
-  renderActiveCards();
-  updateControlDeck();
+  applyViewChange();
 }
 
 function updateMoodFilter() {
@@ -8034,20 +8181,15 @@ function updateMoodFilter() {
   setMoodFilters(control ? [...control.selectedOptions].map(option => option.value) : []);
 }
 
-function updateMoodMatchMode(mode) {
-  state.settings.moodMatchMode = mode === 'and' ? 'and' : 'or';
-  saveViewState();
-  renderActiveCards();
-  updateControlDeck();
-}
-
+// A title carries exactly one canonical mood (spec 31.35), so there is nothing
+// for an ANY/ALL toggle to choose between: "all of these moods" is unsatisfiable
+// for any selection of two or more, and the control could only ever produce an
+// empty library. Selecting moods means "show titles whose mood is one of these".
 function matchesMoodFilter(movie) {
   const filters = selectedMoodFilters();
   if (!filters.length) return true;
   const moods = cleanMoodArray(movie?.moods);
-  return state.settings.moodMatchMode === 'and'
-    ? filters.every(filter => moods.includes(filter))
-    : filters.some(filter => moods.includes(filter));
+  return filters.some(filter => moods.includes(filter));
 }
 
 function matchesRatingFilter(movie) {
@@ -8142,8 +8284,7 @@ function updateContentGuideFilter(axis, value) {
   if (!CONTENT_GUIDE_AXES.includes(axis)) return;
   const key=`contentMax${axis[0].toUpperCase()}${axis.slice(1)}`;
   state.settings[key]=value === 'any' ? 'any' : String(Math.max(0,Math.min(5,Number(value))));
-  saveViewState();
-  renderActiveCards();
+  applyViewChange();
 }
 
 function titleSearchNeedle(value=state.settings.titleSearch) {
@@ -8452,10 +8593,11 @@ function needsMorePerfectRecommendations() {
 }
 
 function updateLibraryHealth() {
+  updateDriveStatusLabel();
   const health = collectionHealth();
   const label = document.getElementById('libraryHealthLabel');
   const maintenance = document.getElementById('maintenanceHealth');
-  const drive = state.drive?.connected ? 'Drive synced' : state.drive?.enabled ? 'Drive reconnect needed' : 'Local only';
+  const drive = driveMaintenanceText();
   const receptionStatus = receptionBackfillStatusText();
   const receptionSegment = receptionStatus ? ` · ${receptionStatus}` : '';
   const tmdbStatus = tmdbBackfillStatusText();
@@ -8567,7 +8709,7 @@ async function runBackgroundAiQueue() {
     if (sourceRecovery.length) {
       backgroundAiTaggingInProgress = true;
       try {
-        showBackgroundPipelineProgress('Wikipedia', `Recovering source text for ${sourceRecovery.length} titles`);
+        pipelineStageProgress('wikipedia', sourceRecovery.length, 'recovering source text');
         await Promise.all(sourceRecovery.map(movie => enrichLegacyTitleForAi(movie)));
         // Recovery may replace a legacy ID with the canonical Wikipedia ID.
         // A full snapshot is required so the new key and removed old key are
@@ -8587,7 +8729,9 @@ async function runBackgroundAiQueue() {
     }
   }
   if (effectiveAiCooldownRemaining()) {
-    settleBackgroundPipelineProgress(effectiveAiCooldownRemaining());
+    // Cooling down is a real state with a real end time — say so instead of
+    // leaving a bar that looks stalled.
+    pipelineStageProgress('gemini', activeAiTagDebtCount(), `Gemini quota cooling down · resumes in ${Math.ceil(effectiveAiCooldownRemaining() / 1000)}s`);
     scheduleBackgroundAiQueue(effectiveAiCooldownRemaining());
     return;
   }
@@ -8597,8 +8741,11 @@ async function runBackgroundAiQueue() {
       scheduleReceptionBackfill(700);
       scheduleTmdbBackfill(700);
     }
-    settleBackgroundPipelineProgress(retryDelay == null ? 0 : 10000);
-    if (retryDelay != null) scheduleBackgroundAiQueue(Math.max(1200, retryDelay));
+    if (retryDelay == null) pipelineStageFinished('gemini');
+    else {
+      pipelineStageProgress('gemini', activeAiTagDebtCount(), 'waiting to retry');
+      scheduleBackgroundAiQueue(Math.max(1200, retryDelay));
+    }
     maybeAutoExpandPool();
     return;
   }
@@ -8616,7 +8763,7 @@ async function runBackgroundAiQueue() {
 
   backgroundAiTaggingInProgress = true;
   try {
-    showBackgroundPipelineProgress('Gemini', `${batch.length} titles across ${batches.length} batches`);
+    pipelineStageProgress('gemini', pendingBackgroundAiCount(), `tagging ${batch.length} of them now`);
     const settled = await Promise.allSettled(batches.map(group => requestAiTags(group, {
       deferUi:true,
       batchSize:AI_BACKGROUND_BATCH_SIZE,
@@ -8657,7 +8804,8 @@ async function runBackgroundAiQueue() {
     backgroundAiTaggingInProgress = false;
     const moreBackgroundAi = pendingBackgroundAiCount();
     const retryDelay = nextBackgroundAiQueueDelay();
-    settleBackgroundPipelineProgress(moreBackgroundAi || retryDelay != null ? 10000 : 0);
+    if (moreBackgroundAi || retryDelay != null) pipelineStageProgress('gemini', moreBackgroundAi);
+    else pipelineStageFinished('gemini');
     if (moreBackgroundAi || retryDelay != null) scheduleBackgroundAiQueue(Math.max(1200,effectiveAiCooldownRemaining()));
     else if (backgroundChangesSinceRender) checkpointBackgroundUi(0, true);
     maybeAutoExpandPool();
@@ -11142,8 +11290,7 @@ function updateMinYear(val) {
   const input = document.getElementById('minYear');
   if (input) input.value = year;
   if (changed) resetYearBoundedDiscovery();
-  saveViewState();
-  renderActiveCards();
+  applyViewChange();
 }
 
 async function resetAllData() {
@@ -11794,7 +11941,7 @@ function saveLocalState(opts={}) {
   try {
     localStorage.setItem('cinelens_v2_bootstrap',JSON.stringify({
       schema:'cinelens-local-v3',
-      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,genreFilters:state.settings?.genreFilters,genreMatchMode:state.settings?.genreMatchMode,moodFilters:state.settings?.moodFilters,moodMatchMode:state.settings?.moodMatchMode,ratingFilter:state.settings?.ratingFilter,contentMaxSex:state.settings?.contentMaxSex,contentMaxViolence:state.settings?.contentMaxViolence,contentMaxLanguage:state.settings?.contentMaxLanguage,sortMode:state.settings?.sortMode,sortDirection:state.settings?.sortDirection,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
+      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,genreFilters:state.settings?.genreFilters,genreMatchMode:state.settings?.genreMatchMode,moodFilters:state.settings?.moodFilters,ratingFilter:state.settings?.ratingFilter,contentMaxSex:state.settings?.contentMaxSex,contentMaxViolence:state.settings?.contentMaxViolence,contentMaxLanguage:state.settings?.contentMaxLanguage,sortMode:state.settings?.sortMode,sortDirection:state.settings?.sortDirection,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
       drive:{enabled:state.drive.enabled,folderId:state.drive.folderId,fileId:state.drive.fileId,manifestFileId:state.drive.manifestFileId||'',lastConnectedAt:state.drive.lastConnectedAt},
       updatedAt:state.meta?.updatedAt || nowStamp()
     }));
@@ -11906,13 +12053,25 @@ const DRIVE_TOKEN_KEY='cinelens_drive_token_v1';
 const DRIVE_TOKEN_EXPIRY_KEY='cinelens_drive_token_expiry_v1';
 const DRIVE_SILENT_BLOCK_KEY='cinelens_drive_silent_block_until_v1';
 const DRIVE_SILENT_TOKEN_TIMEOUT_MS=8000;
-const DRIVE_SILENT_RENEW_DEBOUNCE_MS=30000;
-const DRIVE_SILENT_RENEW_BLOCK_MS=10 * 60 * 1000;
-// Transient failures (our own 8s timeout, network hiccup) suppress retries
-// only briefly — long enough to avoid popup-flash storms on repeated
-// visibility flaps, short enough that the next real app open retries
-// silently instead of demanding a tap.
-const DRIVE_SILENT_RENEW_TRANSIENT_BLOCK_MS=2 * 60 * 1000;
+const DRIVE_SILENT_RENEW_DEBOUNCE_MS=12000;
+// Silent renewal uses prompt:'none', which never opens any UI — a failed
+// attempt is invisible to the user and costs one background request. It was
+// nevertheless punished with a flat ten-minute lockout, so a single hiccup
+// stranded the app on "reconnect needed" for ten minutes even though the very
+// next attempt would have succeeded. Both verdicts now escalate instead, and
+// the ladder resets the moment anything succeeds, so the app keeps quietly
+// trying to heal itself.
+//
+// "Needs gesture" is a stable verdict (Google will not issue a token until the
+// user acts) but not a permanent one — signing into Google in another tab
+// clears it — so it still retries, just less eagerly than a network blip.
+const DRIVE_SILENT_RENEW_GESTURE_BACKOFF_MS=[60 * 1000, 3 * 60 * 1000, 10 * 60 * 1000, 30 * 60 * 1000];
+const DRIVE_SILENT_RENEW_TRANSIENT_BACKOFF_MS=[15 * 1000, 45 * 1000, 2 * 60 * 1000, 5 * 60 * 1000];
+let driveSilentRenewFailures=0;
+// True only when the last silent attempt failed with a verdict that Google will
+// not reverse without a user gesture. This — not "no token right now" — is what
+// makes the header offer a tap.
+let driveNeedsUserGestureFlag=false;
 let driveSilentRenewInFlight=null;
 let driveSilentRenewBlockedUntil=0;
 let driveSilentRenewLastAttemptAt=0;
@@ -11939,6 +12098,16 @@ function rememberDriveToken(token, expiresInSeconds=3300) {
     localStorage.setItem(DRIVE_TOKEN_EXPIRY_KEY, String(expiry));
   } catch(e) {}
   scheduleDriveTokenRefresh(expiry);
+}
+
+// Any success — silent renewal or an explicit connect — puts the app back to a
+// clean slate, so one bad network moment cannot leave a permanently degraded
+// retry cadence behind it.
+function clearDriveRenewalBackoff() {
+  driveSilentRenewFailures=0;
+  driveNeedsUserGestureFlag=false;
+  setSilentDriveRenewalBlockUntil(0);
+  updateDriveStatusLabel();
 }
 
 function setSilentDriveRenewalBlockUntil(until=0) {
@@ -12043,6 +12212,20 @@ document.addEventListener('visibilitychange', () => {
 
 window.addEventListener('pagehide', flushLocalStatePersistence);
 
+// Coming back online is the single best moment to heal a dropped Drive session,
+// and the app was not listening for it — it waited for a visibility change or a
+// timer that a backgrounded mobile browser had already frozen. The backoff is
+// cleared first because the reason for it (no network) has demonstrably gone.
+window.addEventListener('online', () => {
+  if (!state.drive?.enabled) return;
+  driveSilentRenewFailures=0;
+  setSilentDriveRenewalBlockUntil(0);
+  driveSilentRenewLastAttemptAt=0;
+  silentlyRenewDriveToken().finally(() => flushPendingDriveSync());
+});
+
+window.addEventListener('offline', updateDriveStatusLabel);
+
 function getStoredDriveToken() {
   try {
     const sessionToken=sessionStorage.getItem('cinelens_drive_token')||'';
@@ -12067,9 +12250,6 @@ function clearStoredDriveToken() {
     localStorage.removeItem(DRIVE_TOKEN_EXPIRY_KEY);
   } catch(e) {}
 }
-
-function openDriveModal() { connectDrive(); }
-function skipDrive() { showToast('Using local storage',''); }
 
 function googleIdentityReady() {
   return !!window.google?.accounts?.oauth2;
@@ -12146,7 +12326,7 @@ async function connectDrive() {
     }
     state.drive.connected=true;
     connected = true;
-    setSilentDriveRenewalBlockUntil(0);
+    clearDriveRenewalBackoff();
     state.drive.lastConnectedAt=Date.now();
     saveLocalState({preserveUpdatedAt:true,skipDriveDirty:true});
     setDriveStatus('connected');
@@ -12209,15 +12389,86 @@ async function restoreDriveSession(showFailure=false, opts={}) {
   return false;
 }
 
-function setDriveStatus(s) {
+// The chip used to report OAuth bookkeeping — "not connected", "drive ready" —
+// which tells the user nothing about whether their ratings are safe and reads as
+// a fault even when the app is working perfectly from its local cache. It now
+// reports what actually matters (is my data backed up?) and it is only an
+// instruction when tapping it can genuinely fix something.
+let driveStatusState = '';
+
+function driveNeedsUserGesture() {
+  if (!state.drive?.enabled) return true;
+  if (state.drive?.connected || state.drive?.accessToken) return false;
+  return driveNeedsUserGestureFlag;
+}
+
+function driveStatusText() {
+  if (driveStatusState === 'syncing') return 'Syncing…';
+  if (driveStatusState === 'connected') return 'Backed up';
+  if (!state.drive?.enabled) return 'Back up to Drive';
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return 'Offline · saved on device';
+  if (driveNeedsUserGesture()) return 'Tap to reconnect Drive';
+  // Enabled, not connected, no gesture needed: a silent renewal is either in
+  // flight or scheduled. Nothing is lost and nothing is required of the user.
+  return 'Reconnecting…';
+}
+
+function updateDriveStatusLabel() {
   const dot = document.getElementById('driveDot');
   const label = document.getElementById('driveLabel');
-  if (dot) dot.className = 'drive-dot ' + s;
-  if (label) label.textContent = s === 'connected'
-    ? 'drive connected'
-    : s === 'syncing'
-      ? 'syncing...'
-      : state.drive.enabled ? 'drive ready' : 'not connected';
+  const chip = document.querySelector('.library-status');
+  const text = driveStatusText();
+  const needsTap = driveNeedsUserGesture() && driveStatusState !== 'syncing';
+  if (dot) {
+    const next = 'drive-dot ' + (driveStatusState || (needsTap ? 'attention' : 'pending'));
+    if (dot.className !== next) dot.className = next;
+  }
+  if (label && label.textContent !== text) label.textContent = text;
+  if (chip) {
+    if (chip.classList.contains('needs-attention') !== needsTap) chip.classList.toggle('needs-attention', needsTap);
+    const title = needsTap
+      ? 'Reconnect Google Drive to resume backing up'
+      : 'Open library maintenance';
+    if (chip.getAttribute('title') !== title) chip.setAttribute('title', title);
+  }
+}
+
+function setDriveStatus(s) {
+  driveStatusState = s || '';
+  updateDriveStatusLabel();
+}
+
+// A Drive reconnect has to run inside the click that asked for it: Google will
+// not open its account chooser from a callback that has lost the user gesture,
+// which is why routing this through the maintenance panel made reconnecting
+// feel unreliable.
+// The maintenance line has room for the detail the header chip cannot show.
+function driveMaintenanceText() {
+  if (state.drive?.connected) {
+    const at = Number(state.drive?.lastConnectedAt || 0);
+    return at ? `Drive backed up ${formatRelativeTime(at)}` : 'Drive backed up';
+  }
+  if (!state.drive?.enabled) return 'Saved on this device only';
+  if (driveNeedsUserGesture()) return 'Drive needs a tap to reconnect — nothing is lost meanwhile';
+  return 'Drive reconnecting automatically';
+}
+
+function formatRelativeTime(timestamp) {
+  const seconds = Math.max(0, Math.round((Date.now() - Number(timestamp || 0)) / 1000));
+  if (seconds < 45) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} d ago`;
+}
+
+function handleLibraryStatusClick() {
+  if (driveNeedsUserGesture()) {
+    connectDrive();
+    return;
+  }
+  toggleMaintenancePanel();
 }
 function driveErrorMessage(e) {
   const code = e?.error || e?.message || 'unknown';
@@ -12309,7 +12560,7 @@ async function requestDriveTokenSilent(opts={}) {
   driveSilentRenewLastAttemptAt=now;
   try {
     const token=await tokenRequest(DRIVE_AUTO_PROMPT, {timeoutMs:DRIVE_SILENT_TOKEN_TIMEOUT_MS, auto:true});
-    setSilentDriveRenewalBlockUntil(0);
+    clearDriveRenewalBackoff();
     return token;
   } catch(e) {
     // Only a definitive "Google requires a user gesture" verdict earns the
@@ -12321,7 +12572,12 @@ async function requestDriveTokenSilent(opts={}) {
     // manual "Tap Drive to reconnect".
     const code=String(e?.error || e?.message || '');
     const needsGesture=/interaction_required|consent_required|login_required|access_denied/i.test(code);
-    setSilentDriveRenewalBlockUntil(Date.now() + (needsGesture ? DRIVE_SILENT_RENEW_BLOCK_MS : DRIVE_SILENT_RENEW_TRANSIENT_BLOCK_MS));
+    driveNeedsUserGestureFlag=needsGesture;
+    const ladder=needsGesture ? DRIVE_SILENT_RENEW_GESTURE_BACKOFF_MS : DRIVE_SILENT_RENEW_TRANSIENT_BACKOFF_MS;
+    const step=ladder[Math.min(driveSilentRenewFailures, ladder.length - 1)];
+    driveSilentRenewFailures++;
+    setSilentDriveRenewalBlockUntil(Date.now() + step);
+    updateDriveStatusLabel();
     throw e;
   }
 }
@@ -13211,4 +13467,15 @@ function goToTop() {
 // TOAST
 // ─────────────────────────────────────────────
 let _tt;
-function showToast(msg,type='') { const el=document.getElementById('toast'); el.textContent=msg; el.className='show '+type; clearTimeout(_tt); _tt=setTimeout(()=>el.className='',3000); }
+function showToast(msg, type='') {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = `show ${type}`.trim();
+  clearTimeout(_tt);
+  _tt = setTimeout(() => {
+    // Drop only the visibility class; the colour has to survive the slide-out.
+    el.classList.remove('show');
+    _tt = setTimeout(() => { el.className = ''; }, 320);
+  }, 3000);
+}

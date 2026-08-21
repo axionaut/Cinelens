@@ -4702,3 +4702,122 @@ Invariants:
 - Non-card children of a grid (empty states, "show more" buttons) are dropped by
   the reconciler and re-appended by the caller. A card node is identified by
   `data-card-key`.
+
+### 31.37 Drive session, pipeline progress, mood filtering, view transitions (v125)
+
+Four separate pieces of clunkiness, reported together.
+
+#### Drive no longer asks for ceremony it does not need
+
+A static site can only use the GIS implicit token flow, which issues ~1 hour
+access tokens and has no refresh token. Truly unattended reconnection forever is
+therefore not available: when Google decides a gesture is required, only a
+gesture will do. Everything short of that is now automatic.
+
+What was actually wrong was the recovery policy. Silent renewal uses
+`prompt:'none'`, which opens no UI at all — a failed attempt is invisible and
+costs one background request — yet any failure was punished with a **flat
+ten-minute persisted lockout** (`DRIVE_SILENT_RENEW_BLOCK_MS`), or two minutes
+for a transient one. One dropped packet on mobile stranded the app on
+"reconnect needed" for ten minutes even though the next attempt would have
+worked, and `restoreDriveSession()` inside `syncDriveNow()` honoured the same
+block, so the sync could not heal it either.
+
+- Both verdicts now **escalate** instead: 15s/45s/2m/5m for a transient failure,
+  60s/3m/10m/30m for a "needs gesture" one. Signing into Google in another tab
+  clears the latter, so it is worth retrying — just not eagerly.
+- **Any success resets the whole ladder** (`clearDriveRenewalBackoff()`), so a
+  single bad moment cannot leave a permanently degraded retry cadence behind.
+- The app now listens for **`online`**, which is the single best moment to heal a
+  dropped session and was not being used at all — it waited for a visibility
+  change or a timer that a backgrounded mobile browser had already frozen.
+- The renewal debounce drops from 30s to 12s so it cannot outlast a short step.
+
+The header chip reported OAuth bookkeeping — "not connected", "drive ready" —
+which says nothing about whether the user's ratings are safe and reads as a
+fault while the app is working perfectly from IndexedDB. It now reports the
+thing that matters and is an instruction **only** when tapping can genuinely fix
+something: `Backed up` / `Syncing…` / `Reconnecting…` / `Tap to reconnect Drive`
+/ `Offline · saved on device` / `Back up to Drive`. Only the gesture-required
+state is flagged for attention.
+
+Tapping the chip reconnects **inside the click** when a gesture is required,
+because Google will not open its account chooser from a callback that has lost
+the user gesture — routing it through the maintenance panel is what made
+reconnecting feel unreliable. The duplicate `Drive` button in the maintenance
+panel is gone; the chip is the single Drive control. `openDriveModal()` and
+`skipDrive()`, left behind by an onboarding modal that no longer exists, are
+removed.
+
+#### The progress bar shows real progress
+
+It was handed a **hardcoded percentage** — 45% for one active stage, 55% for
+two — so it could not move however much work had been done. A four-thousand-title
+catch-up was pixel-identical to a hang. It also lingered for ten seconds after
+finishing, and the mood backfill, by far the longest-running sweep, reported
+nothing at all while `moodBackfillPendingCount()` sat in the thousands.
+
+Each stage now reports the one number it genuinely knows: how much work is still
+outstanding. `done` accumulates from the *decreases* in that number, so it never
+runs backwards; the denominator is `done + remaining`, so a queue that grows
+mid-run widens the bar honestly instead of resetting it. A stage that cannot
+know its size (compaction) reports `null` and the bar renders **indeterminate**
+— a travelling sliver — rather than inventing a figure. An ETA appears once
+enough work has completed for a rate to mean anything.
+
+Also fixed here:
+
+- A foreground operation (adding or retagging a title) now **owns** the bar.
+  Both wrote to the same element and whichever fired last won, which is why the
+  bar flicked between unrelated messages.
+- `MOOD_BACKFILL_BATCH_DELAY_MS` replaces a flat 10s gate between mood batches.
+  At 20 titles a batch that was ~39 minutes of wall clock for a 4,700-title
+  backlog, gating a lane `AdaptiveLimiter` already paces correctly.
+- Gemini cooldown says so, with the seconds remaining, instead of showing a bar
+  that looks stalled.
+- The bar marks `body.pipeline-active`; the toast and the go-top button step
+  over it instead of landing underneath it.
+- `.fetch-progress` drops its `backdrop-filter` at ≤768px, matching the header
+  and go-top button. A full-width blurred fixed layer is among the most
+  expensive things a phone composites, and this one is on screen for most of the
+  app's life.
+
+#### Mood filtering is single-valued
+
+v122 made every title carry exactly one canonical mood, which makes an ANY/ALL
+toggle meaningless: "all of these moods" is unsatisfiable for any selection of
+two or more, so the control could only ever produce an empty library. The
+selector is removed and `matchesMoodFilter` is a plain "is the title's mood one
+of these". A stored `moodMatchMode` of `'and'` is **deleted** by
+`normaliseFilterAndSortSettings()` rather than honoured. The mood list also
+still offered `Mixed`, which v122 retired — selecting it matched nothing.
+
+#### One view-change transition
+
+Ten filter and sort handlers each hand-rolled what to do after a change: some
+resynced the control deck and some did not, none reset the page count, and none
+returned to the top. Changing a genre while two hundred cards deep re-rendered
+two hundred cards of a completely different result set and left the user
+stranded in the middle of it — often close enough to the bottom to trip the
+infinite scroll and page in more. Switching tabs did the same.
+
+`applyViewChange({resetPaging, scrollToTop})` now owns that transition and every
+control goes through it. `setTab` scrolls to top on a real tab change.
+
+Invariants:
+
+- **A view control changes the result set, so it resets paging.** Adding a new
+  filter means routing it through `applyViewChange()`, not another bespoke
+  `saveViewState(); renderActiveCards();` pair.
+- `toggleWatchPlatform` passes `scrollToTop:false` — its chips live inside the
+  maintenance panel, and yanking the page to the top would pull the control the
+  user is still tapping out from under them.
+- **A pipeline stage must be closed on every exit path**, including the early
+  returns for cooldown and empty queues, or a finished bar stays on screen.
+  `resetPipelineProgress()` exists for the paths that stop the whole pipeline.
+- **Never give the progress bar a number the code did not measure.** `null` and
+  an indeterminate bar is the correct answer for unknown work; a frozen
+  percentage reads as a hang, which is exactly what this section replaced.
+- `driveNeedsUserGesture()` — not "no token right now" — is what makes the header
+  ask for a tap. Every other tokenless state is recoverable on its own and must
+  stay silent.

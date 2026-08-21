@@ -144,8 +144,10 @@
   .card-act.retag:hover{color:var(--accent);border-color:var(--accent2)}
   .card-act.watch:hover{color:var(--accent);border-color:var(--accent2)}
 
-  #toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:9px 18px;font-size:13px;color:var(--text);z-index:2000;transition:transform .3s ease;white-space:nowrap}
+  #toast{position:fixed;bottom:calc(22px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%) translateY(120px);background:var(--surface2);border:1px solid var(--border);border-radius:5px;padding:9px 18px;font-size:13px;color:var(--text);z-index:2000;transition:transform .3s cubic-bezier(.4,0,.2,1);max-width:min(calc(100vw - 32px),520px);text-align:center;pointer-events:none}
   #toast.show{transform:translateX(-50%) translateY(0)}
+  /* Clear the fixed progress bar rather than landing on top of it. */
+  body.pipeline-active #toast{bottom:calc(76px + env(safe-area-inset-bottom))}
   #toast.success{border-color:var(--green);color:var(--green)}
   #toast.error{border-color:var(--danger);color:var(--danger)}
 
@@ -171,9 +173,13 @@
   .manual-tag-empty{font-size:12px;color:var(--muted)}
 
   .drive-status{display:flex;align-items:center;gap:5px;font-size:14px;color:var(--muted);font-family:'DM Mono',monospace}
-  .drive-dot{width:6px;height:6px;border-radius:50%;background:var(--muted2)}
+  .drive-dot{width:6px;height:6px;border-radius:50%;background:var(--muted2);flex:none;transition:background .2s}
   .drive-dot.connected{background:var(--green)}
   .drive-dot.syncing{background:var(--accent);animation:pulse 1s ease infinite}
+  /* Reconnecting on its own: quietly working, nothing for the user to do. */
+  .drive-dot.pending{background:var(--muted2)}
+  /* Only a state a tap can actually fix earns a warning colour. */
+  .drive-dot.attention{background:#e2a03f}
 
   .empty-state{text-align:center;padding:50px 20px;color:var(--muted);grid-column:1/-1}
   .empty-state .icon{font-size:36px;margin-bottom:10px;opacity:.4}
@@ -219,8 +225,16 @@
   .fetch-progress{background:var(--surface);border:1px solid var(--accent2);border-radius:6px;padding:12px 14px;margin-bottom:20px;display:none}
   .fetch-progress.visible{display:block}
   .fetch-label{font-size:14px;color:var(--accent);font-family:'DM Mono',monospace;margin-bottom:7px;animation:pulse 1s ease infinite}
-  .fetch-bar{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
-  .fetch-fill{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:2px;transition:width .3s ease}
+  .fetch-bar{height:3px;background:var(--border);border-radius:2px;overflow:hidden;position:relative}
+  .fetch-fill{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:2px;transition:width .45s cubic-bezier(.4,0,.2,1)}
+  /* A job whose size is genuinely unknown gets a travelling sliver rather than a
+     made-up percentage that sits still and reads as a hang. */
+  .fetch-bar.indeterminate .fetch-fill{width:32%;transition:none;animation:fetchIndeterminate 1.35s cubic-bezier(.65,0,.35,1) infinite}
+  @keyframes fetchIndeterminate{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}
+  @media(prefers-reduced-motion:reduce){
+    .fetch-fill{transition:none}
+    .fetch-bar.indeterminate .fetch-fill{animation-duration:2.4s}
+  }
   .fetch-sub{font-size:10px;color:var(--muted);font-family:'DM Mono',monospace;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
   /* VISUAL REFRESH */
@@ -403,7 +417,7 @@
     .card-body{padding:10px}
     .card-title{font-size:13px;padding-right:42px}
     body::before{display:none}
-    header,.go-top-btn{backdrop-filter:none}
+    header,.go-top-btn,.fetch-progress{backdrop-filter:none}
     .movie-card{animation:none!important}
     .tag-search{width:100%}
   }
@@ -431,6 +445,7 @@
   .go-top-btn.visible{display:flex}
   .go-top-btn:hover{transform:translateY(-2px);border-color:var(--accent);color:#fff}
   @media(max-width:768px){.go-top-btn{right:14px;bottom:14px;width:38px;height:38px}}
+  body.pipeline-active .go-top-btn{bottom:calc(76px + env(safe-area-inset-bottom))}
 
   /* MOBILE NAV + COLLAPSIBLE CONTROL DECK */
   .nav-toggle,.control-toggle{display:none}
@@ -575,6 +590,7 @@
   cursor:pointer;
 }
 .library-status:hover { border-color:rgba(var(--accent-rgb), .42); color:var(--text); }
+.library-status.needs-attention { border-color:rgba(226, 160, 63, .5); color:var(--text); }
 .library-health-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }
 .fetch-progress {
   position:fixed;
@@ -595,7 +611,7 @@
 }
 .fetch-progress.visible { display:block; }
 .fetch-progress .fetch-label { padding-right:92px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; animation:none; }
-.fetch-progress .fetch-sub { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.fetch-progress .fetch-sub { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-variant-numeric:tabular-nums; }
 .fetch-progress .fetch-stop { pointer-events:auto; position:absolute; top:7px; right:8px; }
 .maintenance-panel {
   grid-column:2;
