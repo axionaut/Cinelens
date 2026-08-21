@@ -4821,3 +4821,31 @@ Invariants:
 - `driveNeedsUserGesture()` — not "no token right now" — is what makes the header
   ask for a tap. Every other tokenless state is recoverable on its own and must
   stay silent.
+
+### 31.38 Cached intelligence survives Gemini maintenance (v126)
+
+Gemini cooldown and tag freshness are background-maintenance states. They do
+not revoke data that is already stored on the device. Recommendations,
+personalization readiness, the Tagged/Tags counters, the Tags view, and tag
+detail lists therefore use the last non-empty persisted tag set while
+`hasCurrentAiTags()` independently decides whether that title needs refreshing.
+
+The original AI-tag migration was deliberately destructive once, in v52. Its
+metadata marker can be absent after an older or partial profile restore, so it
+must never repeat at startup. A missing marker is now stamped without clearing
+tags, tag preferences, or learned weights; stale records join the ordinary
+background queue instead. Provider availability may stop new AI requests, but
+it may not blank or demote cached library intelligence.
+
+Switching tabs also resets recommendation/pool paging before rendering. This
+keeps a previously deep infinite-scroll limit from rebuilding hundreds or
+thousands of card nodes in a different view, the browser-crash path exposed by
+the recent view-transition change.
+
+Regression invariants:
+
+- A title with persisted tags remains usable in the UI during an active Gemini
+  cooldown even when its prompt/hash provenance is stale.
+- A missing `aiTagMigrationVersion` marker cannot delete stored tags or tag
+  preferences.
+- A real tab switch resets card paging before the new grid is rendered.

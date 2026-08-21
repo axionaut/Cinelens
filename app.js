@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 125;
+const APP_VERSION = 126;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -1677,6 +1677,14 @@ function hasCurrentAiTags(movie) {
   return movie.aiTagging.storyHash === aiStoryHash(aiTagSourceText(movie));
 }
 
+// Rendering and taste modelling consume the last usable persisted tag set.
+// "Current" is a maintenance concern only: a prompt/hash mismatch queues a
+// background refresh, but Gemini availability must never make cached tags,
+// recommendations or personalization disappear from the live UI.
+function hasUsableStoredTags(movie) {
+  return !!(movie && Array.isArray(movie.tags) && movie.tags.length);
+}
+
 const moodStoryHashMemo = new Map();
 function moodStoryHash(movie) {
   const text = aiTagSourceText(movie);
@@ -1718,13 +1726,10 @@ function clearGeneratedTags(movie) {
 
 function purgeLegacyTagsForAi() {
   if (Number(state.meta?.aiTagMigrationVersion || 0) >= AI_TAG_MIGRATION_VERSION) return false;
-  const stamp = new Date().toISOString();
-  Object.values(state.movies || {}).forEach(movie => { clearGeneratedTags(movie); touchRecord(movie, stamp); });
-  Object.values(state.hiddenTitles || {}).forEach(movie => { clearGeneratedTags(movie); touchRecord(movie, stamp); });
-  state.tagWeights = {};
-  state.genreWeights = {};
-  state.tagStats = { candidates:0, tags:0, rebuiltAt:'' };
-  state.settings.tagPreferences = {};
+  // This migration shipped long ago. A missing marker can now only mean that
+  // profile metadata was absent/older during restore; repeating the original
+  // destructive purge would erase a perfectly usable cached tag library.
+  // Preserve the data and let hasCurrentAiTags() queue stale records normally.
   state.meta = state.meta || {};
   state.meta.aiTagMigrationVersion = AI_TAG_MIGRATION_VERSION;
   state.meta.aiTagMigrationAt = new Date().toISOString();
@@ -7778,7 +7783,10 @@ function setTab(tab, btn) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   btn?.classList.add('active');
   document.querySelector('.tab-bar')?.classList.remove('open');
-  recVisibleLimit = Math.max(recVisibleLimit, parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
+  if (tab !== previousTab) {
+    recVisibleLimit = Math.max(parseInt(state.settings.topN || 10), REC_INFINITE_PAGE_SIZE);
+    poolVisibleLimit = 80;
+  }
   render();
   // A new tab is a new list. Keeping the old scroll offset dropped the user
   // into the middle of it, and if the previous tab was scrolled further than
@@ -8347,7 +8355,7 @@ function recommendableTitle(movie) {
 }
 
 function personalizedEnough() {
-  return Object.values(state.movies).filter(m => m.rating > 0 && m.tagged).length >= 3;
+  return Object.values(state.movies).filter(m => m.rating > 0 && hasUsableStoredTags(m)).length >= 3;
 }
 
 function recommendationCandidates() {
@@ -8863,7 +8871,7 @@ function renderRecs() {
     renderGlobalTitleSearch(grid);
     return;
   }
-  const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
+  const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && hasUsableStoredTags(m));
 
   if (ratedTagged.length >= 3) {
     const scored = recommendationCandidates();
@@ -10913,7 +10921,7 @@ function renderTagBrain() {
   updateControlDeck();
   const map={};
   [...Object.values(state.movies || {}), ...Object.values(state.hiddenTitles || {})].forEach(m => {
-    if (!m.tagged) return;
+    if (!hasUsableStoredTags(m)) return;
     if (!matchesGlobalFilters(m)) return;
     scoringTags(m).filter(tagIsPresentable).forEach(tag => {
       if (!map[tag]) map[tag]={weight:state.tagWeights[tag]||0,preference:Number(state.settings.tagPreferences[tag]||0),stated:hasStatedPreference(tag),movieCount:0,movies:[],isGenre:false};
@@ -11149,7 +11157,7 @@ function titlesForTagKey(key, collection) {
     const mood = moodFromTagKey(key);
     return rows.filter(movie => cleanMoodArray(movie.moods).includes(mood));
   }
-  return rows.filter(movie => movie.tagged && scoringTags(movie).includes(key));
+  return rows.filter(movie => hasUsableStoredTags(movie) && scoringTags(movie).includes(key));
 }
 
 // Stores the value, INCLUDING 0 — see the preference-state comment above.
@@ -11269,7 +11277,9 @@ const TAG_COUNT_DISPLAY_TTL_MS = 1500;
 function updateStats() {
   const movies=Object.values(state.movies);
   const rated=movies.filter(m=>m.rating>0);
-  const tagged=movies.filter(hasCurrentAiTags);
+  // Header counts describe what is available now, not what background Gemini
+  // maintenance would like to refresh later.
+  const tagged=movies.filter(hasUsableStoredTags);
   const avg=rated.length?(rated.reduce((s,m)=>s+m.rating,0)/rated.length).toFixed(1):'—';
   document.getElementById('statRated').textContent=rated.length;
   document.getElementById('statTagged').textContent=tagged.length;
