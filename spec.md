@@ -4895,3 +4895,22 @@ Invariants:
   `libraryWritesUnlocked`.
 - A failed/no-op restore cannot display `Backed up` or flush pending writes as
   though remote data had been reconciled.
+
+### 31.41 Drive recovery publishes evidence, not a boolean (v129)
+
+Drive revision recovery reports measurable work from inside its own loops. The
+maintenance status and shared progress bar show completed/total chunks,
+revisions successfully read, titles restored, the current chunk, and seconds
+since the last activity. Checking the preserved full-library backup is shown as
+an explicit indeterminate phase because its size is not known in advance.
+
+The Drive recovery stage participates in the same multi-stage progress bar as
+moods, Gemini, TMDB, and Wikipedia, so another background lane cannot conceal
+it. On every exit it closes its stage and records a final recovered count; zero
+is a legitimate result and must not remain presented as work still running.
+
+Invariants:
+
+- `legacyTagRecoveryInProgress` alone is never presented as progress.
+- Every successful revision read and completed chunk updates visible evidence.
+- The recovery stage closes in `finally`, including errors and zero-result runs.
