@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 130;
+const APP_VERSION = 131;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -2248,6 +2248,16 @@ function usableTagCount(tags) {
 
 function aiTagMinimumForStory(/* storyText */) {
   return AI_TAG_MIN_COUNT;
+}
+
+// A record can be committed-but-underfilled: verified tags, but fewer usable
+// ones than the floor a full tag set is supposed to clear. Those thin sets
+// overlap the taste model on a handful of signals and can score a perfect fit
+// on almost no evidence, which is how a 5-tag title reached #1 in For You.
+// Ranking (see scoreMovies) sorts them below every title that clears the floor
+// rather than dropping them, so they still surface once the full set arrives.
+function tagFloorMet(movie) {
+  return usableTagCount(rawScoringTags(movie)) >= aiTagMinimumForStory(aiTagSourceText(movie));
 }
 
 function aiTagWordTokens(tag) {
@@ -10220,6 +10230,9 @@ function scoreMovies() {
     .filter(item => item.posOverlap > 0 && item.predictedRating > Number(getTasteModel('', formatClass(item.movie)).baseline || 3));
 
   ranked.sort((a, b) =>
+    // Underfilled titles rank below every title with a complete tag set, no
+    // matter how well their few tags happen to fit.
+    Number(tagFloorMet(b.movie)) - Number(tagFloorMet(a.movie)) ||
     b.predictedRating - a.predictedRating ||
     b.positiveScore - a.positiveScore ||
     a.negativePenalty - b.negativePenalty ||

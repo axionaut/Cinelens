@@ -4932,3 +4932,15 @@ a zero-result recovery is explicitly reported rather than silently disappearing.
 Recovery attempts all currently missing titles represented in the preserved
 backup and inspected Drive revisions. It cannot recreate a tag set that no
 longer exists in any retained copy; those titles remain ordinary Gemini debt.
+
+## 131. Underfilled titles cannot top For You
+
+A verified-but-underfilled record (fewer usable tags than
+`aiTagMinimumForStory`) could reach a perfect predicted fit because its handful
+of tags all overlapped the taste model — Mitron, with 5 stored tags and 3
+learned signals, ranked #1 at 100%.
+
+`tagFloorMet(movie)` (usable count from `rawScoringTags` vs the story minimum)
+is now the primary sort key in `scoreMovies`: every title clearing the floor
+ranks above every one that does not. Underfilled titles are demoted, not
+dropped — the top-up queue still completes them, after which they rank on merit.
