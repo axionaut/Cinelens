@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 129;
+const APP_VERSION = 130;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -8611,6 +8611,8 @@ function updateLibraryHealth() {
   const tmdbSegment = tmdbStatus ? ` · ${tmdbStatus}` : '';
   const moodStatus = moodBackfillStatusText();
   const moodSegment = moodStatus ? ` · ${moodStatus}` : '';
+  const recoveryResult = legacyTagRecoveryResultText();
+  const recoverySegment = recoveryResult ? ` · ${recoveryResult}` : '';
 
   let text;
   if (autoFetchPaused) text = 'Collection paused';
@@ -8625,7 +8627,7 @@ function updateLibraryHealth() {
 
   if (label) label.textContent = text;
   if (maintenance) {
-    maintenance.textContent = `${text} · ${health.tagDebt} titles awaiting current AI tags${receptionSegment}${tmdbSegment}${moodSegment} · ${drive}`;
+    maintenance.textContent = `${text} · ${health.tagDebt} titles awaiting current AI tags${receptionSegment}${tmdbSegment}${moodSegment}${recoverySegment} · ${drive}`;
   }
   const tmdbBtn = document.getElementById('tmdbBackfillToggleBtn');
   if (tmdbBtn) {
@@ -12053,6 +12055,7 @@ let driveAllChunksDirty=false;
 let legacyTagRecoveryInProgress=false;
 let legacyTagRecoveryAttemptedThisSession=false;
 let legacyTagRecoveryProgress={phase:'idle',totalChunks:0,completedChunks:0,checkedRevisions:0,recoveredTitles:0,currentChunk:'',startedAt:0,lastActivityAt:0};
+let legacyTagRecoveryPublishedIds=new Set();
 const driveDirtyChunkKeys=new Set();
 const DRIVE_SYNC_RETRY_MIN_MS=15000;
 const DRIVE_SYNC_RETRY_MAX_MS=5*60*1000;
@@ -13180,6 +13183,7 @@ async function recoverTagsFromDriveRevisions(opts={},recoveredIds=new Set()) {
       } catch(error) {
         console.warn('Drive tag revision recovery skipped a chunk',key,error);
       } finally {
+        publishLegacyTagRecoveryCheckpoint(recoveredIds);
         legacyTagRecoveryProgress.completedChunks++;
         legacyTagRecoveryProgress.recoveredTitles=recoveredIds.size;
         legacyTagRecoveryProgress.lastActivityAt=Date.now();
@@ -13195,6 +13199,7 @@ async function recoverMissingTagsFromLegacyBackup(opts={}) {
   if (legacyTagRecoveryInProgress || Number(state.meta?.legacyTagRecoveryVersion || 0) >= LEGACY_TAG_RECOVERY_VERSION) return 0;
   legacyTagRecoveryInProgress=true;
   legacyTagRecoveryAttemptedThisSession=true;
+  legacyTagRecoveryPublishedIds=new Set();
   legacyTagRecoveryProgress={phase:'backup',totalChunks:0,completedChunks:0,checkedRevisions:0,recoveredTitles:0,currentChunk:'',startedAt:Date.now(),lastActivityAt:Date.now()};
   updateLegacyTagRecoveryProgress();
   try {
@@ -13215,6 +13220,8 @@ async function recoverMissingTagsFromLegacyBackup(opts={}) {
     state.meta.legacyTagRecoveryVersion=LEGACY_TAG_RECOVERY_VERSION;
     state.meta.legacyTagRecoveryAt=nowStamp();
     state.meta.legacyTagRecoveryCount=recoveredIds.size;
+    state.meta.legacyTagRecoveryChunks=legacyTagRecoveryProgress.totalChunks;
+    state.meta.legacyTagRecoveryRevisions=legacyTagRecoveryProgress.checkedRevisions;
     if (recoveredIds.size) {
       invalidateTagCaches();
       rebuildTagBrain();
@@ -13227,6 +13234,7 @@ async function recoverMissingTagsFromLegacyBackup(opts={}) {
       }
     } else if (opts.persist !== false) {
       saveLocalState({driveProfileOnly:true});
+      showToast(`Drive recovery finished: no recoverable tag sets found in ${legacyTagRecoveryProgress.checkedRevisions} revisions.`,'');
     }
     return recoveredIds.size;
   } catch(error) {
@@ -13241,12 +13249,34 @@ async function recoverMissingTagsFromLegacyBackup(opts={}) {
   }
 }
 
+function publishLegacyTagRecoveryCheckpoint(recoveredIds) {
+  const changedIds=[...recoveredIds].filter(id => !legacyTagRecoveryPublishedIds.has(id));
+  if (!changedIds.length) return 0;
+  changedIds.forEach(id => legacyTagRecoveryPublishedIds.add(id));
+  invalidateTagCaches();
+  rebuildTagBrain();
+  computeTagWeights();
+  // Make every completed recovery chunk durable immediately, but keep it local
+  // until the full recovery decides what must be synchronized back to Drive.
+  saveLocalState({changedMovieIds:changedIds,silentUi:true,localOnly:true});
+  render();
+  return changedIds.length;
+}
+
 function legacyTagRecoveryProgressText(now=Date.now()) {
   const progress=legacyTagRecoveryProgress;
   if (!legacyTagRecoveryInProgress) return '';
   if (progress.phase === 'backup') return 'Drive recovery · checking preserved backup';
   const activitySeconds=Math.max(0,Math.round((now-Number(progress.lastActivityAt || now))/1000));
   return `Drive recovery · ${progress.completedChunks}/${progress.totalChunks} chunks · ${progress.checkedRevisions} revisions · ${progress.recoveredTitles} titles restored · active ${activitySeconds}s ago`;
+}
+
+function legacyTagRecoveryResultText() {
+  if (legacyTagRecoveryInProgress || Number(state.meta?.legacyTagRecoveryVersion || 0) < LEGACY_TAG_RECOVERY_VERSION) return '';
+  const recovered=Number(state.meta?.legacyTagRecoveryCount || 0);
+  const chunks=Number(state.meta?.legacyTagRecoveryChunks || 0);
+  const revisions=Number(state.meta?.legacyTagRecoveryRevisions || 0);
+  return `Drive recovery finished · ${recovered} titles restored from ${revisions} revisions across ${chunks} chunks`;
 }
 
 function updateLegacyTagRecoveryProgress() {

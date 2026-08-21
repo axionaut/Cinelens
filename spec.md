@@ -4914,3 +4914,21 @@ Invariants:
 - `legacyTagRecoveryInProgress` alone is never presented as progress.
 - Every successful revision read and completed chunk updates visible evidence.
 - The recovery stage closes in `finally`, including errors and zero-result runs.
+
+### 31.42 Recovered titles appear after every completed Drive chunk (v130)
+
+Revision recovery no longer withholds restored data until the entire Drive
+history scan finishes. At each completed chunk it identifies newly restored
+title IDs, persists those records to IndexedDB locally, rebuilds tag/taste
+state, and renders the current view. Recommendations, Tagged/Tags counters, and
+the Tags view therefore grow while recovery is still running.
+
+Checkpoint persistence is local-only until the full recovery completes, so an
+incomplete scan cannot prematurely rewrite Drive history. The normal final save
+and sync publishes the complete recovered set. The maintenance panel retains a
+terminal result with recovered titles, inspected revisions, and checked chunks;
+a zero-result recovery is explicitly reported rather than silently disappearing.
+
+Recovery attempts all currently missing titles represented in the preserved
+backup and inspected Drive revisions. It cannot recreate a tag set that no
+longer exists in any retained copy; those titles remain ordinary Gemini debt.
