@@ -4873,3 +4873,25 @@ Invariants:
   marker would otherwise suppress the new repair.
 - `Backed up` is emitted only after the forced repair read has completed or
   failed through the normal visible reconnect/error path.
+
+### 31.40 A renewed Google token must complete a Drive restore (v128)
+
+The browser cache renders immediately, but an enabled Drive account always
+attempts silent authorization on startup, including when its persisted access
+token is absent or expired. Google Identity Services access tokens are
+short-lived; token presence is not a durable session test.
+
+Obtaining a token is only permission to attempt Drive. It must not set
+`connected` or display `Backed up`. Silent renewal now calls the authoritative
+catalogue restore on every success, even after the local library has been
+unlocked, and reports success only after that restore completes. This removes
+the v125 path where renewal acquired a token, skipped every Drive read because
+local data was already visible, and displayed a false successful status.
+
+Invariants:
+
+- Enabled Drive startup attempts restore without requiring a cached token.
+- Silent token success is followed by catalogue restore regardless of
+  `libraryWritesUnlocked`.
+- A failed/no-op restore cannot display `Backed up` or flush pending writes as
+  though remote data had been reconciled.

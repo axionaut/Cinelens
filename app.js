@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 127;
+const APP_VERSION = 128;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -2903,14 +2903,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   // dataset before Drive is checked.
   let restored = false;
   try {
-    // Do not make the local library wait for a silent OAuth round-trip when the
-    // cached token is already expired or absent. The user can reconnect from
-    // the Drive button; startup should remain usable while Google auth settles.
-    const cachedDriveToken = state.drive.accessToken || getStoredDriveToken();
-    if (cachedDriveToken) {
-      // Startup restore is authoritative when a valid token is available.
-      restored = await restoreDriveSession(false, {preferDrive:true});
-    }
+    // Rendered local data stays usable above, but an enabled Drive account must
+    // still attempt its silent session even when the cached access token has
+    // expired. Skipping this call left the app permanently local-only while a
+    // later token renewal falsely labelled itself "Backed up" without reading
+    // a catalogue chunk.
+    if (state.drive.enabled) restored = await restoreDriveSession(false, {preferDrive:true});
   } catch (error) {
     console.warn('Drive startup restore failed', error);
   }
@@ -12151,14 +12149,14 @@ function silentlyRenewDriveToken() {
     try {
       state.drive.accessToken = '';
       await requestDriveTokenSilent({allowPromptlessRequest:true});
-      state.drive.connected = true;
-      setDriveStatus('connected');
+      // A token is only permission to try Drive; it is not proof that the
+      // catalogue was read. v125 marked the session "Backed up" here and then
+      // skipped restore whenever the cached local library had already unlocked.
+      const restored = await restoreDriveSession(false, {preferDrive:true});
+      if (!restored) throw new Error('Drive catalogue restore did not complete');
       if (!libraryWritesUnlocked) {
-        const restored = await restoreDriveSession(false, {preferDrive:true});
-        if (restored && !libraryWritesUnlocked) {
-          startupFinalized = false;
-          finalizeStartupAfterDrive({allowCollection:true});
-        }
+        startupFinalized = false;
+        finalizeStartupAfterDrive({allowCollection:true});
       }
       // Drive is reachable again — push anything a previous failed sync left
       // behind rather than waiting for the user's next edit.
@@ -12364,7 +12362,7 @@ async function connectDrive() {
 
 async function restoreDriveSession(showFailure=false, opts={}) {
   if (driveRestoreInProgress) return false;
-  if (!state.drive.enabled || (!state.drive.fileId && !state.drive.manifestFileId && !state.drive.accessToken)) return false;
+  if (!state.drive.enabled) return false;
   driveRestoreInProgress=true;
   setDriveStatus('syncing');
   try {
