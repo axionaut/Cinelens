@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 126;
+const APP_VERSION = 127;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -12022,7 +12022,11 @@ const DRIVE_MANIFEST_FILE='cinelens_manifest_v2.json';
 const DRIVE_PROFILE_FILE='cinelens_profile_v2.json';
 const DRIVE_CHUNK_PREFIX='cinelens_catalog_v2_';
 const DRIVE_SYNC_MODEL_V2='chunked-drive-v2';
-const LEGACY_TAG_RECOVERY_VERSION=2;
+// v3 repairs the v125 repeated-migration incident. That run could upload the
+// emptied catalogue before the earlier recovery marker (v2) was reconsidered,
+// so v127 must inspect Drive chunk revisions once even on profiles that say the
+// older recovery already completed.
+const LEGACY_TAG_RECOVERY_VERSION=3;
 const DRIVE_TAG_RECOVERY_MAX_REVISIONS=10;
 const DRIVE_TAG_RECOVERY_CONCURRENCY=3;
 const DRIVE_CHUNK_SPAN_YEARS=5;
@@ -12827,7 +12831,13 @@ async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
   const localProfileHash=state.meta?.driveProfileHash || '';
   const remoteChunks=manifest.chunks || {};
   const needsFullLoad=!Object.keys(state.movies || {}).length;
-  const changedKeys=Object.keys(remoteChunks).filter(key => needsFullLoad || localHashes[key] !== remoteChunks[key].hash);
+  // Cached hashes describe the last completed transfer, not necessarily the
+  // records still present in IndexedDB. During the v125 tag-loss incident they
+  // remained equal after the local catalogue was emptied, so startup skipped
+  // every catalogue chunk and misleadingly reported "Backed up". Force one
+  // authoritative catalogue read for the v3 repair before revision recovery.
+  const needsCatalogueRepair=preferDrive && Number(state.meta?.legacyTagRecoveryVersion || 0) < LEGACY_TAG_RECOVERY_VERSION;
+  const changedKeys=Object.keys(remoteChunks).filter(key => needsFullLoad || needsCatalogueRepair || localHashes[key] !== remoteChunks[key].hash);
   const profileChanged=needsFullLoad || localProfileHash !== manifest.profile?.hash;
   // The profile is intentionally small. On a Drive-authoritative startup,
   // always read it even when a stale local hash claims it is current.

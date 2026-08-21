@@ -4849,3 +4849,27 @@ Regression invariants:
 - A missing `aiTagMigrationVersion` marker cannot delete stored tags or tag
   preferences.
 - A real tab switch resets card paging before the new grid is rendered.
+
+### 31.39 Drive catalogue repair must distrust stale transfer hashes (v127)
+
+The v126 UI fix could preserve tags that still existed locally, but it could
+not restore tags already cleared by v125. Chunked Drive startup compared the
+manifest only with cached `driveChunkHashes`; those hashes described the last
+successful transfer, not the records currently surviving in IndexedDB. It
+therefore skipped all catalogue downloads and displayed `Backed up` while the
+local catalogue remained tag-empty.
+
+Recovery version 3 performs one authoritative catalogue-chunk read on startup
+before trusting those cached hashes. It then reruns the existing Drive-revision
+recovery, which can recover the last verified tag sets even if the current Drive
+chunks were already overwritten by the damaged local copy. Once recovery v3 is
+recorded, normal incremental hash-based startup resumes.
+
+Invariants:
+
+- A completed-transfer hash is never proof that local catalogue records are
+  still intact.
+- Incident recovery must advance its version when a prior successful/no-op
+  marker would otherwise suppress the new repair.
+- `Backed up` is emitted only after the forced repair read has completed or
+  failed through the normal visible reconnect/error path.
