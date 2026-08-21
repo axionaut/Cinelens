@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 123;
+const APP_VERSION = 124;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const AI_TAG_MIN_CONFIDENCE = 0.55;
@@ -914,6 +914,96 @@ let tasteModelCache = new Map();
 // filter must not rebuild the rating model or rescore the whole library.
 let tagVocabularyCache = null;
 let scoredMovieCache = null;
+
+// ─────────────────────────────────────────────
+// DERIVED-VALUE MEMOS (v124)
+//
+// The profiler on a 2,500-title library showed a single render costing ~730ms
+// cold / ~235ms warm, and essentially none of it was DOM work. It was the same
+// pure derivations being recomputed from scratch on every pass: a full-library
+// predicate sweep (discoveryPool, recommendationCandidates, taggedUnseenPool,
+// the backfill counters) runs several times per render, and each one re-derived
+// every title's genres, scoring tags and content guide. Per full pass that was
+// ~117ms of content-guide regex, ~74ms of scoring-tag canonicalisation and
+// ~83ms of avoid-tag set building — for values that had not changed.
+//
+// Two memo layers fix it without altering a single result:
+//
+//   1. pure string→value caches for the tag canonicalisers, which depend on
+//      nothing but their argument;
+//   2. a per-record cache (recordDerived) holding the derivations of one title.
+//
+// The per-record cache is a WeakMap keyed by the record object, so it cannot
+// leak and never touches the stored record — nothing extra is serialised to
+// IndexedDB or Drive. Validity is checked two ways on every read:
+//
+//   * derivedEpoch — bumped whenever the library-wide caches are cleared,
+//     covering derivations that depend on the corpus (tagTooCommon reads the
+//     document share of a tag across the whole library, so a title's
+//     presentable tags can change without that title changing);
+//   * a cheap per-record signature of the fields the derivations read. Scalars
+//     and array lengths only — no string joins — so the check costs far less
+//     than any derivation it guards.
+//
+// A missed invalidation is therefore not possible in the way an id-keyed cache
+// would allow: the record object identity, the epoch and the field signature
+// must all match, or the value is recomputed.
+// ─────────────────────────────────────────────
+let derivedEpoch = 0;
+const recordDerivedCache = new WeakMap();
+
+function bumpDerivedEpoch() {
+  derivedEpoch++;
+}
+
+function recordDerived(movie) {
+  if (!movie || typeof movie !== 'object') return null;
+  const tagCount = movie.tags ? movie.tags.length : 0;
+  const coreCount = movie.coreTags ? movie.coreTags.length : 0;
+  const plotCount = movie.plotTags ? movie.plotTags.length : 0;
+  const descriptorCount = movie.descriptorTags ? movie.descriptorTags.length : 0;
+  const suppressedCount = movie.suppressedTags ? movie.suppressedTags.length : 0;
+  const suppressedRawCount = movie.suppressedRawTags ? movie.suppressedRawTags.length : 0;
+  const genreCount = movie.genres ? movie.genres.length : 0;
+  const keywordCount = movie.contentKeywords ? movie.contentKeywords.length : 0;
+  const storyLength = movie.storyText ? movie.storyText.length : 0;
+  const reviewLength = movie.tmdbReviewText ? movie.tmdbReviewText.length : 0;
+  const leadLength = movie.leadText ? movie.leadText.length : 0;
+  const certification = movie.contentCertification ? movie.contentCertification.rating || '' : '';
+  const format = movie.format || '';
+  const cached = recordDerivedCache.get(movie);
+  if (cached
+    && cached.epoch === derivedEpoch
+    && cached.tagCount === tagCount
+    && cached.coreCount === coreCount
+    && cached.plotCount === plotCount
+    && cached.descriptorCount === descriptorCount
+    && cached.suppressedCount === suppressedCount
+    && cached.suppressedRawCount === suppressedRawCount
+    && cached.genreCount === genreCount
+    && cached.keywordCount === keywordCount
+    && cached.storyLength === storyLength
+    && cached.reviewLength === reviewLength
+    && cached.leadLength === leadLength
+    && cached.certification === certification
+    && cached.format === format
+    && cached.categoryText === movie.categoryText
+  ) return cached;
+  const fresh = {
+    epoch:derivedEpoch,
+    tagCount, coreCount, plotCount, descriptorCount,
+    suppressedCount, suppressedRawCount, genreCount, keywordCount,
+    storyLength, reviewLength, leadLength, certification, format,
+    categoryText:movie.categoryText
+  };
+  recordDerivedCache.set(movie, fresh);
+  return fresh;
+}
+
+// Pure canonicalisation caches. These functions map a string to a value with no
+// other input, so the entries can never go stale — only grow. The caps keep a
+// pathological tag cloud from retaining memory without bound.
+const PURE_MEMO_CAP = 20000;
 let titleSearchRenderTimer = null;
 let titleSearchPersistTimer = null;
 const TITLE_SEARCH_RENDER_DEBOUNCE_MS = 90;
@@ -1007,6 +1097,14 @@ function deriveGenres(leadText='', categories=[], format=null) {
 }
 
 function movieGenres(movie) {
+  const derivedCache = recordDerived(movie);
+  if (derivedCache && derivedCache.genres) return derivedCache.genres;
+  const value = movieGenresUncached(movie);
+  if (derivedCache) derivedCache.genres = value;
+  return value;
+}
+
+function movieGenresUncached(movie) {
   const stored = Array.isArray(movie?.genres) ? movie.genres : [];
   const derived = deriveGenres(movie?.leadText || '', movie?.categoryText || '', movie?.format || null);
   // A TMDB refresh replaces broad genres with structured TMDB values. Preserve
@@ -1015,8 +1113,15 @@ function movieGenres(movie) {
   return [...new Set(stored.length ? [...stored, ...sitcomSupplement] : derived)];
 }
 
+const normalisedTagNameMemo = new Map();
 function normaliseTagName(tag) {
-  return String(tag || '').toLowerCase().trim().replace(/\s+/g, '-');
+  if (typeof tag !== 'string') return String(tag || '').toLowerCase().trim().replace(/\s+/g, '-');
+  const hit = normalisedTagNameMemo.get(tag);
+  if (hit !== undefined) return hit;
+  const value = tag.toLowerCase().trim().replace(/\s+/g, '-');
+  if (normalisedTagNameMemo.size >= PURE_MEMO_CAP) normalisedTagNameMemo.clear();
+  normalisedTagNameMemo.set(tag, value);
+  return value;
 }
 
 function cleanMoodArray(moods) {
@@ -1026,7 +1131,18 @@ function cleanMoodArray(moods) {
 
 const CANONICAL_FUNCTION_WORDS = new Set('a an the and or but nor so yet of in on at to from into onto by for with without as is are was were be been being has have had do does did will would can could may might must shall should this that these those it its he she they them his her their who whom whose which what when where while after before during then than also just still already again ever never very more most less least much many some any each every both either neither keeps keep kept starts start started begins begin began continues continue continued tries try tried'.split(' '));
 
+const stemCanonicalTokenMemo = new Map();
 function stemCanonicalToken(token) {
+  const key = typeof token === 'string' ? token : String(token || '');
+  const hit = stemCanonicalTokenMemo.get(key);
+  if (hit !== undefined) return hit;
+  const value = stemCanonicalTokenUncached(key);
+  if (stemCanonicalTokenMemo.size >= PURE_MEMO_CAP) stemCanonicalTokenMemo.clear();
+  stemCanonicalTokenMemo.set(key, value);
+  return value;
+}
+
+function stemCanonicalTokenUncached(token) {
   let word = String(token || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   if (word.length <= 3) return word;
   if (word.endsWith('ies') && word.length > 4) word = word.slice(0, -3) + 'y';
@@ -1038,7 +1154,20 @@ function stemCanonicalToken(token) {
   return word;
 }
 
+// The returned descriptor is read-only by contract — tagIsPresentable is its
+// only consumer and never mutates it — so one shared instance per tag is safe.
+const canonicalTagFeaturesMemo = new Map();
 function canonicalTagFeatures(tag) {
+  const key = typeof tag === 'string' ? tag : String(tag || '');
+  const hit = canonicalTagFeaturesMemo.get(key);
+  if (hit !== undefined) return hit;
+  const value = canonicalTagFeaturesUncached(key);
+  if (canonicalTagFeaturesMemo.size >= PURE_MEMO_CAP) canonicalTagFeaturesMemo.clear();
+  canonicalTagFeaturesMemo.set(key, value);
+  return value;
+}
+
+function canonicalTagFeaturesUncached(tag) {
   const normalisedTag = normaliseTagName(tag);
   const tokens = normalisedTag.split(/[^a-z0-9]+/).filter(Boolean)
     .filter(token => !CANONICAL_FUNCTION_WORDS.has(token))
@@ -1055,6 +1184,14 @@ function canonicalTagFeatures(tag) {
 }
 
 function rawScoringTags(movie) {
+  const derivedCache = recordDerived(movie);
+  if (derivedCache && derivedCache.rawScoringTags) return derivedCache.rawScoringTags;
+  const value = rawScoringTagsUncached(movie);
+  if (derivedCache) derivedCache.rawScoringTags = value;
+  return value;
+}
+
+function rawScoringTagsUncached(movie) {
   const base = movie?.tags && movie.tags.length ? movie.tags : (movie?.coreTags && movie.coreTags.length ? movie.coreTags : (movie?.plotTags && movie.plotTags.length ? movie.plotTags : (movie?.descriptorTags || [])));
   return [...new Set((base || []).filter(t => rawTagAllowed(movie, t)).filter(t => !isMetaTag(t)).filter(t => !LOW_CONFIDENCE_PLOT_TAGS.has(t)))];
 }
@@ -1129,6 +1266,7 @@ function runRecommendationRefresh() {
   recRefreshScheduled = false;
   if (!recRefreshDirty) return;
   recRefreshDirty = false;
+  bumpDerivedEpoch();
   tagCorpusStatsCache = null;
   tagVocabularyCache = null;
   cardMatchCache = null;
@@ -1142,6 +1280,7 @@ function flushRecommendationRefresh() {
   if (!recRefreshDirty && !recRefreshScheduled) return;
   recRefreshScheduled = false;
   recRefreshDirty = false;
+  bumpDerivedEpoch();
   tagCorpusStatsCache = null;
   tagVocabularyCache = null;
   cardMatchCache = null;
@@ -1201,7 +1340,11 @@ function tagIsPresentable(tag) {
 }
 
 function recommendationScoringTags(movie) {
-  return scoringTags(movie).filter(tagIsPresentable);
+  const derivedCache = recordDerived(movie);
+  if (derivedCache && derivedCache.recommendationScoringTags) return derivedCache.recommendationScoringTags;
+  const value = scoringTags(movie).filter(tagIsPresentable);
+  if (derivedCache) derivedCache.recommendationScoringTags = value;
+  return value;
 }
 
 // v99: predictTasteFit accumulates a SUM over tags, so a title carrying more
@@ -1251,11 +1394,16 @@ function tagMassLengthFactor(mass, pivot) {
 }
 
 function fitScoringTags(movie) {
+  const derivedCache = recordDerived(movie);
+  if (derivedCache && derivedCache.fitScoringTags) return derivedCache.fitScoringTags;
   const tags = recommendationScoringTags(movie);
-  if (tags.length <= SCORING_TAG_CAP) return tags;
-  return [...tags]
-    .sort((a, b) => tagSpecificity(b) - tagSpecificity(a) || a.localeCompare(b))
-    .slice(0, SCORING_TAG_CAP);
+  const value = tags.length <= SCORING_TAG_CAP
+    ? tags
+    : [...tags]
+        .sort((a, b) => tagSpecificity(b) - tagSpecificity(a) || a.localeCompare(b))
+        .slice(0, SCORING_TAG_CAP);
+  if (derivedCache) derivedCache.fitScoringTags = value;
+  return value;
 }
 
 function cleanTagArray(tags, movie=null, keepLowConfidence=false) {
@@ -1494,6 +1642,14 @@ function aiStoryHash(storyText='') {
 }
 
 function aiTagSourceText(movie) {
+  const derivedCache = recordDerived(movie);
+  if (derivedCache && derivedCache.aiTagSourceText !== undefined) return derivedCache.aiTagSourceText;
+  const value = aiTagSourceTextUncached(movie);
+  if (derivedCache) derivedCache.aiTagSourceText = value;
+  return value;
+}
+
+function aiTagSourceTextUncached(movie) {
   const story=String(movie?.storyText || '').trim();
   const reviews=String(movie?.tmdbReviewText || '').trim();
   if (!reviews) return story;
@@ -1514,8 +1670,15 @@ function hasCurrentAiTags(movie) {
   return movie.aiTagging.storyHash === aiStoryHash(aiTagSourceText(movie));
 }
 
+const moodStoryHashMemo = new Map();
 function moodStoryHash(movie) {
-  return String(stableHash(`${MOOD_PROMPT_VERSION}:${aiTagSourceText(movie)}`));
+  const text = aiTagSourceText(movie);
+  const cached = moodStoryHashMemo.get(text);
+  if (cached !== undefined) return cached;
+  const hash = String(stableHash(`${MOOD_PROMPT_VERSION}:${text}`));
+  if (moodStoryHashMemo.size >= STORY_HASH_MEMO_CAP) moodStoryHashMemo.clear();
+  moodStoryHashMemo.set(text, hash);
+  return hash;
 }
 
 function hasCurrentMoods(movie) {
@@ -6993,6 +7156,41 @@ function ensureMinimumPlotTags(coreTags, text, meta={}) {
   return cleanTagArray(coreTags || [], meta, false).filter(t => !isMetaTag(t));
 }
 
+// Tags whose meaning is narrow enough that a wrong one is worth catching, with
+// the phrase that has to appear in the source text for the tag to stand.
+// Hoisted to module scope: this used to be an object literal built INSIDE
+// tagEvidenceOk, so normaliseStoredTitleRecord -> cleanTagArray allocated it
+// once per tag per record on every single load of the app.
+const TAG_EVIDENCE_RULES = {
+  'time-manipulation': /\b(time travel|travels? (back|forward) in time|time loop|temporal|paradox|alternate timeline|parallel timeline)\b/,
+  'sports-drama': /\b(cricket|football|basketball|baseball|tennis|boxing|wrestling|racing driver|athlete|sports coach|tournament|championship|world cup|olympics|sports team|hockey|kabaddi)\b/,
+  'war-drama': /\b(world war|wwii|world war ii|nazi|nazis|soldier|military unit|army officer|battlefield|combat mission|war-torn|wartime)\b/,
+  'rape-case': /\b(rape|sexual assault|sexual violence)\b/,
+  'sexual-assault': /\b(rape|sexual assault|sexual violence)\b/,
+  'delhi-set': /\b(delhi|new delhi)\b/,
+  'delhi-setting': /\b(delhi|new delhi)\b/,
+  'class-divide': /\b(class divide|poverty|wealth inequality|working class|upper class|rich and poor)\b/,
+  'crime-boss': /\b(crime boss|crime lord|gang boss|mafia boss|cartel boss|underworld boss)\b/,
+  'major-case': /\b(major case|high-profile case|criminal case|legal case|court case)\b/,
+  'high-rise': /\b(high-rise|high rise|tower block|apartment tower)\b/,
+  'gay-school': /\b(gay|queer|homosexual|lgbt).{0,80}\b(school|student|classmate)|\b(school|student|classmate).{0,80}\b(gay|queer|homosexual|lgbt)\b/,
+  'marriage-proposal': /\b(marriage proposal|proposes marriage|propose to marry|wedding proposal)\b/,
+  'revenge-driven': /\b(seeks revenge|takes revenge|vengeance|avenges|payback)\b/,
+  'betrayal': /\b(betrayal|betrays|traitor|double-cross|deception)\b/
+};
+// Tags that a record with no source text at all cannot support.
+const TAG_EVIDENCE_NEEDS_SOURCE_TEXT = new Set(['time-manipulation', 'sports-drama', 'war-drama']);
+
+// Lowercased plot + lead, memoised per record. Only the fifteen ruled tags ever
+// need it, so it is built lazily rather than once per tag.
+function tagEvidenceSearchText(movie) {
+  const derivedCache = recordDerived(movie);
+  if (derivedCache && derivedCache.tagEvidenceText !== undefined) return derivedCache.tagEvidenceText;
+  const value = `${movie.storyText || ''} ${movie.leadText || ''}`.toLowerCase();
+  if (derivedCache) derivedCache.tagEvidenceText = value;
+  return value;
+}
+
 function tagEvidenceOk(tag, movie) {
   if (!movie || movie.source !== 'wikipedia') return true;
   // v94: a record whose source text was deliberately shed must never be
@@ -7003,32 +7201,28 @@ function tagEvidenceOk(tag, movie) {
   // and absence of the text is not evidence against it.
   if (movie.sourceShed) return true;
   const normalised = normaliseTagName(tag);
-  const t = `${movie.storyText || ''} ${movie.leadText || ''}`.toLowerCase();
-  if (!t.trim()) return !['time-manipulation','sports-drama','war-drama'].includes(tag);
-  const evidenceRules = {
-    'time-manipulation': /\b(time travel|travels? (back|forward) in time|time loop|temporal|paradox|alternate timeline|parallel timeline)\b/,
-    'sports-drama': /\b(cricket|football|basketball|baseball|tennis|boxing|wrestling|racing driver|athlete|sports coach|tournament|championship|world cup|olympics|sports team|hockey|kabaddi)\b/,
-    'war-drama': /\b(world war|wwii|world war ii|nazi|nazis|soldier|military unit|army officer|battlefield|combat mission|war-torn|wartime)\b/,
-    'rape-case': /\b(rape|sexual assault|sexual violence)\b/,
-    'sexual-assault': /\b(rape|sexual assault|sexual violence)\b/,
-    'delhi-set': /\b(delhi|new delhi)\b/,
-    'delhi-setting': /\b(delhi|new delhi)\b/,
-    'class-divide': /\b(class divide|poverty|wealth inequality|working class|upper class|rich and poor)\b/,
-    'crime-boss': /\b(crime boss|crime lord|gang boss|mafia boss|cartel boss|underworld boss)\b/,
-    'major-case': /\b(major case|high-profile case|criminal case|legal case|court case)\b/,
-    'high-rise': /\b(high-rise|high rise|tower block|apartment tower)\b/,
-    'gay-school': /\b(gay|queer|homosexual|lgbt).{0,80}\b(school|student|classmate)|\b(school|student|classmate).{0,80}\b(gay|queer|homosexual|lgbt)\b/,
-    'marriage-proposal': /\b(marriage proposal|proposes marriage|propose to marry|wedding proposal)\b/,
-    'revenge-driven': /\b(seeks revenge|takes revenge|vengeance|avenges|payback)\b/,
-    'betrayal': /\b(betrayal|betrays|traitor|double-cross|deception)\b/
-  };
-  if (evidenceRules[normalised]) return evidenceRules[normalised].test(t);
-  return true;
+  // Emptiness is decided without building or lowercasing the text, and the
+  // text itself is only materialised for a tag that actually carries a rule.
+  if (!/\S/.test(movie.storyText || '') && !/\S/.test(movie.leadText || '')) {
+    return !TAG_EVIDENCE_NEEDS_SOURCE_TEXT.has(normalised);
+  }
+  const rule = TAG_EVIDENCE_RULES[normalised];
+  if (!rule) return true;
+  return rule.test(tagEvidenceSearchText(movie));
 }
 
 function scoringTags(movie) {
   if (!movie) return [];
-  return rawScoringTags(movie).filter(tag => tagAllowed(movie, tag));
+  const derivedCache = recordDerived(movie);
+  if (derivedCache && derivedCache.scoringTags) return derivedCache.scoringTags;
+  // No suppressions is the overwhelmingly common case, and then the filter is
+  // the identity — reuse the raw list rather than allocating a copy of it.
+  const raw = rawScoringTags(movie);
+  const value = movie.suppressedTags && movie.suppressedTags.length
+    ? raw.filter(tag => tagAllowed(movie, tag))
+    : raw;
+  if (derivedCache) derivedCache.scoringTags = value;
+  return value;
 }
 
 function abortableSleep(ms) {
@@ -7904,6 +8098,14 @@ function contentGuideScore(text, patterns) {
 }
 
 function contentGuideForMovie(movie) {
+  const derivedCache = recordDerived(movie);
+  if (derivedCache && derivedCache.contentGuide) return derivedCache.contentGuide;
+  const value = contentGuideForMovieUncached(movie);
+  if (derivedCache) derivedCache.contentGuide = value;
+  return value;
+}
+
+function contentGuideForMovieUncached(movie) {
   const text=contentGuideEvidenceText(movie);
   const guide={
     sex:contentGuideScore(text, CONTENT_GUIDE_PATTERNS.sex),
@@ -7923,7 +8125,12 @@ function contentGuideMaxSetting(axis) {
   return value === 'any' ? null : Math.max(0,Math.min(5,Number(value)));
 }
 
+function contentGuideFilterActive() {
+  return CONTENT_GUIDE_AXES.some(axis => contentGuideMaxSetting(axis) != null);
+}
+
 function matchesContentGuideFilter(movie) {
+  if (!contentGuideFilterActive()) return true;
   const guide=contentGuideForMovie(movie);
   return CONTENT_GUIDE_AXES.every(axis => {
     const selectedLevel=contentGuideMaxSetting(axis);
@@ -7981,12 +8188,21 @@ function meetsYearCutoff(m) {
 }
 
 function hasUserAvoidedTag(movie) {
-  const tags = new Set([...scoringTags(movie), ...rawScoringTags(movie)].map(normaliseTagName));
-  return [...USER_AVOID_TAGS].some(tag => tags.has(tag));
+  const derivedCache = recordDerived(movie);
+  if (derivedCache && derivedCache.hasUserAvoidedTag !== undefined) return derivedCache.hasUserAvoidedTag;
+  let found = false;
+  for (const tag of scoringTags(movie)) if (USER_AVOID_TAGS.has(normaliseTagName(tag))) { found = true; break; }
+  if (!found) for (const tag of rawScoringTags(movie)) if (USER_AVOID_TAGS.has(normaliseTagName(tag))) { found = true; break; }
+  if (derivedCache) derivedCache.hasUserAvoidedTag = found;
+  return found;
 }
 
 function recommendableTitle(movie) {
-  return !hasUserAvoidedTag(movie) && !movieGenres(movie).some(genre => USER_AVOID_GENRES.has(genre));
+  const derivedCache = recordDerived(movie);
+  if (derivedCache && derivedCache.recommendableTitle !== undefined) return derivedCache.recommendableTitle;
+  const value = !hasUserAvoidedTag(movie) && !movieGenres(movie).some(genre => USER_AVOID_GENRES.has(genre));
+  if (derivedCache) derivedCache.recommendableTitle = value;
+  return value;
 }
 
 function personalizedEnough() {
@@ -8500,7 +8716,6 @@ function renderRecs() {
     return;
   }
   const ratedTagged = Object.values(state.movies).filter(m => m.rating > 0 && m.tagged);
-  grid.innerHTML = '';
 
   if (ratedTagged.length >= 3) {
     const scored = recommendationCandidates();
@@ -8518,9 +8733,7 @@ function renderRecs() {
     if (top.length) {
       document.getElementById('recCount').textContent =
         `${strongMatchCountForDisplay(fetchStatus)} strong (≥95%) · showing ${top.length} of ${scored.length} matches`;
-      const fragment = document.createDocumentFragment();
-      top.forEach(item => fragment.appendChild(buildCard(item.movie, { score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating, receptionEffect:item.receptionEffect })));
-      grid.appendChild(fragment);
+      renderCardsInto(grid, top.map(item => ({ movie:item.movie, opts:{ score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating, receptionEffect:item.receptionEffect } })));
       return;
     }
   }
@@ -8529,9 +8742,7 @@ function renderRecs() {
   const batch = sortMovies(discoveryPool(), 'title-asc').slice(0, browseLimit);
   document.getElementById('recCount').textContent = ratedTagged.length < 3 ? `rate ${Math.max(0,3-ratedTagged.length)} more to personalize` : `building recommendation pool · showing ${batch.length} unrated`;
   if (!batch.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Titles Here</h3><p>Expanding the pool in the background.</p></div>`; return; }
-  const fragment = document.createDocumentFragment();
-  batch.forEach(m => fragment.appendChild(buildCard(m, {})));
-  grid.appendChild(fragment);
+  renderCardsInto(grid, batch.map(m => ({ movie:m, opts:{} })));
 }
 
 function renderGlobalTitleSearch(grid) {
@@ -8546,22 +8757,19 @@ function renderGlobalTitleSearch(grid) {
   document.getElementById('recCount').textContent = total
     ? `library search found ${total}${blocked.length ? ` - ${blocked.length} previously removed` : ''}`
     : 'no title matches';
-  grid.innerHTML = '';
   if (!total) {
     grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Title Matches</h3><p>Try Wikipedia search below the field.</p></div>`;
     return;
   }
 
-  const fragment = document.createDocumentFragment();
-  results.slice(0, limit).forEach(movie => {
-    const contextLabel = movie.rating > 0 ? 'Rated' : 'In Library';
-    fragment.appendChild(buildCard(movie, {
+  renderCardsInto(grid, results.slice(0, limit).map(movie => ({
+    movie,
+    opts:{
       showEdit:movie.rating > 0,
       poolView:Number(movie.rating || 0) === 0,
-      contextLabel
-    }));
-  });
-  grid.appendChild(fragment);
+      contextLabel:movie.rating > 0 ? 'Rated' : 'In Library'
+    }
+  })));
 
   if (blocked.length) {
     const blockedBox = document.createElement('div');
@@ -8646,7 +8854,6 @@ function clearSimilarTitles(event) {
 function renderSimilarTitles(grid) {
   const source = state.movies?.[similarTitleSourceId];
   if (!source) { similarTitleSourceId = ''; return false; }
-  grid.innerHTML = '';
   const results = similarTitleResults();
   const top = results.slice(0, Math.max(recVisibleLimit, REC_INFINITE_PAGE_SIZE));
   const count = document.getElementById('recCount');
@@ -8657,18 +8864,19 @@ function renderSimilarTitles(grid) {
     grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>No Similar Titles Found</h3><p>Try another title or clear this view.</p></div>`;
     return true;
   }
-  const fragment = document.createDocumentFragment();
-  top.forEach(item => fragment.appendChild(buildCard(item.movie, {
-    matchedTags:item.matchedTags,
-    matchedGenres:item.matchedGenres,
-    posOverlap:item.matchedTags.size,
-    genreOverlap:item.matchedGenres.size,
-    tasteFit:Math.max(0, Math.min(1, item.similarity)),
-    matchScore:Math.max(0, Math.min(1, item.similarity)),
-    absoluteMatch:true,
-    contextLabel:`Similar to ${source.title}`
+  renderCardsInto(grid, top.map(item => ({
+    movie:item.movie,
+    opts:{
+      matchedTags:item.matchedTags,
+      matchedGenres:item.matchedGenres,
+      posOverlap:item.matchedTags.size,
+      genreOverlap:item.matchedGenres.size,
+      tasteFit:Math.max(0, Math.min(1, item.similarity)),
+      matchScore:Math.max(0, Math.min(1, item.similarity)),
+      absoluteMatch:true,
+      contextLabel:`Similar to ${source.title}`
+    }
   })));
-  grid.appendChild(fragment);
   return true;
 }
 
@@ -8687,11 +8895,8 @@ function renderRatedGrid() {
   const visible = rated.slice(0,ratedVisibleLimit);
   const count = document.getElementById('ratedCount');
   if (count) count.textContent = rated.length ? `showing ${visible.length} of ${rated.length} titles` : 'none yet';
-  grid.innerHTML = '';
   if (!rated.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">★</div><h3>Nothing Rated Yet</h3></div>`; return; }
-  const fragment = document.createDocumentFragment();
-  visible.forEach(m => fragment.appendChild(buildCard(m, { showEdit:true, suppressMatch:true })));
-  grid.appendChild(fragment);
+  renderCardsInto(grid, visible.map(m => ({ movie:m, opts:{ showEdit:true, suppressMatch:true } })));
 }
 
 function renderRecentlyAdded() {
@@ -8709,11 +8914,8 @@ function renderRecentlyAdded() {
   const visible=recent.slice(0,recentVisibleLimit);
   const count = document.getElementById('recentCount');
   if (count) count.textContent = recent.length ? `showing ${visible.length} of ${recent.length} titles${sortIsDefault ? ' · newest first' : ''}` : 'nothing added yet';
-  grid.innerHTML = '';
   if (!recent.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">+</div><h3>Nothing Added Yet</h3></div>`; return; }
-  const fragment = document.createDocumentFragment();
-  visible.forEach(m => fragment.appendChild(buildCard(m, { showEdit:Number(m.rating || 0) > 0, poolView:Number(m.rating || 0) === 0, contextLabel:'Added', suppressMatch:Number(m.rating || 0) > 0 })));
-  grid.appendChild(fragment);
+  renderCardsInto(grid, visible.map(m => ({ movie:m, opts:{ showEdit:Number(m.rating || 0) > 0, poolView:Number(m.rating || 0) === 0, contextLabel:'Added', suppressMatch:Number(m.rating || 0) > 0 } })));
 }
 
 
@@ -8830,11 +9032,8 @@ function renderPoolGrid() {
   const rows = sortMovies(Object.values(state.movies).filter(matchesTab).filter(matchesGlobalFilters), 'rating-desc');
   const visible = rows.slice(0, poolVisibleLimit);
   document.getElementById('poolCount').textContent = rows.length ? `showing ${visible.length} of ${rows.length} titles` : 'nothing loaded';
-  grid.innerHTML = '';
   if (!rows.length) { grid.innerHTML = `<div class="empty-state"><div class="icon">?</div><h3>Pool Empty</h3></div>`; return; }
-  const fragment = document.createDocumentFragment();
-  visible.forEach(m => fragment.appendChild(buildCard(m, { poolView:true })));
-  grid.appendChild(fragment);
+  renderCardsInto(grid, visible.map(m => ({ movie:m, opts:{ poolView:true } })));
   if (rows.length > visible.length) grid.insertAdjacentHTML('beforeend',`<div class="empty-state"><button class="btn btn-warning" onclick="showMorePoolTitles()">Show ${Math.min(80, rows.length-visible.length)} more · ${rows.length-visible.length} remaining</button></div>`);
 }
 
@@ -8878,6 +9077,17 @@ function formatReceptionEffect(effect) {
 }
 
 function buildCard(movie, opts={}) {
+  const markup = cardMarkup(movie, opts);
+  const card = document.createElement('div');
+  card.dataset.cardKey = String(movie.id);
+  applyCardMarkup(card, markup);
+  return card;
+}
+
+// Everything a card's appearance depends on, resolved into a className and an
+// HTML body. Kept separate from the DOM node so a re-render can compare the new
+// body against the mounted one and skip the node entirely when nothing moved.
+function cardMarkup(movie, opts={}) {
   const { score, matchedTags, matchedGenres, posOverlap, genreOverlap, negativeOverlap, tasteFit, matchScore, predictedRating, receptionEffect, showEdit, watchlistView, poolView, hiddenView, contextLabel, contextTag, suppressMatch, absoluteMatch } = opts;
   const hasSuppliedMatch = Number.isFinite(Number(matchScore)) || Number.isFinite(Number(tasteFit));
   const automaticMatch = hasSuppliedMatch || suppressMatch ? null : cardMatchData(movie);
@@ -8895,14 +9105,7 @@ function buildCard(movie, opts={}) {
   const resolvedMatchedGenres = resolvedMatch?.matchedGenres || new Set();
   const resolvedPredictedRating = Number(resolvedMatch?.predictedRating || 0);
   const resolvedReceptionEffect = Number(resolvedMatch?.receptionEffect || 0);
-  const card = document.createElement('div');
-  card.className = `movie-card ${isShow(movie) ? 'show-card' : 'film-card'}` + (movie.rating > 0 ? ' rated' : '');
-  card.id = 'card-' + movie.id;
-  card.tabIndex = 0;
-  card.setAttribute('role', 'button');
-  card.setAttribute('aria-label', `Open details for ${movie.title}`);
-  card.setAttribute('onclick', 'toggleCardReveal(event,this)');
-  card.setAttribute('onkeydown', "if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCardReveal(event,this)}");
+  const className = `movie-card ${isShow(movie) ? 'show-card' : 'film-card'}` + (movie.rating > 0 ? ' rated' : '');
   // Similarity cards carry their own 0–1 ratio, which already reaches 100% on
   // its own terms and must not be rescaled against the taste-fit reference.
   const matchPct = absoluteMatch ? Math.round(resolvedMatchScore * 100) : displayMatchPercent(resolvedMatchScore);
@@ -8923,7 +9126,7 @@ function buildCard(movie, opts={}) {
     tmdbUrl ? `<a class="source-link-btn" href="${attrSafe(tmdbUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Open ${displayTitle} on TMDB">TMDB</a>` : '',
     googleUrl ? `<a class="source-link-btn" href="${attrSafe(googleUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" title="Search Google for ${displayTitle}">Google</a>` : ''
   ].filter(Boolean).join('');
-  card.innerHTML = `
+  const html = `
     <div class="card-poster">
       ${posterSrc ? `<img class="card-poster-img" src="${attrSafe(posterSrc)}" alt="" loading="lazy" decoding="async">` : `<div class="card-poster-inner" style="background:${posterGrad(movie.title)}"></div>`}
       <div class="card-front-copy">
@@ -8956,23 +9159,96 @@ function buildCard(movie, opts={}) {
       </div>
       ${contextLabel ? `<div class="tag-status">${contextLabel}</div>` : ''}
     </div>`;
-  if (hiddenView) {
-    const stars = card.querySelector('.star-rating');
-    if (stars) stars.querySelectorAll('.star').forEach(star => {
-      star.removeAttribute('onclick');
-      star.removeAttribute('onmouseenter');
-      star.removeAttribute('onmouseleave');
-    });
-    const tags = card.querySelector('.card-tags');
-    if (tags) tags.querySelectorAll('.tag-insight-chip').forEach(tag => {
-      tag.removeAttribute('onclick');
-      tag.removeAttribute('title');
-      tag.classList.remove('removable');
-    });
-    const actions = card.querySelector('.card-actions');
-    if (actions) actions.innerHTML = `<button class="card-act retag" onclick="restoreHiddenMovie('${safeId}',event)">restore</button><button class="card-act del" onclick="forgetHiddenMovie('${safeId}',event)">forget</button>`;
-  }
-  return card;
+  return {
+    id:'card-' + movie.id,
+    label:`Open details for ${movie.title}`,
+    className,
+    html,
+    hiddenView:!!hiddenView,
+    safeId
+  };
+}
+
+// Writes a resolved markup descriptor onto a card node. Split out so the
+// reconciler can refresh a mounted card in place instead of replacing it.
+function applyCardMarkup(card, markup) {
+  if (card.className !== markup.className) card.className = markup.className;
+  if (card.id !== markup.id) card.id = markup.id;
+  card.tabIndex = 0;
+  card.setAttribute('role', 'button');
+  card.setAttribute('aria-label', markup.label);
+  card.setAttribute('onclick', 'toggleCardReveal(event,this)');
+  card.setAttribute('onkeydown', "if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleCardReveal(event,this)}");
+  card.innerHTML = markup.html;
+  mountedCardHtml.set(card, markup.html);
+  if (!markup.hiddenView) return;
+  const stars = card.querySelector('.star-rating');
+  if (stars) stars.querySelectorAll('.star').forEach(star => {
+    star.removeAttribute('onclick');
+    star.removeAttribute('onmouseenter');
+    star.removeAttribute('onmouseleave');
+  });
+  const tags = card.querySelector('.card-tags');
+  if (tags) tags.querySelectorAll('.tag-insight-chip').forEach(tag => {
+    tag.removeAttribute('onclick');
+    tag.removeAttribute('title');
+    tag.classList.remove('removable');
+  });
+  const actions = card.querySelector('.card-actions');
+  if (actions) actions.innerHTML = `<button class="card-act retag" onclick="restoreHiddenMovie('${markup.safeId}',event)">restore</button><button class="card-act del" onclick="forgetHiddenMovie('${markup.safeId}',event)">forget</button>`;
+}
+
+// The HTML currently mounted on each card node, so a re-render can tell an
+// unchanged card from a changed one. A WeakMap rather than a data attribute:
+// card bodies run to a few KB and writing them back as attributes would double
+// the DOM's memory and serialise them on every render.
+const mountedCardHtml = new WeakMap();
+
+// Keyed grid reconcile.
+//
+// Every grid render used to be `grid.innerHTML = ''` followed by a freshly built
+// node per visible title. Paging in twenty more titles therefore re-parsed the
+// HTML of the two hundred already on screen, and — the part that actually
+// showed — destroyed and recreated every poster <img>, so the whole grid flashed
+// and re-laid-out on each page. Rating one title did the same to the entire view.
+//
+// This keeps the mounted nodes. A card whose HTML is identical to what is
+// already on screen is left completely untouched (no parse, no layout, no image
+// fetch); a changed card is refreshed in place; only genuinely new titles
+// allocate a node, and only departed ones are removed. Order is repaired with
+// insertBefore against a moving cursor, so a re-sort moves nodes rather than
+// rebuilding them.
+function renderCardsInto(grid, entries) {
+  if (!grid) return;
+  const mounted = new Map();
+  Array.from(grid.children).forEach(node => {
+    const key = node.dataset ? node.dataset.cardKey : '';
+    // Non-card children (empty states, "show more" buttons) are rebuilt by the
+    // caller after this returns, so they are dropped here unconditionally.
+    if (key && !mounted.has(key)) mounted.set(key, node);
+    else node.remove();
+  });
+
+  let cursor = grid.firstChild;
+  entries.forEach(entry => {
+    const movie = entry.movie;
+    const key = String(movie.id);
+    const markup = cardMarkup(movie, entry.opts || {});
+    let node = mounted.get(key);
+    if (node) {
+      mounted.delete(key);
+      if (mountedCardHtml.get(node) !== markup.html) applyCardMarkup(node, markup);
+      else if (node.className !== markup.className) node.className = markup.className;
+    } else {
+      node = document.createElement('div');
+      node.dataset.cardKey = key;
+      applyCardMarkup(node, markup);
+    }
+    if (node === cursor) cursor = node.nextSibling;
+    else grid.insertBefore(node, cursor);
+  });
+
+  mounted.forEach(node => node.remove());
 }
 
 let openCardModalId = '';
@@ -10192,7 +10468,7 @@ function toggleTags(id, e) {
 // ─────────────────────────────────────────────
 function runHousekeeping(manual=true, deferCanonical=false) {
   Object.values(state.movies).forEach(m => {
-    m.genres = movieGenres(m);
+    m.genres = [...movieGenres(m)];
     if (hasCurrentAiTags(m)) {
       m.tags = cleanTagArray(m.tags || [], m, false);
       m.coreTags = [...m.tags];

@@ -4582,3 +4582,123 @@ highest-confidence candidate. Legacy or malformed mood arrays are collapsed to
 their first valid mood, with `calm` as the displayable fallback. Mood evidence
 is persisted only for that selected mood. Existing mood records are reprocessed
 under `cinelens-moods-v2`.
+
+### 31.36 Interaction latency: derived-value memos and a keyed grid reconcile (v124)
+
+The app had become laggy, most visibly on mobile. Profiling the real app in
+headless Chrome against a synthetic 2,500-title library (`dev/assert-perf.mjs`)
+showed that almost none of the cost was DOM work or network work. It was the
+same pure derivations being recomputed from scratch, over and over, inside
+full-library predicate sweeps that run several times per render.
+
+Measured before, per full-library pass:
+
+| derivation | cost |
+| --- | --- |
+| `contentGuideForMovie` | ~117 ms |
+| `recommendationScoringTags` (via `tagIsPresentable` → `canonicalTagFeatures`) | ~74 ms |
+| `recommendableTitle` (via `hasUserAvoidedTag`) | ~83 ms |
+| `taggedUnseenPoolCount` | ~87 ms |
+
+`discoveryPool()`, `recommendationCandidates()`, `collectionHealth()` and the
+three backfill counters each perform such a sweep, so one `render()` cost
+~1,370 ms cold and ~515 ms warm. Multiply by a phone.
+
+**Two memo layers.** Neither changes a single result; both are verified against
+the uncached values in `dev/assert-v124.mjs`.
+
+1. *Pure caches* for `normaliseTagName`, `stemCanonicalToken` and
+   `canonicalTagFeatures`. These map a string to a value with no other input, so
+   their entries cannot go stale. `canonicalTagFeatures` now returns one shared
+   descriptor per tag; it is read-only by contract, and `tagIsPresentable` is
+   its only consumer.
+2. *A per-record cache* (`recordDerived`) holding one title's derivations:
+   genres, raw/scoring/presentable/fit tag sets, the content guide, the
+   avoid-tag verdict and the AI source text. It is a `WeakMap` keyed by the
+   record object, so it cannot leak and nothing extra is ever serialised to
+   IndexedDB or Drive.
+
+**Why the per-record cache cannot go stale.** Validity is checked two ways on
+every read, and both must hold:
+
+- `derivedEpoch`, bumped wherever the library-wide caches are cleared. This
+  covers derivations that depend on the *corpus* rather than the record —
+  `tagTooCommon` reads a tag's document share across the whole library, so a
+  title's presentable tags can change without that title changing.
+- A cheap signature of the record fields the derivations read: scalars and
+  array lengths only, no string joins, so the check costs far less than any
+  derivation it guards.
+
+Record identity, epoch and signature must all match or the value is recomputed.
+This is deliberately stricter than an id-keyed cache, which a missed
+invalidation could poison.
+
+**Work avoided outright.** `matchesContentGuideFilter` now returns `true`
+immediately while no S/V/L axis is constrained — the default. It previously
+joined the plot, the TMDB review text, the keywords and the tags into one large
+string and ran fifteen regexes over it, per title, per sweep, to compute a value
+that could not affect the outcome. `hasUserAvoidedTag` probes the ten-entry
+`USER_AVOID_TAGS` set directly instead of building a `Set` of every tag on the
+title and spreading the constant set to probe it.
+
+**Startup.** `TAG_EVIDENCE_RULES` was an object literal built *inside*
+`tagEvidenceOk`, which `normaliseStoredTitleRecord` → `cleanTagArray` calls once
+per tag per record on every load — so opening the app allocated that fifteen-
+regex object tens of thousands of times and lowercased each full plot once per
+tag. The rules are hoisted to module scope, emptiness is decided without
+building the text, and the lowercased text is materialised only for the fifteen
+tags that actually carry a rule. Behaviour is unchanged, including the v94 rule
+that a shed record keeps its grounded tags.
+
+**Keyed grid reconcile.** Every grid render was `grid.innerHTML = ''` followed
+by a freshly built node per visible title. Paging in twenty more titles
+therefore re-parsed the HTML of the two hundred already on screen, and —
+the part that actually showed — destroyed and recreated every poster `<img>`,
+so the whole grid flashed and re-laid-out on each page. Rating one title did the
+same to the entire view.
+
+`buildCard` is now split into `cardMarkup` (className + HTML) and
+`applyCardMarkup` (write it to a node), and `renderCardsInto(grid, entries)`
+reconciles against what is mounted: a card whose HTML is identical to what is
+already on screen is left completely untouched, a changed card is refreshed in
+place, only new titles allocate a node, and order is repaired with `insertBefore`
+against a moving cursor so a re-sort *moves* nodes. The mounted HTML is held in
+a `WeakMap` rather than a data attribute — card bodies run to a few KB and
+writing them back as attributes would double the DOM's memory. All six grids
+(recommendations, browse, library search, similar titles, rated, recently added,
+pool) use it.
+
+Measured after, same fixture and machine:
+
+| metric | before | after |
+| --- | --- | --- |
+| `render()` cold | 1,368 ms | 177 ms |
+| `render()` warm | 515 ms | 16 ms |
+| re-render 240 mounted cards | 244 ms | 14 ms |
+| page 240 → 260 cards | 490 ms | 25 ms |
+| `matchesGlobalFilters` over the library | 128 ms | 3 ms |
+| `discoveryPool()` | 213 ms | 3 ms |
+| `normaliseStoredTitleRecord` over the library (startup) | 230 ms | 36 ms |
+
+The scored recommendation set is identical before and after (1,514 titles, same
+ordering, same predicted ratings to full float precision).
+
+Invariants:
+
+- **A derivation added to `recordDerived` must have every input it reads
+  represented in the signature**, or it will serve a stale value after an edit
+  that the signature cannot see. Prefer scalars and lengths; never hash a large
+  string there, or the guard costs more than the derivation.
+- **Anything that clears `tagCorpusStatsCache` must call `bumpDerivedEpoch()`.**
+  Corpus-dependent derivations (`recommendationScoringTags`, `fitScoringTags`)
+  are cached per record but change when the *library* changes.
+- **`movieGenres()` returns a shared cached array.** Never assign it into a
+  record — `runHousekeeping` copies it (`m.genres = [...movieGenres(m)]`),
+  because storing it would alias the cache into the record and a later edit
+  would mutate the cache in place.
+- **Card nodes are per grid.** `renderCardsInto` only ever reuses a node already
+  mounted in the grid it was handed, so the same title showing in two grids
+  cannot have its node stolen from one by the other.
+- Non-card children of a grid (empty states, "show more" buttons) are dropped by
+  the reconciler and re-appended by the caller. A card node is identified by
+  `data-card-key`.
