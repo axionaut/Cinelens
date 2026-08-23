@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 131;
+const APP_VERSION = 132;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -8711,14 +8711,25 @@ function scheduleBackgroundAiQueue(delay = 700) {
 // batch every 20 seconds, and no longer stands down while collection runs.
 // Old ceiling: ~24 titles/min. New: bounded only by what aiLimiter finds Gemini
 // will accept.
+// Genuinely untagged titles keep first claim on the lane, but only for the
+// slots they can actually fill THIS cycle. Barring top-ups outright whenever
+// any hard debt existed starved them indefinitely: background collection keeps
+// adding untagged records, so activeAiTagDebtCount() never reaches zero on a
+// growing library and an underfilled title could sit at 5/10 tags forever,
+// never spending a topUpAttempt. Untagged titles still blocked by their retry
+// backoff are not in `pending` at all, so they cannot hold slots hostage
+// either. Whatever capacity is left over goes to top-ups.
+function allocateAiLane(pending) {
+  const capacity = AI_TAG_LANE_CONCURRENCY * AI_BACKGROUND_BATCH_SIZE;
+  const untagged = pending.filter(movie => !hasCurrentAiTags(movie));
+  const topUps = pending.filter(movie => hasCurrentAiTags(movie));
+  return untagged.concat(topUps.slice(0, Math.max(0, capacity - untagged.length)));
+}
+
 async function runBackgroundAiQueue() {
   if (backgroundAiTaggingInProgress || autoFetchPaused || legacyTagRecoveryPending()) return;
   const cooldown = effectiveAiCooldownRemaining();
-  const hardDebt = activeAiTagDebtCount();
-  let pending = pendingBackgroundAiMovies().filter(movie => !aiTagInFlight(movie));
-  // Current-but-underfilled top-ups never consume the scarce lane while a
-  // genuinely untagged title is keeping collection closed.
-  if (hardDebt) pending = pending.filter(movie => !hasCurrentAiTags(movie));
+  let pending = allocateAiLane(pendingBackgroundAiMovies().filter(movie => !aiTagInFlight(movie)));
 
   // Wikipedia recovery is independent of Gemini. Run it while Gemini cools
   // down, or whenever no story-ready hard debt can be tagged yet.
@@ -8743,8 +8754,7 @@ async function runBackgroundAiQueue() {
       } finally {
         backgroundAiTaggingInProgress = false;
       }
-      pending = pendingBackgroundAiMovies().filter(movie => !aiTagInFlight(movie));
-      if (activeAiTagDebtCount()) pending = pending.filter(movie => !hasCurrentAiTags(movie));
+      pending = allocateAiLane(pendingBackgroundAiMovies().filter(movie => !aiTagInFlight(movie)));
     }
   }
   if (effectiveAiCooldownRemaining()) {

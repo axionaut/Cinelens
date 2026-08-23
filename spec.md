@@ -4944,3 +4944,18 @@ learned signals, ranked #1 at 100%.
 is now the primary sort key in `scoreMovies`: every title clearing the floor
 ranks above every one that does not. Underfilled titles are demoted, not
 dropped — the top-up queue still completes them, after which they rank on merit.
+
+## 132. Top-ups no longer starve behind background collection
+
+`runBackgroundAiQueue` dropped every current-but-underfilled title from the
+batch whenever `activeAiTagDebtCount()` was non-zero. On a growing library that
+count never reaches zero — background collection keeps adding untagged
+records — so top-ups could be deferred indefinitely and an underfilled title
+could sit below the tag floor forever without ever spending a `topUpAttempt`.
+Section 131 made that worse by also demoting such titles in ranking.
+
+`allocateAiLane()` replaces the blanket filter: untagged titles that are ready
+this cycle claim slots first, and top-ups fill whatever capacity is left within
+`AI_TAG_LANE_CONCURRENCY * AI_BACKGROUND_BATCH_SIZE`. Untagged titles held by
+their retry backoff are absent from the pending list, so they no longer reserve
+slots they cannot use.
