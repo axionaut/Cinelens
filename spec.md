@@ -4959,3 +4959,43 @@ this cycle claim slots first, and top-ups fill whatever capacity is left within
 `AI_TAG_LANE_CONCURRENCY * AI_BACKGROUND_BATCH_SIZE`. Untagged titles held by
 their retry backoff are absent from the pending list, so they no longer reserve
 slots they cannot use.
+
+## 133. The Gemini cooldown that Gemini never asked for
+
+The app parked itself on "Gemini cooling down" for hours while the AI Studio
+dashboard showed no throttling at all — recent days at zero requests and a 100%
+success rate. Nothing upstream was rate-limiting anything. The block was
+entirely ours.
+
+Three faults compounded:
+
+1. **`AI_TAG_LANE_RPD = 500` was the binding constraint, not a safety net.**
+   The local counter in `AdaptiveLimiter.dailyRetryAfter()` blocks on a rolling
+   24h list of request starts held in `localStorage`. The dashboard shows the
+   key comfortably serving ~800 requests on a busy day, so the app stopped
+   itself well below what the upstream would grant. Raised to 1000; the
+   upstream stays authoritative, and a real quota returns 429, which AIMD
+   already handles better than a local block.
+2. **A local refusal was promoted into a persisted cooldown.** The cap error
+   carried `cinelensRateLimited = true`, so `isExternalRateLimitError()`
+   matched it and both `requestAiTags`' catch and the background queue called
+   `registerAiRateLimit()` — writing `state.meta.aiRateLimitUntil` and
+   escalating `aiRateLimitCount` toward the 10-minute ceiling on every retry.
+   A block thrown *before any fetch* was being recorded as Gemini pushback.
+   Local-cap errors now carry `cinelensLocalDailyCap` and
+   `isLocalDailyCapError()` gates every promotion, plus `recordThrottle` — a
+   counter of ours must never halve the concurrency pool either.
+3. **Rejected requests spent daily slots.** `recordDailyStart` counted starts
+   and never refunded. The August 429 burst (~2K errors) filled the 24h window
+   with attempts that produced no tags, so the lane stayed blocked long after
+   the upstream recovered. `refundDailyStart()` returns the slot when a request
+   fails with upstream pushback; failures that may have consumed real quota
+   still count.
+
+The status line now names which of the two states it is —
+`Daily tagging budget spent · N tags waiting in 4 h` versus the genuine
+`Gemini cooling down` — so the next occurrence is readable without a debugger.
+
+A one-time purge (`cinelens_gemini_daily_purge_v133`) clears the poisoned
+window once on upgrade, since the spent slots cannot be told apart
+retroactively.

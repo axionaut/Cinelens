@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 132;
+const APP_VERSION = 133;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -86,7 +86,13 @@ const AI_TAG_RETRY_LIMIT = 3;
 const AI_TAG_LANE_CONCURRENCY = 4;
 const AI_TAG_LANE_RPM = 15;
 const AI_TAG_LANE_TPM = 250000;
-const AI_TAG_LANE_RPD = 500;
+// v133: this local counter is a safety net, not the authority. It was set to
+// 500 and became the *binding* constraint — the AI Studio dashboard shows the
+// key serving ~800 requests on a busy day with a 100% success rate, so the app
+// was parking itself for hours while the upstream was happy to keep going. The
+// upstream stays authoritative: exceed a real quota and Gemini returns 429,
+// which aiLimiter's AIMD already handles far better than a local block does.
+const AI_TAG_LANE_RPD = 1000;
 const AI_VOCABULARY_SAMPLE_SIZE = 240;
 const AI_TAG_CLOUD_NORMALIZE_EVERY = 100;
 const AI_TAG_CLOUD_NORMALIZE_VERSION = 'cinelens-tag-cloud-v2';
@@ -183,12 +189,7 @@ class AdaptiveLimiter {
     for (;;) {
       if (fetchAbortRequested) throw new DOMException('Aborted', 'AbortError');
       const dailyWait = this.dailyRetryAfter();
-      if (dailyWait) {
-        const error = new Error('Daily CineLens tagging limit reached');
-        error.cinelensRateLimited = true;
-        error.retryAfterMs = dailyWait;
-        throw error;
-      }
+      if (dailyWait) throw this.dailyCapError(dailyWait);
       const wait = this.delayUntilReady();
       if (wait === 0) {
         this.tokens -= 1;
@@ -235,17 +236,44 @@ class AdaptiveLimiter {
 
   recordFailure() { this.stats.failed++; this.wins = 0; }
 
+  // A local-cap refusal never reached the upstream. Flagging it separately
+  // keeps callers from treating it as pushback *from Gemini* and promoting it
+  // into the persisted cooldown — see registerAiRateLimit's call sites.
+  dailyCapError(retryAfterMs) {
+    const error = new Error('Daily CineLens tagging limit reached');
+    error.cinelensRateLimited = true;
+    error.cinelensLocalDailyCap = true;
+    error.retryAfterMs = Math.max(1000, Number(retryAfterMs) || 0);
+    return error;
+  }
+
   recordDailyStart() {
-    if (!this.dailyLimit) return;
+    if (!this.dailyLimit) return 0;
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
     this.dailyStarts = this.dailyStarts.filter(stamp => stamp > cutoff);
     if (this.dailyStarts.length >= this.dailyLimit) {
-      const error = new Error('Daily CineLens tagging limit reached');
-      error.cinelensRateLimited = true;
-      error.retryAfterMs = Math.max(1000, this.dailyStarts[0] + 24 * 60 * 60 * 1000 - Date.now());
-      throw error;
+      throw this.dailyCapError(this.dailyStarts[0] + 24 * 60 * 60 * 1000 - Date.now());
     }
-    this.dailyStarts.push(Date.now());
+    const stamp = Date.now();
+    this.dailyStarts.push(stamp);
+    this.persistDailyStarts();
+    return stamp;
+  }
+
+  // A request the upstream *rejected* (429/503) produced no tags and consumed
+  // no real quota, so it must not spend one of our daily slots either. Without
+  // this, a burst of throttles fills the 24h window with attempts that did no
+  // work and the lane blocks itself long after the upstream has recovered.
+  refundDailyStart(stamp) {
+    if (!this.dailyLimit || !stamp) return;
+    const index = this.dailyStarts.lastIndexOf(stamp);
+    if (index < 0) return;
+    this.dailyStarts.splice(index, 1);
+    this.persistDailyStarts();
+  }
+
+  persistDailyStarts() {
+    if (!this.dailyStorageKey) return;
     try { localStorage.setItem(this.dailyStorageKey, JSON.stringify(this.dailyStarts)); } catch (_) {}
   }
 
@@ -256,7 +284,8 @@ class AdaptiveLimiter {
       this.recordSuccess();
       return value;
     } catch (error) {
-      if (isExternalRateLimitError(error)) this.recordThrottle(error?.retryAfterMs);
+      if (error?.cinelensLocalDailyCap) this.recordFailure();
+      else if (isExternalRateLimitError(error)) this.recordThrottle(error?.retryAfterMs);
       else this.recordFailure();
       throw error;
     } finally {
@@ -282,6 +311,19 @@ const tmdbLimiter = new AdaptiveLimiter({name: 'tmdb', rpm: 1200, concurrency: 1
 // Gemini through Apps Script: 15 RPM, 250K TPM and 500 requests per rolling
 // day. Two-title payloads preserve token headroom; the upstream remains
 // authoritative when another device shares the same API key.
+// v133 one-time purge. The stuck window was filled largely by attempts the
+// upstream rejected (the Aug 2026 429 burst) plus a local cap that escalated
+// itself into the persisted cooldown. Those slots were never real spend, and
+// there is no way to tell them apart retroactively, so the counter starts
+// clean once. The refund path above keeps it honest from here on.
+(function purgeStaleGeminiDailyCounter() {
+  try {
+    if (localStorage.getItem('cinelens_gemini_daily_purge_v133')) return;
+    localStorage.removeItem('cinelens_gemini_request_starts_v1');
+    localStorage.setItem('cinelens_gemini_daily_purge_v133', '1');
+  } catch (_) {}
+})();
+
 const aiLimiter = new AdaptiveLimiter({
   name: 'gemini',
   rpm: AI_TAG_LANE_RPM,
@@ -4594,6 +4636,13 @@ function isExternalRateLimitError(error) {
   );
 }
 
+// Our own 24h counter refusing a request is not Gemini pushing back. Callers
+// that persist a cooldown must skip these, or a purely local block escalates
+// itself into a real one that outlives the window that caused it.
+function isLocalDailyCapError(error) {
+  return !!error?.cinelensLocalDailyCap;
+}
+
 function aiRateLimitRemaining(now=Date.now()) {
   return Math.max(0,(Number(state.meta?.aiRateLimitUntil || 0) || 0) - now);
 }
@@ -4604,6 +4653,19 @@ function effectiveAiCooldownRemaining(now=Date.now()) {
     Math.max(0, Number(aiLimiter.cooldownUntil || 0) - now),
     aiLimiter.dailyRetryAfter(now)
   );
+}
+
+function formatDurationShort(milliseconds) {
+  const seconds = Math.max(0, Math.ceil(Number(milliseconds || 0) / 1000));
+  if (seconds < 90) return `in ${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `in ${minutes} min`;
+  return `in ${Math.round(minutes / 60)} h`;
+}
+
+// Only the local 24h counter, so the UI can name which of the two blocks it is.
+function aiDailyCapRemaining(now=Date.now()) {
+  return aiLimiter.dailyRetryAfter(now);
 }
 
 function aiRateLimitError() {
@@ -4658,8 +4720,15 @@ async function runAiRequest(request) {
     // Check only after the limiter grants a real start slot. A batch can wait
     // here behind another request that registers a cooldown in the meantime.
     await reserveAiRequest();
-    aiLimiter.recordDailyStart();
-    return request();
+    const dailyStamp = aiLimiter.recordDailyStart();
+    try {
+      return await request();
+    } catch (error) {
+      if (!isLocalDailyCapError(error) && isExternalRateLimitError(error)) {
+        aiLimiter.refundDailyStart(dailyStamp);
+      }
+      throw error;
+    }
   });
 }
 
@@ -4785,7 +4854,7 @@ async function expandPool(manual=true) {
       }
       outcomes.ai += unresolved.length;
       if (isExternalRateLimitError(error)) {
-        if (!aiRateLimitRemaining()) registerAiRateLimit();
+        if (!aiRateLimitRemaining() && !isLocalDailyCapError(error)) registerAiRateLimit();
         saveLocalState({silentUi:true,preserveUpdatedAt:true,driveProfileOnly:true});
         queueDriveSync(BACKGROUND_SYNC_DEBOUNCE_MS);
         aiFailure = message;
@@ -8629,6 +8698,7 @@ function updateLibraryHealth() {
   else if (legacyTagRecoveryInProgress) text = legacyTagRecoveryProgressText();
   else if (poolExpansionInProgress) { const jy = discoveryJourneyYear(); text = `Collecting ${formatStrongMatchCount(strongMatchCountForDisplay(health))}${jy ? ` · fetching ${jy}` : ''}`; }
   else if (backgroundAiTaggingInProgress) text = `Tagging catch-up · ${health.tagDebt} titles need tags`;
+  else if (aiDailyCapRemaining()) text = `Daily tagging budget spent · ${health.tagDebt} tags waiting ${formatDurationShort(aiDailyCapRemaining())}`;
   else if (effectiveAiCooldownRemaining()) text = `Gemini cooling down · collection waiting on ${health.tagDebt} tags`;
   else if (!libraryWritesUnlocked && state.drive?.enabled) text = 'Collection waiting for Drive reconnect';
   else if (health.waitingForTags) text = `Tagging catch-up · ${health.tagDebt} titles need tags`;
@@ -8760,7 +8830,9 @@ async function runBackgroundAiQueue() {
   if (effectiveAiCooldownRemaining()) {
     // Cooling down is a real state with a real end time — say so instead of
     // leaving a bar that looks stalled.
-    pipelineStageProgress('gemini', activeAiTagDebtCount(), `Gemini quota cooling down · resumes in ${Math.ceil(effectiveAiCooldownRemaining() / 1000)}s`);
+    pipelineStageProgress('gemini', activeAiTagDebtCount(), aiDailyCapRemaining()
+      ? `Daily tagging budget spent · frees up in ${formatDurationShort(aiDailyCapRemaining())}`
+      : `Gemini quota cooling down · resumes in ${Math.ceil(effectiveAiCooldownRemaining() / 1000)}s`);
     scheduleBackgroundAiQueue(effectiveAiCooldownRemaining());
     return;
   }
@@ -8800,6 +8872,7 @@ async function runBackgroundAiQueue() {
     })));
     const result = {tagged:0, failed:0};
     let rateLimited = false;
+    let localCapOnly = true;
     settled.forEach((entry, index) => {
       if (entry.status === 'fulfilled') {
         result.tagged += Number(entry.value?.tagged || 0);
@@ -8809,6 +8882,7 @@ async function runBackgroundAiQueue() {
       const error = entry.reason;
       if (isExternalRateLimitError(error)) {
         rateLimited = true;
+        if (!isLocalDailyCapError(error)) localCapOnly = false;
         return;
       }
       const unresolved = batches[index].filter(movie => !hasCurrentAiTags(movie));
@@ -8817,8 +8891,13 @@ async function runBackgroundAiQueue() {
       console.warn('Background AI tagging deferred:', String(error?.message || error));
     });
     if (rateLimited) {
-      if (!aiRateLimitRemaining()) registerAiRateLimit();
-      showToast('Gemini is cooling down; collection is waiting for tagging to resume.', '');
+      if (!aiRateLimitRemaining() && !localCapOnly) registerAiRateLimit();
+      showToast(
+        localCapOnly
+          ? 'Daily CineLens tagging budget reached; tagging resumes as the 24h window rolls forward.'
+          : 'Gemini is cooling down; collection is waiting for tagging to resume.',
+        ''
+      );
     }
     if (Number(result?.tagged || 0)) deferRecommendationRefresh();
     saveLocalState({silentUi:true,preserveUpdatedAt:true,changedMovieIds});
