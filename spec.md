@@ -5315,3 +5315,51 @@ else happens to dirty its chunk.
 - The same for catalogue data: a month-old empty poster field does not overwrite
   a poster fetched yesterday.
 - A deletion is not resurrected by the stale device syncing.
+
+## 139. The v138 tombstone rule deleted titles it should have kept
+
+§138 added tombstone enforcement to the v2 chunked path so a deletion on one
+device could not be undone by another. The rule it used was the legacy one:
+
+    return recordTimestamp(tombstone) >= recordTimestamp(movie);
+
+That is correct only while the record carries an edit stamp. It does not.
+`catalogueMovieForDrive` strips `_updatedAt` deliberately, so personal edits
+cannot dirty a catalogue chunk — which means **every record that has been
+through Drive reports `recordTimestamp` 0**. Compared against a tombstone, zero
+reads as "infinitely old", so *any* tombstone, however stale, deleted it. A
+title removed months ago and then deliberately re-added was silently deleted
+again on the next Drive load, along with anything else whose id or title had
+ever appeared in `deletedMovieRecords` or `wrongPicks`.
+
+The visible symptom was not "titles are vanishing" — it was clicking a title
+name and getting nothing, because `showSimilarTitles` began with
+
+    const movie = state.movies?.[id];
+    if (!movie) return;
+
+A card that was rendered before the prune, or whose record went while the view
+stood, became an inert button with no feedback at all.
+
+### The fix
+
+`titleRemovalBlocked` now resolves the record's age from the best evidence it
+has. `addedAt` **does** survive the chunk round-trip, so it is the fallback:
+
+    const recordTime = Math.max(recordTimestamp(movie), movieAddedTime(movie));
+    if (!recordTime) return false;
+    return recordTimestamp(tombstone) >= recordTime;
+
+A record of entirely unknown age is kept rather than deleted on a guess — a
+title wrongly kept is visible and fixable, one wrongly deleted is neither. An
+exact timestamp tie still goes to the removal, as it always has.
+
+`showSimilarTitles` no longer returns silently when the record is missing; it
+says so and re-renders. That silence is precisely what hid this bug.
+
+### Coverage
+
+`dev/assert-multidevice.mjs` §7 pins all of it: a re-added title survives both
+in memory and after a Drive round-trip has stripped its edit stamp; a genuine
+deletion still removes an older title through the same path; a record of unknown
+age is kept; and a chunk-loaded library is not gutted by stale tombstones.

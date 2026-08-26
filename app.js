@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 138;
+const APP_VERSION = 139;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -9085,7 +9085,14 @@ function similarTitleResults() {
 function showSimilarTitles(id, event) {
   if (event) event.stopPropagation();
   const movie = state.movies?.[id];
-  if (!movie) return;
+  if (!movie) {
+    // A rendered card whose record is no longer in state means something
+    // removed it behind the view. Saying so beats a button that silently does
+    // nothing — that silence is exactly what hid the v138 tombstone bug.
+    showToast('That title is no longer in your library. Refreshing the view.', 'error');
+    render();
+    return;
+  }
   similarTitleSourceId = id;
   state.settings.titleSearch = '';
   wikiSearchQuery = '';
@@ -12066,7 +12073,17 @@ function titleRemovalBlocked(movie, sources={}) {
   const tombstone=[idRecord,titleRecord].filter(Boolean).sort((a,b)=>recordTimestamp(b)-recordTimestamp(a))[0];
   if (!tombstone) return false;
   if (release && recordTimestamp(release) > recordTimestamp(tombstone)) return false;
-  return recordTimestamp(tombstone) >= recordTimestamp(movie);
+  // v139. `catalogueMovieForDrive` strips `_updatedAt` by design, so any record
+  // that has been through a Drive chunk reports recordTimestamp 0. Comparing a
+  // tombstone against that read as "the record is infinitely old", which let
+  // ANY tombstone — however stale — delete it, including a title the user had
+  // deliberately re-added months later. `addedAt` does survive the chunk
+  // round-trip, so it is the fallback; and when nothing at all is known about
+  // the record's age we decline to delete, because a title wrongly kept is
+  // visible and fixable while one wrongly deleted is neither.
+  const recordTime=Math.max(recordTimestamp(movie), movieAddedTime(movie));
+  if (!recordTime) return false;
+  return recordTimestamp(tombstone) >= recordTime;
 }
 
 // Returns a copy of a record map with every tombstoned title dropped. Used on
