@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 137;
+const APP_VERSION = 138;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -12051,6 +12051,49 @@ function newestTasteStory(localStory={}, remoteStory={}) {
   return remote.story.length > local.story.length ? remote : local;
 }
 
+// A title is blocked when a removal tombstone (by id, or by title via
+// wrongPicks) is at least as recent as the record itself, and no later
+// deliberate re-add has released it.
+function titleRemovalBlocked(movie, sources={}) {
+  if (!movie) return false;
+  const wrongPicks=sources.wrongPicks || state.wrongPicks || {};
+  const unblockedTitleRecords=sources.unblockedTitleRecords || state.unblockedTitleRecords || {};
+  const deletedMovieRecords=sources.deletedMovieRecords || state.deletedMovieRecords || {};
+  const titleKey=normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title);
+  const release=unblockedTitleRecords[titleKey];
+  const idRecord=deletedMovieRecords[movie.id];
+  const titleRecord=Object.values(wrongPicks).find(record => recordMatchesDiscoveryCandidate(record, movie));
+  const tombstone=[idRecord,titleRecord].filter(Boolean).sort((a,b)=>recordTimestamp(b)-recordTimestamp(a))[0];
+  if (!tombstone) return false;
+  if (release && recordTimestamp(release) > recordTimestamp(tombstone)) return false;
+  return recordTimestamp(tombstone) >= recordTimestamp(movie);
+}
+
+// Returns a copy of a record map with every tombstoned title dropped. Used on
+// both sides of a chunk transfer: on what we are about to upload, so a deletion
+// is not undone for everyone else, and on what we have just pulled, so it is not
+// undone for us.
+function withoutRemovedTitles(movies={}) {
+  const kept={};
+  Object.entries(movies || {}).forEach(([id, movie]) => {
+    if (!titleRemovalBlocked(movie)) kept[id]=movie;
+  });
+  return kept;
+}
+
+// Drops tombstoned titles from live state. Returns how many went, so a caller
+// can push the correction back out rather than leaving Drive holding a title
+// this device has just decided is deleted.
+function pruneRemovedTitlesFromState() {
+  let removed=0;
+  [state.movies, state.hiddenTitles].forEach(collection => {
+    Object.keys(collection || {}).forEach(id => {
+      if (titleRemovalBlocked(collection[id])) { delete collection[id]; removed++; }
+    });
+  });
+  return removed;
+}
+
 function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
   const local=normaliseIncomingData(localRaw);
   const remote=normaliseIncomingData(remoteRaw);
@@ -12078,17 +12121,7 @@ function mergeCanonicalDatasets(localRaw={}, remoteRaw={}) {
 
   // Permanent removal/forget must win over any stale active or hidden copy on
   // another device. A title is allowed back only after an explicit manual re-add.
-  const removalBlocksMovie = movie => {
-    if (!movie) return false;
-    const titleKey=normaliseTitleKey(movie.wikiTitle || movie.pageTitle || movie.title);
-    const release=unblockedTitleRecords[titleKey];
-    const idRecord=deletedMovieRecords[movie.id];
-    const titleRecord=Object.values(wrongPicks).find(record => recordMatchesDiscoveryCandidate(record, movie));
-    const tombstone=[idRecord,titleRecord].filter(Boolean).sort((a,b)=>recordTimestamp(b)-recordTimestamp(a))[0];
-    if (!tombstone) return false;
-    if (release && recordTimestamp(release) > recordTimestamp(tombstone)) return false;
-    return recordTimestamp(tombstone) >= recordTimestamp(movie);
-  };
+  const removalBlocksMovie = movie => titleRemovalBlocked(movie, {wrongPicks, unblockedTitleRecords, deletedMovieRecords});
   Object.keys(movies).forEach(id => { if (removalBlocksMovie(movies[id])) delete movies[id]; });
   Object.keys(hiddenTitles).forEach(id => { if (removalBlocksMovie(hiddenTitles[id])) delete hiddenTitles[id]; });
 
@@ -13184,7 +13217,6 @@ function driveHasLocalChanges() {
 async function pullDriveIfRemoteChanged({force=false}={}) {
   if (!state.drive?.enabled || !state.drive.manifestFileId) return false;
   if (!state.drive.connected && !state.drive.accessToken) return false;
-  if (!libraryWritesUnlocked) return false;
   if (driveSyncInProgress || driveRestoreInProgress) return false;
   if (drivePullInFlight) return drivePullInFlight;
   const now=Date.now();
@@ -13369,6 +13401,10 @@ async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
   const mustReadProfile=!!preferDrive || profileChanged;
   if (!manifest.profile?.id) throw new Error('Drive manifest has no profile');
   const incomingProfile=mustReadProfile ? await readDriveJson(manifest.profile.id) : null;
+  const localPersonalBeforeReplace={};
+  Object.entries(state.movies || {}).forEach(([id, movie]) => {
+    localPersonalBeforeReplace[id]=personalMovieState(movie);
+  });
   for (const key of changedKeys) {
     const info=remoteChunks[key];
     const payload=await readDriveJson(info.id);
@@ -13378,6 +13414,18 @@ async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
     Object.keys(state.movies || {}).forEach(id => { if (driveChunkKey(state.movies[id]) === key) delete state.movies[id]; });
     Object.assign(state.movies,incoming);
   }
+  // Put the device's own personal state back on the replaced records before the
+  // profile merge runs, so that merge compares two real overlays.
+  Object.entries(localPersonalBeforeReplace).forEach(([id, personal]) => {
+    const movie=state.movies?.[id];
+    if (!movie) return;
+    movie.rating=Number(personal.rating || 0);
+    movie.ratedAt=personalOverlayRatedAt(personal);
+    movie.watchlist=!!personal.watchlist;
+    movie.manualAdded=!!personal.manualAdded;
+    movie.topTenCount=Math.max(topTenTenureCount(movie),Math.max(0,Math.floor(Number(personal.topTenCount) || 0)));
+    if (personal.topTenFirstAt && !movie.topTenFirstAt) movie.topTenFirstAt=personal.topTenFirstAt;
+  });
   if (incomingProfile) applyDriveProfile(incomingProfile,{merge:!preferDrive,preferDrive:!!preferDrive});
   else if (preferDrive) throw new Error('Drive profile did not load');
   state.drive.manifestFileId=state.drive.manifestFileId || state.meta?.driveManifestFileId || '';
@@ -13389,12 +13437,14 @@ async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
   state.meta.driveManifestFileId=state.drive.manifestFileId || state.meta.driveManifestFileId || '';
   Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
   const duplicatesCollapsed = collapseDuplicateMovies(state.movies);
+  const removedByTombstone = pruneRemovedTitlesFromState();
   invalidateTagCaches();
   rebuildTagBrain();
   computeTagWeights();
   clearDriveDirtyState();
-  saveLocalState({preserveUpdatedAt:true,skipDriveDirty:!duplicatesCollapsed});
-  if (duplicatesCollapsed) queueDriveSync(0);
+  if (removedByTombstone) markDriveDirty();
+  saveLocalState({preserveUpdatedAt:true,skipDriveDirty:!duplicatesCollapsed && !removedByTombstone});
+  if (duplicatesCollapsed || removedByTombstone) queueDriveSync(0);
   render();
   return {changedKeys,profileChanged};
 }
@@ -13543,14 +13593,14 @@ async function syncChunkedDrive(manual=false,attempt=0) {
     if (!localChanged && remoteChanged) {
       const payload=await readDriveJson(remote.id);
       Object.keys(state.movies || {}).forEach(id => { if (driveChunkKey(state.movies[id]) === key) delete state.movies[id]; });
-      Object.assign(state.movies,payload.movies || {});
+      Object.assign(state.movies,withoutRemovedTitles(payload.movies || {}));
       pulledRemote = true;
       nextChunks[key]=remote;
       continue;
     }
     if (localChanged && remoteChanged && localHash !== remote.hash) {
       const remotePayload=await readDriveJson(remote.id);
-      const merged=mergeRecordMap(localPayload.movies,remotePayload.movies || {});
+      const merged=withoutRemovedTitles(mergeRecordMap(localPayload.movies,remotePayload.movies || {}));
       const mergedPayload={schema:DRIVE_SYNC_MODEL_V2,chunk:key,movies:merged};
       const mergedHash=driveHash(mergedPayload);
       if (mergedHash !== remote.hash) await uploadDriveJson(remote.id,mergedPayload);
@@ -13592,6 +13642,15 @@ async function syncChunkedDrive(manual=false,attempt=0) {
       await uploadDriveJson(remoteProfile.id,localProfile);
       manifest.profile={...remoteProfile,hash:localProfileHash,updatedAt:nowStamp()};
     }
+  }
+  // The chunk loop above ran before this sync had read the remote profile, so a
+  // removal another device made is only known now. Applying it here costs one
+  // extra sync round instead of letting the title live on until something else
+  // happens to dirty its chunk.
+  if (pruneRemovedTitlesFromState()) {
+    pulledRemote=true;
+    markDriveDirty();
+    driveSyncQueued=true;
   }
   manifest.schema=DRIVE_SYNC_MODEL_V2;
   manifest.version=2;

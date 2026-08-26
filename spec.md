@@ -5243,3 +5243,75 @@ distinctive. The fixture also has to call `invalidateTasteModel()` —
 `invalidateTagCaches()` alone leaves `tasteModelCache` holding the model trained
 against the empty pre-seed library, and `computeTagWeights` reads straight
 through it.
+
+## 138. Three devices, one of them a month stale
+
+Nitin posed the scenario rather than reporting a bug: desktop and phone each
+build on their own state and may stay permanently different; then a third device
+that has been closed for a month opens, "and as soon as it starts updating, that
+becomes the most current update", reverting everyone.
+
+`dev/assert-multidevice.mjs` runs that scenario through the real sync paths. Only
+Drive is faked — an in-page file store with a monotonically increasing `version`
+per file, exactly as Drive has — while `restoreDriveSession`,
+`loadFromChunkedDrive`, `syncChunkedDrive`, `syncDirtyDrive` and
+`pullDriveIfRemoteChanged` run unmodified. A "device" is the app's syncable
+memory plus the module-level bookkeeping that records what it believes Drive
+holds, captured and swapped between turns.
+
+**The premise is sound: merges are per record, by timestamp, not per device by
+write order.** A stale device cannot win by writing last. But the test found
+three ways it could still do damage.
+
+### 1. The pull was gated on the collection write-lock
+
+`pullDriveIfRemoteChanged` refused to run while `libraryWritesUnlocked` was
+false. That lock exists to stop a half-known library from *fetching new titles*;
+pulling is a read of the user's own data. Gating them together meant a device
+that never unlocked writes never converged with the others either — precisely
+the failure §134 added the pull to remove. The guard is gone.
+
+### 2. A chunk replacement erased unsynced personal state
+
+Catalogue chunks deliberately carry no personal state, so replacing a chunk
+segment blanks the rating, watchlist flag and tenure of every record in it.
+`applyDriveProfile` then compared Drive's overlay against that blanked record,
+saw no local rating to defend, and took Drive's. **A rating made offline on a
+device that was then closed was destroyed on its next open.** `preferDrive` was
+meant to say "Drive wins where Drive knows better", not "Drive wins because the
+local side was erased a moment ago". `loadFromChunkedDrive` now captures every
+record's personal overlay before the replacement and restores it afterwards, so
+the merge compares two real overlays.
+
+### 3. Chunk merges ignored deletion tombstones
+
+A chunk merge unions two record maps, and a union cannot tell "this device has
+not fetched it yet" from "the user deliberately removed it". So a title removed
+on one device came straight back from any device that still held a copy — and
+was re-uploaded to Drive. `mergeCanonicalDatasets` has enforced tombstones since
+the legacy path; the v2 chunked path never did.
+
+The rule is now one function, `titleRemovalBlocked` (a removal tombstone at
+least as recent as the record, with no later deliberate re-add releasing it),
+used by both. `withoutRemovedTitles` filters both sides of a chunk transfer —
+what is about to be uploaded, so a deletion is not undone for everyone else, and
+what has just been pulled, so it is not undone for us.
+`pruneRemovedTitlesFromState` runs after the profile merge in both paths,
+because the chunk loop runs before this sync has read the remote profile: a
+removal another device made is only known afterwards, and applying it there
+costs one extra sync round instead of letting the title live on until something
+else happens to dirty its chunk.
+
+### What the test now asserts
+
+- Desktop and phone converge to an identical rating set with no user action —
+  only the pull that runs on foreground and on the 60s poll.
+- A stale device's month-old 2-star loses to the desktop's newer 5-star.
+- Its own never-synced rating survives, because Drive has nothing newer to
+  compare against.
+- After the stale device pushes, Drive still holds the newer ratings and has
+  gained the stale device's genuinely new one; neither of the other two is
+  reverted.
+- The same for catalogue data: a month-old empty poster field does not overwrite
+  a poster fetched yesterday.
+- A deletion is not resurrected by the stale device syncing.
