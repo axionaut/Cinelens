@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 133;
+const APP_VERSION = 134;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -12195,6 +12195,9 @@ let driveSilentRenewInFlight=null;
 let driveSilentRenewBlockedUntil=0;
 let driveSilentRenewLastAttemptAt=0;
 let driveTokenRequestInFlight=null;
+// True for the whole of an explicit connectDrive(), including the Google
+// Identity script load that precedes any token request.
+let driveConnectInProgress=false;
 let driveTokenRequestPrompt='';
 // True while the in-flight GIS token request is automatic rather than one the
 // user asked for by tapping Drive. A manual tap may wait for this request but
@@ -12308,6 +12311,12 @@ function kickBackgroundLoopsOnForeground() {
   // Unsynced local changes are flushed even when collection is paused or the
   // library is still locked — losing a rating is worse than any pause.
   flushPendingDriveSync();
+  // Returning to the app is the moment another device's changes are most
+  // likely already waiting, and the poll timer was frozen while we were away.
+  // Both run regardless of autoFetchPaused: pausing collection pauses fetching
+  // new titles, it never means "stop keeping my devices in agreement".
+  pullDriveIfRemoteChanged({force:true});
+  scheduleDrivePullPoll();
   if (!libraryWritesUnlocked || autoFetchPaused) return;
   scheduleTmdbBackfill(400);
   scheduleReceptionBackfill(600);
@@ -12340,7 +12349,12 @@ window.addEventListener('online', () => {
   driveSilentRenewFailures=0;
   setSilentDriveRenewalBlockUntil(0);
   driveSilentRenewLastAttemptAt=0;
-  silentlyRenewDriveToken().finally(() => flushPendingDriveSync());
+  silentlyRenewDriveToken().finally(() => {
+    flushPendingDriveSync();
+    // The device may have been offline while another one wrote.
+    pullDriveIfRemoteChanged({force:true});
+    scheduleDrivePullPoll();
+  });
 });
 
 window.addEventListener('offline', updateDriveStatusLabel);
@@ -12424,6 +12438,7 @@ window.addEventListener('load', () => {
 async function connectDrive() {
   if (!GOOGLE_CLIENT_ID) { showToast('Missing Google client ID','error'); return; }
   let connected = false;
+  driveConnectInProgress=true;
   setDriveStatus('syncing');
   try {
     if (!googleIdentityReady()) await waitForGoogleIdentity();
@@ -12450,6 +12465,7 @@ async function connectDrive() {
     saveLocalState({preserveUpdatedAt:true,skipDriveDirty:true});
     setDriveStatus('connected');
     scheduleLegacyTagRecovery();
+    scheduleDrivePullPoll();
     if (!startupFinalized || !libraryWritesUnlocked) {
       startupFinalized = false;
       finalizeStartupAfterDrive({allowCollection:true});
@@ -12463,6 +12479,7 @@ async function connectDrive() {
     setDriveStatus('');
     showToast(driveErrorMessage(e),'error');
   } finally {
+    driveConnectInProgress=false;
     if (!connected) setDriveStatus('');
   }
 }
@@ -12496,6 +12513,7 @@ async function restoreDriveSession(showFailure=false, opts={}) {
     saveLocalState({preserveUpdatedAt:true,skipDriveDirty:true});
     setDriveStatus('connected');
     scheduleLegacyTagRecovery();
+    scheduleDrivePullPoll();
     return true;
   } catch(e) {
     state.drive.connected=false;
@@ -12514,6 +12532,13 @@ async function restoreDriveSession(showFailure=false, opts={}) {
 // reports what actually matters (is my data backed up?) and it is only an
 // instruction when tapping it can genuinely fix something.
 let driveStatusState = '';
+let driveStatusChangedAt = Date.now();
+let driveStatusWatchdogTimer = null;
+// How long the chip may keep claiming the app is healing itself before it has
+// to admit it is not getting anywhere and turn back into a button.
+const DRIVE_RECONNECT_STALL_MS = 20000;
+const DRIVE_SYNCING_STALL_MS = 45000;
+const DRIVE_STATUS_WATCHDOG_MS = 10000;
 
 function driveNeedsUserGesture() {
   if (!state.drive?.enabled) return true;
@@ -12521,15 +12546,62 @@ function driveNeedsUserGesture() {
   return driveNeedsUserGestureFlag;
 }
 
+function driveRequestInFlight() {
+  return !!(driveConnectInProgress || driveSilentRenewInFlight || driveRestoreInProgress || driveTokenRequestInFlight || driveSyncInProgress || drivePullInFlight);
+}
+
+// v134: "Reconnecting…" is only honest while something is actually
+// reconnecting. A silent renewal that failed into a multi-minute backoff, or a
+// sync that never came back, left the chip narrating a recovery that was not
+// happening and offering nothing to press — the automatic path is right, but
+// having no manual override when it stalls is not. Once nothing is in flight
+// and the state has sat still past its threshold, the chip becomes a button
+// again. It is an escape hatch, not the plan: the watchdog keeps retrying
+// automatically the whole time.
+function driveReconnectStalled() {
+  if (!state.drive?.enabled) return false;
+  if (driveRequestInFlight()) return false;
+  const syncing = driveStatusState === 'syncing';
+  if (state.drive?.connected && !syncing) return false;
+  return Date.now() - driveStatusChangedAt > (syncing ? DRIVE_SYNCING_STALL_MS : DRIVE_RECONNECT_STALL_MS);
+}
+
+// Single source of truth for "is the chip a button right now?" — label text,
+// attention styling and the click handler must never disagree about that.
+function driveOffersTap() {
+  if (driveStatusState === 'syncing' && driveRequestInFlight()) return false;
+  return driveNeedsUserGesture() || driveReconnectStalled();
+}
+
 function driveStatusText() {
-  if (driveStatusState === 'syncing') return 'Syncing…';
+  const offersTap = driveOffersTap();
+  if (driveStatusState === 'syncing' && !offersTap) return 'Syncing…';
   if (driveStatusState === 'connected') return 'Backed up';
   if (!state.drive?.enabled) return 'Back up to Drive';
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) return 'Offline · saved on device';
-  if (driveNeedsUserGesture()) return 'Tap to reconnect Drive';
-  // Enabled, not connected, no gesture needed: a silent renewal is either in
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return offersTap ? 'Offline · tap to retry' : 'Offline · saved on device';
+  }
+  if (offersTap) return state.drive?.connected ? 'Tap to retry sync' : 'Tap to reconnect Drive';
+  // Enabled, not connected, nothing stalled: a silent renewal is either in
   // flight or scheduled. Nothing is lost and nothing is required of the user.
   return 'Reconnecting…';
+}
+
+// The stall thresholds pass while the page is idle, so something has to come
+// back and re-evaluate the label — otherwise the chip stays frozen on the last
+// text an event happened to paint. The same tick re-attempts the silent
+// renewal, which its own backoff will ignore until it is ready; that turns the
+// backoff into "retry as soon as allowed" instead of "wait for the user to
+// switch apps".
+function armDriveStatusWatchdog() {
+  // updateDriveStatusLabel runs on every render, so re-arming unconditionally
+  // would reset the countdown before it could ever fire.
+  if (driveStatusWatchdogTimer) return;
+  driveStatusWatchdogTimer = setTimeout(() => {
+    driveStatusWatchdogTimer = null;
+    if (state.drive?.enabled && !state.drive?.connected && !driveRequestInFlight()) silentlyRenewDriveToken();
+    updateDriveStatusLabel();
+  }, DRIVE_STATUS_WATCHDOG_MS);
 }
 
 function updateDriveStatusLabel() {
@@ -12537,7 +12609,10 @@ function updateDriveStatusLabel() {
   const label = document.getElementById('driveLabel');
   const chip = document.querySelector('.library-status');
   const text = driveStatusText();
-  const needsTap = driveNeedsUserGesture() && driveStatusState !== 'syncing';
+  const needsTap = driveOffersTap();
+  // Keep watching while anything is unsettled; stand down once it is.
+  if (state.drive?.enabled && (!state.drive?.connected || driveStatusState === 'syncing' || needsTap)) armDriveStatusWatchdog();
+  else { clearTimeout(driveStatusWatchdogTimer); driveStatusWatchdogTimer = null; }
   if (dot) {
     const next = 'drive-dot ' + (driveStatusState || (needsTap ? 'attention' : 'pending'));
     if (dot.className !== next) dot.className = next;
@@ -12553,7 +12628,13 @@ function updateDriveStatusLabel() {
 }
 
 function setDriveStatus(s) {
-  driveStatusState = s || '';
+  const next = s || '';
+  // Only a real transition restarts the stall clock: repainting the same status
+  // must not keep resetting it, or a stuck state would never look stuck.
+  if (next !== driveStatusState) {
+    driveStatusState = next;
+    driveStatusChangedAt = Date.now();
+  }
   updateDriveStatusLabel();
 }
 
@@ -12568,7 +12649,7 @@ function driveMaintenanceText() {
     return at ? `Drive backed up ${formatRelativeTime(at)}` : 'Drive backed up';
   }
   if (!state.drive?.enabled) return 'Saved on this device only';
-  if (driveNeedsUserGesture()) return 'Drive needs a tap to reconnect — nothing is lost meanwhile';
+  if (driveOffersTap()) return 'Drive needs a tap to reconnect — nothing is lost meanwhile';
   return 'Drive reconnecting automatically';
 }
 
@@ -12583,11 +12664,29 @@ function formatRelativeTime(timestamp) {
 }
 
 function handleLibraryStatusClick() {
-  if (driveNeedsUserGesture()) {
-    connectDrive();
+  if (driveOffersTap()) {
+    retryDriveConnection();
     return;
   }
   toggleMaintenancePanel();
+}
+
+// The one button that always does the most useful thing available: drop
+// whatever backoff is holding recovery back, then reconnect when there is no
+// session, or force a full merging sync when there is. It runs inside the click
+// because Google will not open its account chooser from a callback that has
+// lost the user gesture.
+function retryDriveConnection() {
+  driveSilentRenewFailures = 0;
+  driveNeedsUserGestureFlag = false;
+  setSilentDriveRenewalBlockUntil(0);
+  driveSilentRenewLastAttemptAt = 0;
+  drivePullLastCheckAt = 0;
+  if (state.drive?.enabled && (state.drive?.connected || state.drive?.accessToken)) {
+    syncDrive(true);
+    return;
+  }
+  connectDrive();
 }
 function driveErrorMessage(e) {
   const code = e?.error || e?.message || 'unknown';
@@ -12867,7 +12966,7 @@ function applyDriveProfile(profile,{merge=true,preferDrive=false}={}) {
 
 async function driveListByName(name) {
   const q=`name='${name.replace(/'/g,"\\'")}' and trashed=false`;
-  const response=await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&orderBy=modifiedTime%20desc&pageSize=20&fields=files(id,name,modifiedTime,description)`);
+  const response=await driveFetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&spaces=drive&orderBy=modifiedTime%20desc&pageSize=20&fields=files(id,name,modifiedTime,version,description)`);
   if (!response.ok) throw new Error(`Drive file search failed (${response.status})`);
   return (await response.json()).files || [];
 }
@@ -12879,9 +12978,13 @@ async function readDriveJson(fileId) {
 }
 
 async function uploadDriveJson(fileId,data) {
-  const response=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  const response=await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&fields=id,version,modifiedTime`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
   if (!response.ok) throw new Error(`Drive JSON upload failed (${response.status})`);
-  return response.json().catch(()=>({id:fileId}));
+  const result=await response.json().catch(()=>({id:fileId}));
+  // Our own manifest write becomes the new freshness baseline, so the next
+  // probe cannot mistake it for another device's work.
+  if (fileId && fileId === state.drive.manifestFileId) noteDriveManifestVersion(result?.version);
+  return result;
 }
 
 async function createDriveJson(name,data) {
@@ -12895,7 +12998,126 @@ async function createDriveJson(name,data) {
 
 async function findDriveManifest() {
   const files=await driveListByName(DRIVE_MANIFEST_FILE);
-  return files[0] || null;
+  const file=files[0] || null;
+  if (file) noteDriveManifestVersion(file.version);
+  return file;
+}
+
+// ─────────────────────────────
+// CROSS-DEVICE FRESHNESS (v134)
+//
+// Sync used to be push-only once the app was running. Startup read the
+// manifest, and from then on a device uploaded its own edits and never asked
+// whether anybody else had made any — so a tab left open on the laptop, or a
+// phone resumed from the background, kept showing whatever it read at launch
+// until it was fully reloaded. Worse, the fast sync path wrote chunks straight
+// from `driveManifestCache`, a snapshot taken at startup: if another device had
+// written since, that write was overwritten with no merge and no detection.
+// Stale reads were the visible symptom; silently lost ratings were the real one.
+//
+// Drive stamps every file with a `version` that increments on each content
+// write. Reading it costs a few dozen bytes — orders of magnitude less than the
+// manifest, let alone a catalogue chunk — so it can be probed often. Every write
+// we perform records the version it produced; any version we did not produce is,
+// by definition, another device's work.
+// ─────────────────────────────
+let driveManifestRemoteVersion='';
+let drivePullInFlight=null;
+let drivePullLastCheckAt=0;
+let drivePullTimer=null;
+// Foreground and reconnect events bypass this, so it only throttles repeats.
+const DRIVE_PULL_MIN_INTERVAL_MS=15000;
+const DRIVE_PULL_POLL_MS=60000;
+
+function noteDriveManifestVersion(version) {
+  if (version) driveManifestRemoteVersion=String(version);
+}
+
+async function readDriveFileMeta(fileId) {
+  const response=await driveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=id,version,modifiedTime`);
+  if (!response.ok) throw new Error(`Drive metadata read failed (${response.status})`);
+  return response.json();
+}
+
+// Empty string means "cannot tell" — no manifest yet, or the probe failed.
+// Callers treat that as "assume changed": a needless merge costs a few
+// requests, a missed one costs a rating.
+async function driveRemoteManifestVersion() {
+  if (!state.drive.manifestFileId) return '';
+  try { return String((await readDriveFileMeta(state.drive.manifestFileId)).version || ''); }
+  catch(e) { return ''; }
+}
+
+async function remoteManifestUnchanged() {
+  if (!driveManifestRemoteVersion || !state.drive.manifestFileId) return false;
+  const version=await driveRemoteManifestVersion();
+  return !!version && version === driveManifestRemoteVersion;
+}
+
+function driveHasLocalChanges() {
+  return driveProfileDirty || driveAllChunksDirty || driveDirtyChunkKeys.size > 0 || driveSyncPending;
+}
+
+// The missing half of sync. Probe the manifest version; only when it has moved
+// is anything transferred, and even then only the chunks whose hashes differ.
+async function pullDriveIfRemoteChanged({force=false}={}) {
+  if (!state.drive?.enabled || !state.drive.manifestFileId) return false;
+  if (!state.drive.connected && !state.drive.accessToken) return false;
+  if (!libraryWritesUnlocked) return false;
+  if (driveSyncInProgress || driveRestoreInProgress) return false;
+  if (drivePullInFlight) return drivePullInFlight;
+  const now=Date.now();
+  if (!force && now - drivePullLastCheckAt < DRIVE_PULL_MIN_INTERVAL_MS) return false;
+  drivePullLastCheckAt=now;
+  drivePullInFlight=(async () => {
+    const version=await driveRemoteManifestVersion();
+    // An unchanged version is the overwhelmingly common case and costs exactly
+    // one metadata request. `force` bypasses the rate limit, never this check.
+    if (version && version === driveManifestRemoteVersion) return false;
+    const locallyDirty=driveHasLocalChanges();
+    setDriveStatus('syncing');
+    // Claim the same lane a push uses. A pull and a push running at once would
+    // both rewrite the manifest from different bases, which is precisely the
+    // race this whole layer exists to close.
+    driveSyncInProgress=true;
+    try {
+      if (locallyDirty) {
+        // Edits are outstanding on both sides. Only the full path settles both
+        // directions record by record without either side overwriting the other.
+        await syncChunkedDrive(false);
+      } else {
+        // Nothing local is at stake, so the changed segments can be taken
+        // wholesale — and loadFromChunkedDrive downloads only those.
+        const manifest=await readDriveJson(state.drive.manifestFileId);
+        noteDriveManifestVersion(version);
+        await loadFromChunkedDrive(manifest,{preferDrive:false});
+      }
+      state.drive.connected=true;
+      state.drive.lastConnectedAt=Date.now();
+      setDriveStatus('connected');
+      return true;
+    } catch(error) {
+      console.warn('Drive pull failed', error);
+      setDriveStatus(state.drive.connected ? 'connected' : '');
+      return false;
+    } finally {
+      driveSyncInProgress=false;
+      if (driveSyncQueued) { driveSyncQueued=false; queueDriveSync(350); }
+    }
+  })().finally(() => { drivePullInFlight=null; });
+  return drivePullInFlight;
+}
+
+// A backgrounded mobile browser freezes this timer, which is exactly why the
+// foreground hook forces its own probe instead of trusting the poll to catch up.
+function scheduleDrivePullPoll() {
+  clearTimeout(drivePullTimer);
+  if (!state.drive?.enabled) return;
+  drivePullTimer=setTimeout(() => {
+    drivePullTimer=null;
+    if (document.visibilityState !== 'visible') { scheduleDrivePullPoll(); return; }
+    Promise.resolve(pullDriveIfRemoteChanged()).catch(()=>{}).finally(scheduleDrivePullPoll);
+  }, DRIVE_PULL_POLL_MS);
 }
 
 async function readChunkedDriveState(manifest) {
@@ -12992,6 +13214,11 @@ function buildDriveChunkPayload(key) {
 // the cached manifest. Manual sync and startup retain the full merge path.
 async function syncDirtyDrive() {
   if (!driveManifestCache?.profile?.id || !state.drive.manifestFileId || driveAllChunksDirty) return null;
+  // The cached manifest is a safe base only while it still describes what is
+  // actually on Drive. If another device has written since we cached it, this
+  // path would blind-overwrite their chunks, so report "not applicable" and let
+  // syncDrive fall through to the merging full path.
+  if (!(await remoteManifestUnchanged())) return null;
   const manifest=JSON.parse(JSON.stringify(driveManifestCache));
   let changed=false;
   // v91: chunk uploads run concurrently. A faster collection dirties several

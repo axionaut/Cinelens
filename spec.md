@@ -4999,3 +4999,90 @@ The status line now names which of the two states it is —
 A one-time purge (`cinelens_gemini_daily_purge_v133`) clears the poisoned
 window once on upgrade, since the spent slots cannot be told apart
 retroactively.
+
+## 134. Sync had no pull half, and "Reconnecting…" had no floor
+
+Two devices drifted apart and stayed apart. Both faults are in the same place:
+after startup, the app only ever *wrote* to Drive.
+
+1. **Nothing ever asked whether another device had written.** Startup read the
+   manifest; from then on the only Drive traffic was uploads. A tab left open on
+   the laptop, or a phone resumed from the background, kept rendering whatever
+   it had read at launch until it was fully reloaded.
+   `kickBackgroundLoopsOnForeground` — the one hook that fires at exactly the
+   right moment — called `flushPendingDriveSync()` and nothing else.
+
+2. **The fast sync path silently overwrote other devices.** `syncDirtyDrive`
+   handles every automatic sync. It built its uploads from `driveManifestCache`,
+   a snapshot taken at startup, then rewrote the chunk *and* the manifest from
+   it. If another device had written in between, that write was destroyed with
+   no merge and no detection. Its comment ("startup already loaded the
+   authoritative manifest") is true only on a single device. Stale reads were
+   the visible symptom; lost ratings were the real one.
+
+The merge machinery itself was never the problem. `syncChunkedDrive` already
+does a correct three-way merge per chunk — base is the cached hash, local is
+memory, remote is the manifest — and `mergeRecordMap` resolves record by record
+on timestamp. It simply was not being run when it needed to be.
+
+### The freshness probe
+
+Drive stamps every file with a `version` that increments on each content write.
+Reading it costs a few dozen bytes — orders of magnitude less than the manifest,
+let alone a catalogue chunk — so it can be probed often. Every write we perform
+records the version it produced (`uploadDriveJson` now requests
+`fields=id,version,modifiedTime` and calls `noteDriveManifestVersion`); any
+version we did not produce is, by definition, another device's work.
+
+- `syncDirtyDrive` now returns `null` — "not applicable" — unless
+  `remoteManifestUnchanged()` confirms the cached manifest still describes
+  Drive. `syncDrive` already falls through to the full merging path on `null`,
+  so a conflict costs one extra metadata request and resolves correctly instead
+  of destroying data.
+- `pullDriveIfRemoteChanged()` is the missing half. It probes the version and
+  returns immediately when nothing moved. When it has, it branches: with local
+  edits outstanding it runs the full `syncChunkedDrive` merge; with nothing
+  local at stake it reads the manifest and hands it to `loadFromChunkedDrive`,
+  which downloads only the chunks whose hashes differ. It claims
+  `driveSyncInProgress` for its duration, so a pull and a push can never rewrite
+  the manifest from two different bases.
+
+It runs on foreground (`force: true`, bypassing the 15 s rate limit but never
+the version check), on `online`, and on a 60 s poll while the tab is visible.
+The poll is re-armed on foreground because a backgrounded mobile browser freezes
+its timer — which is also why the foreground hook does not simply trust it.
+
+A residual window remains: another device can write between our probe and our
+upload. It is bounded by one round trip, and the next pull reconciles the
+manifest. Closing it entirely needs `If-Match` on the manifest write.
+
+### The chip that narrated a recovery that was not happening
+
+There is no separate Drive button any more — the header chip is it. It offered a
+tap only when `driveNeedsUserGestureFlag` was set, i.e. when Google had returned
+a verdict it will not reverse without user action. Every *other* failure —
+a transient renewal error backing off up to five minutes, a sync that never came
+back — left the chip reading "Reconnecting…" with tapping it merely opening the
+maintenance panel. Automatic reconnection is right; having no override when it
+stalls is not.
+
+- `driveRequestInFlight()` asks whether anything is genuinely in progress.
+- `driveReconnectStalled()` is true once nothing is in flight and the status has
+  sat still past its threshold (20 s disconnected, 45 s "Syncing…").
+- `driveOffersTap()` is now the single source of truth for label text, the
+  `needs-attention` class and the click handler, so the three can never
+  disagree. The chip reads "Tap to reconnect Drive" or "Tap to retry sync".
+- `retryDriveConnection()` clears the renewal backoff, the gesture flag and the
+  pull rate limit, then reconnects when there is no session or forces a full
+  merging sync when there is. It runs inside the click, because Google will not
+  open its account chooser from a callback that has lost the user gesture.
+- `armDriveStatusWatchdog()` re-evaluates the label every 10 s while anything is
+  unsettled — the stall thresholds pass while the page is idle, so something has
+  to come back and look. The same tick re-attempts the silent renewal, which its
+  own backoff ignores until ready; that turns the backoff into "retry as soon as
+  allowed" rather than "wait for the user to switch apps". It no-ops when a
+  timer is already pending, since `updateDriveStatusLabel` runs on every render.
+
+`setDriveStatus` restarts the stall clock only on a real transition — repainting
+the same status must not keep resetting it, or a stuck state would never look
+stuck.
