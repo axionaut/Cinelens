@@ -5086,3 +5086,34 @@ stalls is not.
 `setDriveStatus` restarts the stall clock only on a real transition — repainting
 the same status must not keep resetting it, or a stuck state would never look
 stuck.
+
+## 135. Closing the manifest write window
+
+v134 left one gap open and named it instead of fixing it: another device could
+write between our freshness probe and our own upload, and the losing device's
+records only resurfaced when some later hash change happened to force a re-read.
+Three pieces close it.
+
+**Compare-and-set on the manifest.** Drive v3 has no conditional write worth
+relying on — it dropped resource etags, and the `ETag` returned on an `alt=media`
+download is not what `files.update` compares — so `writeDriveManifest()` guards
+the write explicitly: probe the version immediately before (the upload phase can
+run for seconds while dirty chunks transfer) and verify immediately after that
+the version now on Drive is the one our own `PATCH` produced. Either check
+failing raises a tagged conflict.
+
+**Repair from revisions.** A chunk uploaded inside the race window may have
+flattened records another device had just written into the same file. They are
+not gone — Drive keeps revisions, and this app already reads them for tag
+recovery — so `recoverRacedChunks()` folds the last three revisions of each
+affected chunk back into memory, applying `newestRecord`'s timestamp rule one
+record at a time (a repair must never rehash the whole library). Replaying a
+revision that holds nothing newer is a no-op.
+
+**Resolution.** Both write paths track which chunk files they actually
+overwrote. On conflict `syncDirtyDrive` repairs, marks everything dirty and
+reports "not applicable", so `syncDrive` falls through to the full merging path.
+`syncChunkedDrive` repairs and retries once from the top, re-reading the manifest
+the other device just wrote and merging against it — bounded at one retry so a
+device caught in a genuine write storm reports failure and backs off rather than
+looping.

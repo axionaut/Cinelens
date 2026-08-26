@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 134;
+const APP_VERSION = 135;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -13108,6 +13108,83 @@ async function pullDriveIfRemoteChanged({force=false}={}) {
   return drivePullInFlight;
 }
 
+// v134 left a window open: another device could write between our freshness
+// probe and our own upload, and the loser's records only came back when a later
+// hash change happened to force a re-read. Closing it takes three pieces.
+//
+// Drive v3 has no conditional write we can rely on — it dropped resource etags,
+// and the ETag returned on an `alt=media` download is not what `files.update`
+// would compare — so the manifest write is guarded by an explicit
+// compare-and-set instead: probe immediately before (the upload phase can run
+// for seconds while dirty chunks transfer) and verify immediately after that
+// the version on Drive is the one our own PATCH produced.
+const DRIVE_RACE_REPAIR_REVISIONS=3;
+
+function driveManifestConflictError() {
+  return Object.assign(new Error('Drive manifest changed underneath this sync'),{cinelensDriveConflict:true});
+}
+
+function isDriveConflictError(error) {
+  return !!error?.cinelensDriveConflict;
+}
+
+async function writeDriveManifest(fileId,manifest) {
+  const before=await driveRemoteManifestVersion();
+  if (before && driveManifestRemoteVersion && before !== driveManifestRemoteVersion) {
+    noteDriveManifestVersion(before);
+    throw driveManifestConflictError();
+  }
+  const result=await uploadDriveJson(fileId,manifest);
+  const ours=String(result?.version || '');
+  const after=await driveRemoteManifestVersion();
+  if (ours && after && after !== ours) {
+    noteDriveManifestVersion(after);
+    throw driveManifestConflictError();
+  }
+  return result;
+}
+
+// The third piece. A chunk we uploaded inside the race window may have
+// overwritten records another device had just written into the same file. They
+// are not gone — Drive keeps revisions, and this app already reads them for tag
+// recovery — so fold the last few revisions of each affected chunk back into
+// memory. mergeRecordMap resolves per record on timestamp, so replaying a
+// revision that holds nothing new is a no-op, and the full merging sync that
+// follows writes the reconciled result back out.
+async function recoverRacedChunks(keys) {
+  if (!keys || !keys.length) return false;
+  let recovered=false;
+  for (const key of keys) {
+    const info=driveManifestCache?.chunks?.[key];
+    if (!info?.id) continue;
+    try {
+      const revisions=(await listDriveFileRevisions(info.id)).slice(0,DRIVE_RACE_REPAIR_REVISIONS);
+      for (const revision of revisions) {
+        const payload=await readDriveFileRevision(info.id,revision.id);
+        const movies=payload?.movies || {};
+        Object.entries(movies).forEach(([id,record]) => {
+          const local=state.movies?.[id];
+          // Same rule mergeRecordMap uses, applied one record at a time so a
+          // repair never rehashes the whole library.
+          if (local && recordTimestamp(record) <= recordTimestamp(local)) return;
+          const chosen=newestRecord(local,record);
+          if (!chosen) return;
+          state.movies[id]=chosen;
+          recovered=true;
+        });
+      }
+    } catch(error) {
+      console.warn('Drive race repair failed for chunk',key,error);
+    }
+  }
+  if (recovered) {
+    Object.values(state.movies || {}).forEach(normaliseStoredTitleRecord);
+    invalidateTagCaches();
+    markDriveDirty();
+  }
+  return recovered;
+}
+
 // A backgrounded mobile browser freezes this timer, which is exactly why the
 // foreground hook forces its own probe instead of trusting the poll to catch up.
 function scheduleDrivePullPoll() {
@@ -13228,6 +13305,9 @@ async function syncDirtyDrive() {
   // ordered; only the uploads overlap, and the manifest is written once after
   // they all land, so a partial failure still leaves the manifest untouched.
   const chunkJobs=[];
+  // Which chunk files this pass actually overwrote — the repair set if the
+  // manifest turns out to have moved underneath us.
+  const writtenChunkKeys=[];
   for (const key of driveDirtyChunkKeys) {
     const payload=buildDriveChunkPayload(key);
     const hash=driveHash(payload);
@@ -13242,6 +13322,7 @@ async function syncDirtyDrive() {
     } else if (remote.hash !== hash) {
       chunkJobs.push(async () => {
         await uploadDriveJson(remote.id,payload);
+        writtenChunkKeys.push(key);
         manifest.chunks[key]={...remote,hash,updatedAt:nowStamp(),count:Object.keys(payload.movies).length};
         changed=true;
       });
@@ -13274,7 +13355,17 @@ async function syncDirtyDrive() {
   }
   if (changed) {
     manifest.updatedAt=nowStamp();
-    await uploadDriveJson(state.drive.manifestFileId,manifest);
+    try {
+      await writeDriveManifest(state.drive.manifestFileId,manifest);
+    } catch(error) {
+      if (!isDriveConflictError(error)) throw error;
+      // Another device wrote during our upload phase. Recover anything our
+      // chunk writes may have flattened, then report "not applicable" so
+      // syncDrive falls through to the full merging path.
+      await recoverRacedChunks(writtenChunkKeys);
+      driveAllChunksDirty=true;
+      return null;
+    }
   }
   state.meta=state.meta || {};
   state.meta.driveChunkHashes=Object.fromEntries(Object.entries(manifest.chunks || {}).map(([key,info])=>[key,info.hash]));
@@ -13291,8 +13382,10 @@ function yieldToUi() {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-async function syncChunkedDrive(manual=false) {
+async function syncChunkedDrive(manual=false,attempt=0) {
   let pulledRemote = false;
+  // Chunk files this pass overwrote, for the same repair the fast path does.
+  const writtenChunkKeys=[];
   let manifestFile=state.drive.manifestFileId ? {id:state.drive.manifestFileId} : await findDriveManifest();
   if (!manifestFile) {
     await migrateLegacyDriveToChunked();
@@ -13348,6 +13441,7 @@ async function syncChunkedDrive(manual=false) {
     }
     if (localChanged && localHash !== remote.hash) {
       await uploadDriveJson(remote.id,localPayload);
+      writtenChunkKeys.push(key);
       nextChunks[key]={...remote,hash:localHash,updatedAt:nowStamp(),count:Object.keys(localPayload.movies).length};
     }
   }
@@ -13382,7 +13476,17 @@ async function syncChunkedDrive(manual=false) {
   manifest.version=2;
   manifest.updatedAt=nowStamp();
   manifest.chunks=nextChunks;
-  await uploadDriveJson(manifestFile.id,manifest);
+  try {
+    await writeDriveManifest(manifestFile.id,manifest);
+  } catch(error) {
+    if (!isDriveConflictError(error) || attempt >= 1) throw error;
+    // One retry, from the top: the second pass re-reads the manifest the other
+    // device just wrote and merges against it. Bounded at one so a device
+    // caught in a genuine write storm reports failure and backs off rather
+    // than looping.
+    await recoverRacedChunks(writtenChunkKeys);
+    return syncChunkedDrive(manual,attempt+1);
+  }
   state.meta=state.meta || {};
   state.meta.driveSyncModel=DRIVE_SYNC_MODEL_V2;
   state.meta.driveManifestFileId=manifestFile.id;
