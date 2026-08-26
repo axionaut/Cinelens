@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 136;
+const APP_VERSION = 137;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -11006,6 +11006,14 @@ function renderTasteStoryCard() {
   } else if (story.status === 'writing' || story.status === 'queued') {
     body.innerHTML='<span style="color:var(--muted)">Gemini is writing an original story from the story patterns your ratings favour.</span>';
     meta.textContent='Writing your first story…';
+  } else if (story.status === 'error') {
+    // The failure was recorded on state.tasteStory.error and then never shown,
+    // so a backend that could not write a story was indistinguishable from one
+    // that had simply not been asked yet: the card sat on "ready to be written"
+    // through every attempt. Say what went wrong — that is what tells you
+    // whether to retry or to go and look at the Apps Script deployment.
+    body.innerHTML=`<span style="color:var(--muted)">Your story could not be written. ${attrSafe(story.error || 'Gemini did not return one.')}</span>`;
+    meta.textContent=`${ratingCount} ratings ready · last attempt failed`;
   } else {
     body.innerHTML='<span style="color:var(--muted)">Your first story is ready to be written from the tags your ratings have shaped.</span>';
     meta.textContent=`${ratingCount} ratings ready`;

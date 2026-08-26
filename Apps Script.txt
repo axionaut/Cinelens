@@ -10,7 +10,7 @@ function doGet() {
     ok: true,
     service: 'CineLens Gemini Tagger',
     model: MODEL,
-    supports: ['tag-titles', 'normalize-tag-cloud']
+    supports: ['tag-titles', 'normalize-tag-cloud', 'mood-titles', 'generate-taste-story']
   });
 }
 
@@ -31,6 +31,10 @@ function doPost(e) {
       return jsonOutput(handleMoodTagging(request));
     }
 
+    if (request.task === 'generate-taste-story') {
+      return jsonOutput(handleTasteStory(request));
+    }
+
     return jsonOutput(handleTitleTagging(request));
   } catch (error) {
     return jsonOutput({
@@ -38,6 +42,162 @@ function doPost(e) {
       error: String(error && error.message || error)
     });
   }
+}
+
+// The taste story is the one task here that is not extraction. Everything else
+// pulls structured facts out of supplied text at temperature 0.1, where a
+// re-run returning the identical answer is the goal. This writes original
+// fiction from the user's tag profile, and the client explicitly asks for a
+// different story each time (it sends a variationSeed and the titles it has
+// already seen), so it runs hot and is told what not to repeat.
+var TASTE_STORY_TEMPERATURE = 1.05;
+var TASTE_STORY_MAX_OUTPUT_TOKENS = 6000;
+
+function handleTasteStory(request) {
+  const profile = request && request.profile || {};
+  const liked = tasteStoryTerms(profile.likedTags, 'tag', 42);
+  const avoided = tasteStoryTerms(profile.avoidedTags, 'tag', 28);
+  const likedGenres = tasteStoryTerms(profile.preferredGenres, 'genre', 10);
+  const avoidedGenres = tasteStoryTerms(profile.avoidedGenres, 'genre', 10);
+
+  if (!liked.length && !likedGenres.length) {
+    throw new Error('No taste profile supplied');
+  }
+
+  const schema = {
+    type: 'object',
+    properties: {
+      title: {type: 'string'},
+      story: {type: 'string'}
+    },
+    required: ['title', 'story'],
+    additionalProperties: false
+  };
+
+  const result = callGemini(
+    buildTasteStoryPrompt(
+      liked,
+      avoided,
+      likedGenres,
+      avoidedGenres,
+      cleanTagList(profile.previousStoryTitles, 5),
+      String(profile.variationSeed || ''),
+      clampNumber(profile.ratingCount, 0, 100000, 0)
+    ),
+    schema,
+    TASTE_STORY_MAX_OUTPUT_TOKENS,
+    TASTE_STORY_TEMPERATURE
+  );
+
+  const title = String(result && result.title || '').trim();
+  const story = String(result && result.story || '').trim();
+
+  if (!title || !story) {
+    throw new Error('Gemini returned no usable story');
+  }
+
+  return {
+    ok: true,
+    title: title.slice(0, 180),
+    story: story.slice(0, MAX_STORY_CHARS)
+  };
+}
+
+// The client sends [{tag, weight}] / [{genre, weight}]. Tolerate plain strings
+// too, so an older or hand-built payload still produces a story rather than an
+// empty profile error.
+function tasteStoryTerms(value, key, limit) {
+  if (!Array.isArray(value)) return [];
+  const seen = {};
+  const out = [];
+  for (let index = 0; index < value.length && out.length < limit; index++) {
+    const entry = value[index];
+    const raw = entry && typeof entry === 'object' ? entry[key] : entry;
+    const term = normalizeTag(raw);
+    if (!term || seen[term]) continue;
+    seen[term] = true;
+    out.push(term);
+  }
+  return out;
+}
+
+function buildTasteStoryPrompt(
+  liked,
+  avoided,
+  likedGenres,
+  avoidedGenres,
+  previousTitles,
+  variationSeed,
+  ratingCount
+) {
+  // The client normalises every tag to "slow-burn" form. Hand the model the
+  // phrase, not the slug.
+  const phrase = function (terms) {
+    return terms.map(function (term) {
+      return term.replace(/-/g, ' ');
+    }).join(', ');
+  };
+
+  const lines = [
+    'You are writing a short piece of original fiction for one reader.',
+    '',
+    'That reader has rated ' + ratingCount + ' films and shows. The lists below',
+    'are what their ratings revealed: story patterns they are drawn to, and',
+    'story patterns they consistently turn away from.',
+    '',
+    'DRAWN TO (story elements): ' + phrase(liked)
+  ];
+
+  if (likedGenres.length) {
+    lines.push('DRAWN TO (genres): ' + phrase(likedGenres));
+  }
+  if (avoided.length) {
+    lines.push('TURNS AWAY FROM (story elements): ' + phrase(avoided));
+  }
+  if (avoidedGenres.length) {
+    lines.push('TURNS AWAY FROM (genres): ' + phrase(avoidedGenres));
+  }
+
+  lines.push(
+    '',
+    'Write an original short story, 450 to 700 words, that a reader with this',
+    'taste would not be able to put down. Rules:',
+    '',
+    '1. Use the DRAWN TO lists as raw creative material, not as a checklist.',
+    '   Pick the handful that genuinely belong in one story and build that one',
+    '   story properly. A story that name-checks thirty elements is worse than',
+    '   a story that earns four.',
+    '2. Do not use the TURNS AWAY FROM material at all, in any form.',
+    '3. Never mention tags, ratings, genres, recommendations, algorithms, or',
+    '   the reader. Do not describe their taste back to them. Write the story',
+    '   itself, nothing else.',
+    '4. Give it real characters, a specific setting and an actual ending. No',
+    '   summary, no synopsis, no pitch, no "in a world where".',
+    '5. Separate paragraphs with a blank line.',
+    '',
+    'The title must be original and evocative, at most 60 characters.'
+  );
+
+  if (previousTitles.length) {
+    lines.push(
+      '',
+      'You have already written these for this reader. Do not reuse their',
+      'titles, premises, settings or endings — go somewhere else entirely:',
+      '- ' + previousTitles.join('\n- ')
+    );
+  }
+
+  lines.push(
+    '',
+    // The seed exists so that an unchanged taste profile still yields a new
+    // story on demand. It is a variety knob, never anything to write about.
+    'Variation key (ignore its content, use it only to make different choices',
+    'than you would otherwise): ' + variationSeed,
+    '',
+    'Return JSON: {"title": "...", "story": "..."}'
+  );
+
+  return lines.join('\n');
 }
 
 function handleMoodTagging(request) {
@@ -419,7 +579,7 @@ function handleTagCloudNormalization(request) {
   };
 }
 
-function callGemini(prompt, schema, maxOutputTokens) {
+function callGemini(prompt, schema, maxOutputTokens, temperature) {
   const apiKey = PropertiesService
     .getScriptProperties()
     .getProperty('GEMINI_API_KEY');
@@ -448,7 +608,9 @@ function callGemini(prompt, schema, maxOutputTokens) {
         }]
       }],
       generationConfig: {
-        temperature: 0.1,
+        // Extraction tasks want the same answer every time; the taste story
+        // wants a different one. Callers that pass nothing keep the old value.
+        temperature: typeof temperature === 'number' ? temperature : 0.1,
         maxOutputTokens: maxOutputTokens || 24000,
         responseMimeType: 'application/json',
         responseJsonSchema: schema

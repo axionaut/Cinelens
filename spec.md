@@ -5186,3 +5186,60 @@ pick would erase the losing device's history.
 a non-numeric stored value straight through to `Number()`, since a junk string
 is truthy, producing `NaN` — and a `NaN` bonus propagates into `rankScore` and
 scrambles the entire sort. `dev/assert-v136.mjs` covers it.
+
+## 137. The taste story was never routed
+
+The taste story has never worked against the deployed backend. The client posts
+
+    {task: 'generate-taste-story', profile: {...}}
+
+and the Apps Script router in `Apps Script.txt` had exactly three branches:
+`normalize-tag-cloud`, `mood-titles`, and an unconditional fall-through to
+`handleTitleTagging(request)`. The story request took the fall-through, found no
+`items`, and threw `No titles supplied` — so every attempt came back
+`{ok:false, error:'No titles supplied'}`.
+
+### Why it looked like nothing was happening
+
+`generateTasteStory`'s catch recorded the reason on `state.tasteStory.error` and
+set `status:'error'`. `renderTasteStoryCard` had no branch for that status, so it
+fell to the final `else` and printed *"Your first story is ready to be written
+from the tags your ratings have shaped."* — the same copy a fresh install shows.
+A backend that could not answer was indistinguishable from one that had never
+been asked, through every retry. The card now names the failure and the reason
+it was given, which is what tells you whether to retry or to go and look at the
+deployment.
+
+### The handler
+
+`handleTasteStory` is the first task here that is not extraction. Everything
+else pulls structured facts out of supplied text, where a re-run returning the
+identical answer is the goal; this writes original fiction, and the client
+explicitly asks for a different story each time — it sends a `variationSeed` and
+the titles it has already used. So `callGemini` gained a fourth parameter,
+`temperature`, defaulting to the existing `0.1` so every other caller is
+unchanged, and the story runs at `1.05`.
+
+`tasteStoryTerms` accepts both the client's `[{tag, weight}]` shape and plain
+strings, and `buildTasteStoryPrompt` converts the normalised slug form back to
+prose (`slow-burn` → `slow burn`) before the model sees it. The prompt asks for
+450–700 words built from a handful of the drawn-to elements rather than a
+checklist of all forty-two, forbids the avoided ones outright, bans any mention
+of tags/ratings/algorithms or the reader, and lists previously written titles as
+things not to repeat.
+
+**This requires Nitin to redeploy the Apps Script web app manually.** Until that
+redeploy lands, the client change is still worth having: the card will say
+`No titles supplied` instead of pretending nothing has been tried.
+
+### Note on the test fixture
+
+`dev/assert-v137.mjs` seeds six rated titles inside a library of eighty-six. Six
+alone is not enough: the model trains on `recommendationScoringTags`, which drops
+any tag carried by more than 10% of the library, so in a six-title library every
+fixture tag sits at 50% and the model correctly learns nothing. The filler titles
+exist only to make the corpus large enough for the evidence tags to read as
+distinctive. The fixture also has to call `invalidateTasteModel()` —
+`invalidateTagCaches()` alone leaves `tasteModelCache` holding the model trained
+against the empty pre-seed library, and `computeTagWeights` reads straight
+through it.
