@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 135;
+const APP_VERSION = 136;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -3205,6 +3205,7 @@ function normaliseReceptionRecord(reception=null) {
 
 function normaliseStoredTitleRecord(movie) {
   if (!movie) return movie;
+  if (movie.topTenCount != null) movie.topTenCount = topTenTenureCount(movie);
   if (!movie.wikiPageId && String(movie.id || '').startsWith('wiki_')) {
     movie.wikiPageId = String(movie.id).replace(/^wiki_/, '');
   }
@@ -9366,8 +9367,12 @@ function cardMarkup(movie, opts={}) {
   // its own terms and must not be rescaled against the taste-fit reference.
   const matchPct = absoluteMatch ? Math.round(resolvedMatchScore * 100) : displayMatchPercent(resolvedMatchScore);
   const receptionHint = usableReception(movie) ? ` · reception ${formatReceptionEffect(resolvedReceptionEffect)}` : '';
+  // Tenure moves a title up the list without moving its match percentage, so
+  // the card has to name it or the ordering looks arbitrary.
+  const tenureCount = topTenTenureCount(movie);
+  const tenureHint = tenureCount ? ` · top 10 ×${tenureCount}` : '';
   const matchSummary = resolvedPosOverlap
-    ? `${resolvedPosOverlap} learned tag signal${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre signal${resolvedGenreOverlap===1?'':'s'}`:''} · ${matchPct}%${absoluteMatch ? ' similar' : ' of your best match'}${resolvedPredictedRating?` · model ${resolvedPredictedRating.toFixed(1)}★`:''}${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} negative`:''}${receptionHint}`
+    ? `${resolvedPosOverlap} learned tag signal${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre signal${resolvedGenreOverlap===1?'':'s'}`:''} · ${matchPct}%${absoluteMatch ? ' similar' : ' of your best match'}${resolvedPredictedRating?` · model ${resolvedPredictedRating.toFixed(1)}★`:''}${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} negative`:''}${receptionHint}${tenureHint}`
     : 'no current positive taste overlap';
   const safeId = movie.id.replace(/'/g,"\\'");
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';
@@ -10308,6 +10313,93 @@ function computeTagWeights() {
   state.moodWeights = moods;
 }
 
+// ─────────────────────────────
+// TOP-TEN TENURE (v136)
+//
+// Every rating reshuffles For You, and a title can bounce 10th → 1st → 5th →
+// 20th across a handful of ratings. Nothing recorded that it kept showing up.
+// A title that has held a top-10 slot in its own lane a dozen times over is
+// telling you something an all-new arrival at the same predicted rating is not,
+// and it should not be displaced by a newcomer that merely ties it.
+//
+// The reward is a bounded star nudge, deliberately capped at the same +0.30
+// ceiling as ENGLISH_PREFERENCE_STAR_BONUS: a veteran beats a comparable or
+// slightly better new match, and a genuinely strong find still takes #1. The
+// cap also bounds the feedback loop — tenure raises a title's rank, which helps
+// it hold its slot, which earns more tenure — so entrenchment stops at twelve
+// ticks instead of compounding forever.
+//
+// Lanes are counted separately (movies against movies, shows against shows) and
+// off the full ranked list, not the visible tab: what the user is looking at
+// must not change what a title earns.
+// ─────────────────────────────
+const TOP_TEN_TENURE_SLOTS = 10;
+const TOP_TEN_TENURE_CAP = 12;
+const TOP_TEN_TENURE_STAR_STEP = 0.025;
+// Counting happens on every ranking rebuild, and background tagging invalidates
+// the ranking once per title finished — a 200-title catch-up would otherwise
+// hand whoever happened to be sitting in the top ten 200 ticks. Bursts collapse
+// to a single tick; anything a person would recognise as a separate refresh is
+// far enough apart to count on its own.
+const TOP_TEN_TENURE_MIN_INTERVAL_MS = 5000;
+// Tenure is personal state, so it rides the Drive profile and its save is
+// debounced: a rebuild must not turn into an immediate profile upload.
+const TOP_TEN_TENURE_SAVE_DEBOUNCE_MS = 3000;
+let topTenTenureLastCountedAt = 0;
+let topTenTenureSaveTimer = null;
+const topTenTenureDirtyIds = new Set();
+
+function topTenTenureCount(movie) {
+  // Coerce before the || fallback, not after: a non-numeric stored value is
+  // truthy, so `(value || 0)` would hand Number() the junk and yield NaN — and
+  // a NaN bonus propagates into rankScore and scrambles the whole sort.
+  return Math.max(0, Math.floor(Number(movie?.topTenCount) || 0));
+}
+
+function topTenTenureBonus(movie) {
+  return Math.min(topTenTenureCount(movie), TOP_TEN_TENURE_CAP) * TOP_TEN_TENURE_STAR_STEP;
+}
+
+function flushTopTenTenureSave() {
+  clearTimeout(topTenTenureSaveTimer);
+  topTenTenureSaveTimer = null;
+  if (!topTenTenureDirtyIds.size) return;
+  const ids = [...topTenTenureDirtyIds];
+  topTenTenureDirtyIds.clear();
+  // driveProfileOnly: a counter must never dirty a catalogue chunk. Deliberately
+  // no touchRecord() either — tenure is not an edit to the title, and bumping
+  // _updatedAt would let it win merges against a real rating from another device.
+  saveLocalState({changedMovieIds:ids, driveProfileOnly:true});
+  queueDriveSync();
+}
+
+function scheduleTopTenTenureSave() {
+  if (topTenTenureSaveTimer) return;
+  topTenTenureSaveTimer = setTimeout(flushTopTenTenureSave, TOP_TEN_TENURE_SAVE_DEBOUNCE_MS);
+}
+
+function recordTopTenTenure(ranked) {
+  const now = Date.now();
+  if (now - topTenTenureLastCountedAt < TOP_TEN_TENURE_MIN_INTERVAL_MS) return;
+  topTenTenureLastCountedAt = now;
+  const stamp = nowStamp();
+  const filled = {movie:0, show:0};
+  for (const item of ranked) {
+    if (filled.movie >= TOP_TEN_TENURE_SLOTS && filled.show >= TOP_TEN_TENURE_SLOTS) break;
+    const movie = item.movie;
+    // Count the list the user is actually offered. A watchlisted or filtered-out
+    // title occupies no slot, so it must not consume one here either.
+    if (movie.watchlist || !recommendableTitle(movie)) continue;
+    const lane = formatClass(movie);
+    if (filled[lane] >= TOP_TEN_TENURE_SLOTS) continue;
+    filled[lane]++;
+    movie.topTenCount = topTenTenureCount(movie) + 1;
+    if (!movie.topTenFirstAt) movie.topTenFirstAt = stamp;
+    topTenTenureDirtyIds.add(String(movie.id));
+  }
+  if (topTenTenureDirtyIds.size) scheduleTopTenTenureSave();
+}
+
 function scoreMovies() {
   if (scoredMovieCache) return scoredMovieCache;
   computeTagWeights();
@@ -10316,12 +10408,20 @@ function scoreMovies() {
     .map(movie => predictTasteFit(movie, getTasteModel('', formatClass(movie))))
     // Discovery still needs some learned positive evidence. We do not fill For
     // You with neutral baseline guesses merely because every title has a rating.
-    .filter(item => item.posOverlap > 0 && item.predictedRating > Number(getTasteModel('', formatClass(item.movie)).baseline || 3));
+    .filter(item => item.posOverlap > 0 && item.predictedRating > Number(getTasteModel('', formatClass(item.movie)).baseline || 3))
+    .map(item => {
+      // Ordering only. predictedRating and matchScore keep describing fit, so
+      // the match percentage on a card never inflates because a title is old.
+      item.tenureBonus = topTenTenureBonus(item.movie);
+      item.rankScore = item.predictedRating + item.tenureBonus;
+      return item;
+    });
 
   ranked.sort((a, b) =>
     // Underfilled titles rank below every title with a complete tag set, no
     // matter how well their few tags happen to fit.
     Number(tagFloorMet(b.movie)) - Number(tagFloorMet(a.movie)) ||
+    b.rankScore - a.rankScore ||
     b.predictedRating - a.predictedRating ||
     b.positiveScore - a.positiveScore ||
     a.negativePenalty - b.negativePenalty ||
@@ -10330,6 +10430,7 @@ function scoreMovies() {
     a.movie.title.localeCompare(b.movie.title)
   );
   scoredMovieCache = ranked;
+  recordTopTenTenure(ranked);
   return scoredMovieCache;
 }
 
@@ -12861,6 +12962,8 @@ function catalogueMovieForDrive(movie) {
   delete copy.ratedAt;
   delete copy.watchlist;
   delete copy.manualAdded;
+  delete copy.topTenCount;
+  delete copy.topTenFirstAt;
   delete copy.hiddenAt;
   delete copy._updatedAt;
   return copy;
@@ -12873,6 +12976,8 @@ function personalMovieState(movie) {
     ratedAt,
     watchlist:!!movie?.watchlist,
     manualAdded:!!movie?.manualAdded,
+    topTenCount:topTenTenureCount(movie),
+    topTenFirstAt:movie?.topTenFirstAt || '',
     // Catalogue chunks intentionally omit _updatedAt. Never manufacture a
     // fresh timestamp for that blank personal overlay: doing so can beat a
     // real Drive rating during restore and reset it to zero.
@@ -12956,6 +13061,14 @@ function applyDriveProfile(profile,{merge=true,preferDrive=false}={}) {
     movie.ratedAt=personalOverlayRatedAt(chosen);
     movie.watchlist=!!chosen.watchlist;
     movie.manualAdded=!!chosen.manualAdded;
+    // Tenure is settled separately from the rest of the overlay. The overlay is
+    // won outright by whichever side holds the newer rating, but a count only
+    // ever grows, so taking the larger of the two is both the right merge and
+    // the one that cannot lose a device's history to an older rating stamp.
+    movie.topTenCount=Math.max(topTenTenureCount(movie),Math.max(0,Math.floor(Number(remotePersonal.topTenCount || 0))));
+    const remoteFirstAt=remotePersonal.topTenFirstAt || '';
+    // "Since it first entered the top ten" — so the earliest stamp wins.
+    if (remoteFirstAt && (!movie.topTenFirstAt || remoteFirstAt < movie.topTenFirstAt)) movie.topTenFirstAt=remoteFirstAt;
   });
   const restored = restoreHiddenRecordsToMovies(state.movies, state.hiddenTitles);
   state.movies = restored.movies;

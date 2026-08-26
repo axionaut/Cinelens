@@ -5117,3 +5117,72 @@ reports "not applicable", so `syncDrive` falls through to the full merging path.
 the other device just wrote and merging against it — bounded at one retry so a
 device caught in a genuine write storm reports failure and backs off rather than
 looping.
+
+## 136. Top-ten tenure — a reward for holding the slot
+
+Every rating reshuffles For You, and a title can bounce 10th → 1st → 5th → 20th
+across a handful of ratings. Nothing recorded that it kept showing up. A title
+that has held a top-10 slot in its own lane a dozen times over is telling you
+something an all-new arrival at the same predicted rating is not, and it should
+not be displaced by a newcomer that merely ties it.
+
+### The reward
+
+`topTenTenureBonus()` is a bounded star nudge:
+
+    rankScore = predictedRating + min(topTenCount, 12) × 0.025
+
+The +0.30 ceiling is deliberately the same as `ENGLISH_PREFERENCE_STAR_BONUS` —
+there is now a precedent for how large a non-taste preference may be, and tenure
+respects it. A veteran beats a comparable or slightly better new match; a
+genuinely strong find still takes #1. The cap also bounds the feedback loop
+(tenure raises rank → the title holds its slot → it earns more tenure), which
+stops at twelve ticks instead of compounding forever.
+
+`rankScore` is a **separate field**. `predictedRating` and `matchScore` keep
+describing fit alone, so a card's match percentage never inflates because the
+title is old, and the reception/taste diagnostics stay measurements. Ordering
+uses `rankScore` with `predictedRating` retained immediately below it as a
+tiebreak. `tagFloorMet` still sorts above everything (§131): tenure cannot lift
+an underfilled title over a complete tag set.
+
+### The counting
+
+`recordTopTenTenure()` runs at the end of `scoreMovies()` — i.e. once per
+ranking rebuild, which is what "any recommendation refresh" means in practice
+and is naturally deduplicated by `scoredMovieCache`.
+
+- **Lanes are independent.** Movies are counted against movies, shows against
+  shows, off the full ranked list rather than the visible tab: what the user is
+  looking at must not change what a title earns.
+- **Slots reflect what is actually offered.** A watchlisted or non-recommendable
+  title consumes no slot, so the title behind it is promoted into the ten.
+- **Bursts collapse.** Background tagging invalidates the ranking once per title
+  finished; a 200-title catch-up would otherwise hand whoever was sitting in the
+  top ten 200 ticks. `TOP_TEN_TENURE_MIN_INTERVAL_MS = 5000` collapses a burst
+  to a single tick while leaving anything a person would recognise as a separate
+  refresh far enough apart to count on its own.
+- **`topTenFirstAt`** records the first appearance and is never rewritten —
+  "starting from the first time it entered top 10".
+
+### Storage and sync
+
+Tenure is personal state. It rides the Drive **profile** overlay, and
+`catalogueMovieForDrive` strips it, so a rebuild can never dirty a catalogue
+chunk and force a catalogue upload. The save is debounced 3 s and passes
+`driveProfileOnly:true`. It deliberately does **not** call `touchRecord()`:
+tenure is not an edit to the title, and bumping `_updatedAt` would let a counter
+tick win merges against a real rating from another device.
+
+The cross-device merge is the one place tenure leaves the overlay's rules. The
+overlay is won outright by whichever side holds the newer rating, but a count
+only ever grows, so `applyDriveProfile` settles `topTenCount` separately by
+`Math.max` and `topTenFirstAt` by earliest stamp. Riding along with the overlay
+pick would erase the losing device's history.
+
+### Note on coercion
+
+`topTenTenureCount` coerces *before* the `|| 0` fallback. `(value || 0)` passed
+a non-numeric stored value straight through to `Number()`, since a junk string
+is truthy, producing `NaN` — and a `NaN` bonus propagates into `rankScore` and
+scrambles the entire sort. `dev/assert-v136.mjs` covers it.
