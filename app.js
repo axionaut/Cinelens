@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 139;
+const APP_VERSION = 140;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -9082,13 +9082,19 @@ function similarTitleResults() {
     .sort((a,b) => b.similarity - a.similarity || movieTime(b.movie) - movieTime(a.movie) || titleSortKey(a.movie).localeCompare(titleSortKey(b.movie)));
 }
 
+// The tab bar is markup, so find the button by the call it actually makes
+// rather than by its label — a renamed tab must not quietly break a view switch.
+function tabButton(tab) {
+  return document.querySelector(`.tab-btn[onclick*="setTab('${tab}'"]`);
+}
+
 function showSimilarTitles(id, event) {
   if (event) event.stopPropagation();
   const movie = state.movies?.[id];
   if (!movie) {
     // A rendered card whose record is no longer in state means something
     // removed it behind the view. Saying so beats a button that silently does
-    // nothing — that silence is exactly what hid the v138 tombstone bug.
+    // nothing.
     showToast('That title is no longer in your library. Refreshing the view.', 'error');
     render();
     return;
@@ -9099,13 +9105,20 @@ function showSimilarTitles(id, event) {
   wikiSearchResults = [];
   localBlockedSearchResults = [];
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
-  activeTab = 'all';
-  document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-  const allBtn = [...document.querySelectorAll('.tab-btn')].find(btn => /all/i.test(btn.textContent || ''));
-  if (allBtn) allBtn.classList.add('active');
-  updateControlDeck();
+  // The title button lives on a card that may be open as a modal over some
+  // other tab. Similar titles is a whole-view result, so the modal goes.
+  closeMovieCardModal();
+  // v140: this used to assign activeTab, repaint the tab button by hand and
+  // call renderRecs() directly. It never ran updateVisibleSections, so from any
+  // non-recommendation tab the .normal-only section stayed hidden and the
+  // .rated-only section stayed on screen: the ALL button lit up and #recsGrid
+  // was filled correctly, but the user still saw Rated until they clicked ALL
+  // themselves — at which point setTab did the switch and the results appeared.
+  // Going through setTab does the whole switch (section visibility, control
+  // deck, scroll), and its render() lands on renderSimilarTitles because
+  // similarTitleSourceId is set above.
+  setTab('all', tabButton('all'));
   renderWikiSearchResults();
-  renderRecs();
   window.scrollTo({top:0, behavior:'smooth'});
 }
 

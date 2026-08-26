@@ -5363,3 +5363,46 @@ says so and re-renders. That silence is precisely what hid this bug.
 in memory and after a Drive round-trip has stripped its edit stamp; a genuine
 deletion still removes an older title through the same path; a record of unknown
 age is kept; and a chunk-loaded library is not gutted by stale tombstones.
+
+## 140. Similar titles lit the tab but never switched the view
+
+Nitin's report: from Rated, open a title card, click the title. The blurred
+background shows it has moved to ALL. Close the card and you are still looking
+at Rated, with ALL highlighted above. Click ALL manually and the similar titles
+are there.
+
+`showSimilarTitles` hand-rolled its own tab switch:
+
+    activeTab = 'all';
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    ...allBtn.classList.add('active');
+    updateControlDeck();
+    renderRecs();
+
+Every line of that is correct except for what is missing. Section visibility is
+owned by `updateVisibleSections()`, which only runs from `render()`. Assigning
+`activeTab` and repainting the button changed the *highlight* and the *data* —
+`renderRecs()` populated `#recsGrid` correctly the whole time — while the
+`.rated-only` section stayed on screen and `.normal-only` stayed
+`display:none`. The results existed, inside a hidden section. Clicking ALL
+called `setTab`, which ran the full `render()`, and they appeared.
+
+The same fault applied from Tags and Recently Added, and the modal was never
+closed either, so the card stayed open over a view that had supposedly changed.
+
+`showSimilarTitles` now closes the modal and calls `setTab('all', …)` — the
+app's own switch, which does visibility, control deck and scroll — and its
+`render()` lands on `renderSimilarTitles` because `similarTitleSourceId` is set
+first. `tabButton(tab)` finds the button by the `setTab` call in its `onclick`
+rather than by matching its label text, so renaming a tab cannot quietly break a
+view switch.
+
+### Coverage
+
+`dev/assert-v140.mjs` walks the reported path: seed a library, switch to Rated,
+open the card, call `showSimilarTitles`, then assert on **computed section
+visibility** rather than on `activeTab`. Reverting only the function body makes
+it fail on exactly the reported symptoms — "the Rated section is no longer on
+screen" and "the recommendations section is now visible" — while the
+cards-were-rendered assertion still passes, which is the bug in one line: the
+grid was always right, the view was not.
