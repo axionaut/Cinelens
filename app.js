@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 140;
+const APP_VERSION = 141;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -12345,9 +12345,18 @@ const DRIVE_TOKEN_EXPIRY_KEY='cinelens_drive_token_expiry_v1';
 const DRIVE_SILENT_BLOCK_KEY='cinelens_drive_silent_block_until_v1';
 const DRIVE_SILENT_TOKEN_TIMEOUT_MS=8000;
 const DRIVE_SILENT_RENEW_DEBOUNCE_MS=12000;
-// Silent renewal uses prompt:'none', which never opens any UI — a failed
-// attempt is invisible to the user and costs one background request. It was
-// nevertheless punished with a flat ten-minute lockout, so a single hiccup
+// v141: what used to stand here — that prompt:'none' "never opens any UI" —
+// was simply wrong, and believing it is what let Drive recovery sit in front of
+// the user flashing a Google window at him every few seconds. Google Identity
+// Services has no hidden-iframe renewal any more: every requestAccessToken
+// opens a real popup. prompt:'none' only means Google asks nothing once that
+// window is open — it still appears and still closes. An automatic renewal is
+// therefore neither free nor invisible, so the page gets exactly one of them
+// (see driveAutoRecoveryExhausted) and the header chip carries the rest, the
+// way Rocket Scanner does it: no session, one honest button, no narration.
+//
+// The ladder below still paces that one attempt. It was originally
+// punished with a flat ten-minute lockout, so a single hiccup
 // stranded the app on "reconnect needed" for ten minutes even though the very
 // next attempt would have succeeded. Both verdicts now escalate instead, and
 // the ladder resets the moment anything succeeds, so the app keeps quietly
@@ -12363,6 +12372,12 @@ let driveSilentRenewFailures=0;
 // not reverse without a user gesture. This — not "no token right now" — is what
 // makes the header offer a tap.
 let driveNeedsUserGestureFlag=false;
+// Automatic recovery gets exactly one shot per page load, because every shot
+// costs the user a popup that opens and closes in front of them. Once it has
+// been spent and lost, further automatic attempts are refused outright and the
+// chip turns into a button; a success, coming back online, or the user tapping
+// Drive hands the shot back.
+let driveAutoRecoveryExhausted=false;
 let driveSilentRenewInFlight=null;
 let driveSilentRenewBlockedUntil=0;
 let driveSilentRenewLastAttemptAt=0;
@@ -12400,6 +12415,7 @@ function rememberDriveToken(token, expiresInSeconds=3300) {
 function clearDriveRenewalBackoff() {
   driveSilentRenewFailures=0;
   driveNeedsUserGestureFlag=false;
+  driveAutoRecoveryExhausted=false;
   setSilentDriveRenewalBlockUntil(0);
   updateDriveStatusLabel();
 }
@@ -12425,6 +12441,13 @@ function silentDriveRenewalBlocked(now=Date.now()) {
 function silentlyRenewDriveToken() {
   if (!state.drive.enabled && !state.drive.connected) return Promise.resolve(false);
   if (driveSilentRenewInFlight) return driveSilentRenewInFlight;
+  // The page's one automatic attempt is gone: stop, and let the chip say so
+  // instead of narrating a recovery that is not going to arrive.
+  if (driveAutoRecoveryExhausted) {
+    driveNeedsUserGestureFlag=true;
+    updateDriveStatusLabel();
+    return Promise.resolve(false);
+  }
   const now=Date.now();
   if (silentDriveRenewalBlocked(now) || now - driveSilentRenewLastAttemptAt < DRIVE_SILENT_RENEW_DEBOUNCE_MS) return Promise.resolve(false);
   const renewal=(async () => {
@@ -12445,7 +12468,11 @@ function silentlyRenewDriveToken() {
       flushPendingDriveSync();
       return true;
     } catch(e) {
-      state.drive.connected = false;
+      // A renewal that obtained a token but could not finish the restore is
+      // still a failed renewal. Leaving the half-usable token behind made
+      // driveNeedsUserGesture() answer "no gesture needed", which is precisely
+      // how the chip got stuck on "Reconnecting…" while the popup loop ran.
+      driveMarkAutoRecoverySpent();
       setDriveStatus('');
       return false;
     }
@@ -12455,6 +12482,19 @@ function silentlyRenewDriveToken() {
     if (driveSilentRenewInFlight === renewal) driveSilentRenewInFlight=null;
   }).catch(() => {});
   return renewal;
+}
+
+// Everything that gives up on automatic recovery has to leave the same state
+// behind, or the chip and the retry logic end up disagreeing about whether a tap
+// would help. Dropping the cached token is deliberate: an explicit reconnect
+// ignores it anyway, and keeping it would let driveNeedsUserGesture() go on
+// answering "no gesture needed" while nothing was actually working.
+function driveMarkAutoRecoverySpent() {
+  state.drive.connected=false;
+  state.drive.accessToken='';
+  clearStoredDriveToken();
+  driveAutoRecoveryExhausted=true;
+  driveNeedsUserGestureFlag=true;
 }
 
 function scheduleDriveTokenRefresh(expiry=0) {
@@ -12519,6 +12559,7 @@ window.addEventListener('pagehide', flushLocalStatePersistence);
 window.addEventListener('online', () => {
   if (!state.drive?.enabled) return;
   driveSilentRenewFailures=0;
+  driveAutoRecoveryExhausted=false;
   setSilentDriveRenewalBlockUntil(0);
   driveSilentRenewLastAttemptAt=0;
   silentlyRenewDriveToken().finally(() => {
@@ -12688,8 +12729,7 @@ async function restoreDriveSession(showFailure=false, opts={}) {
     scheduleDrivePullPoll();
     return true;
   } catch(e) {
-    state.drive.connected=false;
-    state.drive.accessToken='';
+    driveMarkAutoRecoverySpent();
     setDriveStatus('');
     if (showFailure) showToast(driveErrorMessage(e),'error');
   } finally {
@@ -12704,7 +12744,12 @@ async function restoreDriveSession(showFailure=false, opts={}) {
 // reports what actually matters (is my data backed up?) and it is only an
 // instruction when tapping it can genuinely fix something.
 let driveStatusState = '';
-let driveStatusChangedAt = Date.now();
+// How long Drive has actually been unhealthy, independent of how often the
+// status label flipped meanwhile. v140 measured the stall from the last status
+// transition, so an automatic retry cycling '' → 'syncing' → '' every few
+// seconds reset the clock before it could ever expire — the chip kept promising
+// "Reconnecting…" and never offered the tap that would have ended it.
+let driveUnhealthySince = Date.now();
 let driveStatusWatchdogTimer = null;
 // How long the chip may keep claiming the app is healing itself before it has
 // to admit it is not getting anywhere and turn back into a button.
@@ -12735,7 +12780,8 @@ function driveReconnectStalled() {
   if (driveRequestInFlight()) return false;
   const syncing = driveStatusState === 'syncing';
   if (state.drive?.connected && !syncing) return false;
-  return Date.now() - driveStatusChangedAt > (syncing ? DRIVE_SYNCING_STALL_MS : DRIVE_RECONNECT_STALL_MS);
+  if (!driveUnhealthySince) return false;
+  return Date.now() - driveUnhealthySince > (syncing ? DRIVE_SYNCING_STALL_MS : DRIVE_RECONNECT_STALL_MS);
 }
 
 // Single source of truth for "is the chip a button right now?" — label text,
@@ -12801,12 +12847,12 @@ function updateDriveStatusLabel() {
 
 function setDriveStatus(s) {
   const next = s || '';
-  // Only a real transition restarts the stall clock: repainting the same status
-  // must not keep resetting it, or a stuck state would never look stuck.
-  if (next !== driveStatusState) {
-    driveStatusState = next;
-    driveStatusChangedAt = Date.now();
-  }
+  driveStatusState = next;
+  // The stall clock starts when Drive stops being backed up and runs until it is
+  // again — repaints and retries in between must not touch it, or a stuck state
+  // would never look stuck.
+  if (next === 'connected') driveUnhealthySince = 0;
+  else if (!driveUnhealthySince) driveUnhealthySince = Date.now();
   updateDriveStatusLabel();
 }
 
@@ -12851,6 +12897,9 @@ function handleLibraryStatusClick() {
 function retryDriveConnection() {
   driveSilentRenewFailures = 0;
   driveNeedsUserGestureFlag = false;
+  // The tap is exactly the user gesture the automatic path could not supply, so
+  // it buys back the one automatic attempt as well.
+  driveAutoRecoveryExhausted = false;
   setSilentDriveRenewalBlockUntil(0);
   driveSilentRenewLastAttemptAt = 0;
   drivePullLastCheckAt = 0;
@@ -12941,6 +12990,10 @@ async function requestDriveTokenSilent(opts={}) {
   if (stored) { state.drive.accessToken=stored; return stored; }
   if (!opts.allowPromptlessRequest) throw {error:'interaction_required'};
   const blockedError=() => ({error:'interaction_required', cinelensSilentRenewBlocked:true});
+  // Every promptless request is still a popup, so once the page's automatic
+  // attempt is spent this refuses rather than opening another one — that is what
+  // stops a repeatedly failing driveFetch 401 retry from restarting the loop.
+  if (driveAutoRecoveryExhausted) throw blockedError();
   let now=Date.now();
   if (silentDriveRenewalBlocked(now) || now - driveSilentRenewLastAttemptAt < DRIVE_SILENT_RENEW_DEBOUNCE_MS) throw blockedError();
   await waitForGoogleIdentity();

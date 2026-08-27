@@ -4366,6 +4366,11 @@ recovery all request Google tokens with `prompt:'none'`. They may quietly enter
 the reconnect state but may not open Google account or consent UI. Only an
 explicit click on the Drive control may use an interactive/default prompt.
 
+> **Superseded by §141.** "May not open Google account or consent UI" was the
+> intent, but `prompt:'none'` does not deliver it: GIS opens a popup window for
+> every token request, and `prompt:'none'` only suppresses what Google *asks*
+> inside it. Automatic recovery is now capped at one attempt per page load.
+
 Pending local persistence flushes to IndexedDB when the document is hidden and
 again on `pagehide`, before a mobile browser can suspend or evict the tab. On
 foreground return, the cached library stays rendered while Drive renewal and
@@ -4713,6 +4718,11 @@ A static site can only use the GIS implicit token flow, which issues ~1 hour
 access tokens and has no refresh token. Truly unattended reconnection forever is
 therefore not available: when Google decides a gesture is required, only a
 gesture will do. Everything short of that is now automatic.
+
+> **The premise of the next paragraph is superseded by §141.** "Opens no UI at
+> all — a failed attempt is invisible" is false; GIS opens a popup for every
+> token request. The escalating-ladder conclusion below stands, but the ladder
+> now paces a single attempt per page load rather than a stream of them.
 
 What was actually wrong was the recovery policy. Silent renewal uses
 `prompt:'none'`, which opens no UI at all — a failed attempt is invisible and
@@ -5406,3 +5416,89 @@ it fail on exactly the reported symptoms — "the Rated section is no longer on
 screen" and "the recommendations section is now visible" — while the
 cards-were-rendered assertion still passes, which is the bug in one line: the
 grid was always right, the view was not.
+
+## 141. "Reconnecting…" forever, with a Google popup every few seconds
+
+Reported: the header chip sat on **"Reconnecting…"** and never changed, while
+the Google account window kept opening and closing on its own.
+
+Both halves come from one false belief, written down in the comment above the
+renewal backoff since v125 and quoted here so it is on the record as
+**superseded**:
+
+> Silent renewal uses prompt:'none', which never opens any UI — a failed
+> attempt is invisible to the user and costs one background request.
+
+That has not been true for as long as CineLens has used Google Identity
+Services. GIS deleted the hidden-iframe renewal that `gapi.auth2` had; **every**
+`requestAccessToken` opens a real popup window. `prompt:'none'` only promises
+that Google will not *ask the user anything* once the window is up — it still
+appears, and it still closes. So an automatic renewal is not free and not
+invisible, and a retry ladder designed on the assumption that it was will
+cheerfully fire one every fifteen seconds.
+
+### The loop
+
+`silentlyRenewDriveToken()` obtained a token and then required a full catalogue
+restore (§128). When the token arrived but the restore did not complete, the
+old catch cleared `state.drive.connected` and **left `state.drive.accessToken`
+in place**. That token is exactly what `driveNeedsUserGesture()` reads to decide
+the chip is fine:
+
+    if (state.drive?.connected || state.drive?.accessToken) return false;
+
+So the chip believed no gesture was needed. The only other route to a tappable
+chip was `driveReconnectStalled()`, and that measured from
+`driveStatusChangedAt` — the last *status transition*. Each retry cycled the
+status `'' → 'syncing' → ''`, which reset the clock, so the twenty-second stall
+threshold could never elapse. The chip therefore reported the one state that is
+neither healthy nor actionable — "Reconnecting…" — indefinitely, while the
+10-second watchdog and the 12-second debounce kept the popups coming.
+
+### The fix, modelled on Rocket Scanner
+
+Rocket Scanner's Drive layer never narrates a recovery it cannot perform: a
+token lives in `sessionStorage`, and when it is gone `needsReconnect()` turns
+the button amber and says **"Reconnect Drive"**. One button, one tap, no limbo.
+CineLens now does the same three things.
+
+**Automatic recovery is capped at one attempt per page load.**
+`driveAutoRecoveryExhausted` is spent by the first failed automatic renewal or
+startup restore and refuses every later automatic attempt outright — including
+the promptless path inside `requestDriveTokenSilent()`, which is what stops a
+repeatedly failing `driveFetch` 401 retry from restarting the loop. It is
+handed back by a success (`clearDriveRenewalBackoff`), by the user tapping the
+chip (`retryDriveConnection`), or by the `online` event, which is a genuinely
+new signal rather than another tick of the same timer. The backoff ladder still
+paces that single attempt; it no longer paces a stream of them.
+
+**Giving up leaves one consistent state.** `driveMarkAutoRecoverySpent()` is the
+single transition every abandonment goes through: it drops the connection, the
+in-memory token *and* the cached token, and sets both the exhausted and the
+needs-gesture flags. Dropping the cached token is deliberate — an explicit
+reconnect ignores it anyway, and keeping it is precisely what let
+`driveNeedsUserGesture()` go on answering "no gesture needed" while nothing
+worked.
+
+**The stall clock measures the outage, not the repaint.** `driveUnhealthySince`
+replaces `driveStatusChangedAt` (now removed, so nothing else measures from it
+again): it starts when Drive stops being backed up and is cleared only by
+`setDriveStatus('connected')`. Retries flipping the label in between cannot
+touch it, so a stalled session reliably becomes a button after 20s
+disconnected / 45s syncing even if the needs-gesture verdict never arrives.
+
+The user-visible outcome is that a broken Drive session costs at most one popup
+per page load and then says "Tap to reconnect Drive". Nothing is lost while it
+waits — the library is served from IndexedDB throughout, and pending writes
+flush on the reconnect.
+
+### Coverage
+
+`dev/assert-v141.mjs` drives a renewal whose token succeeds and whose restore
+fails, then asserts the shape of the failure rather than its wording: exactly
+one token request is spent, no token survives it in memory or in storage, the
+chip offers a tap immediately, and three further wake-ups plus a real
+promptless request add **zero** further popups. A simulated tap buys back
+exactly one. Separately it flips the status five times over a 60-second outage
+and asserts `driveReconnectStalled()` is still true — the assertion the v140
+code fails.
