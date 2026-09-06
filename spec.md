@@ -5865,3 +5865,55 @@ matcher on both storage shapes, the legacy ladder expansion, `?` matching only
 no-evidence titles, OR-within-axis and AND-across-axes, all four scalar mirrors,
 the clear button's count, and a full DOM round trip — select an option, dispatch
 `change`, read state, re-sync the control.
+
+## 148. A rating is profile-only work and must not cost a library hash
+
+Reported: a rating made on one device does not appear on the other, and the
+other spends a long time "syncing".
+
+Ratings, watchlist flags and settings live in the **profile**, never in a
+catalogue chunk — `catalogueMovieForDrive` strips them out precisely so a
+rating cannot dirty a chunk, and `rateMovie` marks only `driveProfileDirty`.
+Both existing push paths nevertheless charged the full price for one:
+
+- `syncDirtyDrive` returns "not applicable" the moment the remote manifest has
+  moved — and it has moved, *because the other device just rated something*.
+- `syncChunkedDrive` then rebuilds every chunk and `driveHash`es it, which
+  stringifies the entire library, before it looks at the profile at all.
+
+On a large library that is seconds of main-thread work per sync, and
+`driveSyncInProgress` is true throughout — during which **every pull is
+refused**. A device doing background backfills is dirty most of the time, so it
+spent most of its time in the one state where the other device's rating could
+not arrive. Both halves of the complaint are the same fact.
+
+**`syncProfileOnlyDrive`** is a third path, tried first: when nothing but the
+profile is dirty, read the manifest, settle the profile against the remote copy,
+write the manifest back. Two small files, no chunk hashing. It converges in
+**both** directions — the remote profile is merged in on the way past via
+`applyDriveProfile`, which settles each title's overlay on its own rating stamp,
+so it delivers the other device's rating rather than only shipping this one's.
+It returns `null` for "not my case" (a dirty chunk, no manifest, a manifest
+conflict), so the merging path still gets the last word.
+
+Two smaller repairs to the pull half:
+
+- **A forced pull raised while a sync is in flight was dropped.** Forced pulls
+  are raised at exactly the moments another device's work is most likely
+  waiting — returning to the tab, coming back online — which are also the
+  moments this device is most likely mid-sync. The request is now remembered and
+  run the instant the lane is released, from both `syncDrive` and the pull's own
+  completion.
+- **The idle poll was 60s, now 25s.** It is one metadata request against a tiny
+  file, and it is the only thing that notices another device's rating while this
+  one sits idle in the foreground. A minute of staleness on a device you are
+  looking at reads as a broken sync.
+
+Verified by throwaway probe against a stubbed Drive, not a stored assertion: a
+remote rating arriving with no catalogue chunk read at all (the whole call list
+was manifest, profile, profile-upload, manifest-write), the manifest being
+written so other devices notice, the hash baseline recorded, the path declining
+when a chunk is dirty, an agreeing profile writing nothing while still clearing
+the dirty flag, and the mid-sync forced pull being remembered. That last check
+first failed for the right reason — the probe had no Drive session, and the
+remember-branch correctly sits *after* the session check.

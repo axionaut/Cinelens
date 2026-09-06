@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 147;
+const APP_VERSION = 148;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -13815,7 +13815,21 @@ let drivePullLastCheckAt=0;
 let drivePullTimer=null;
 // Foreground and reconnect events bypass this, so it only throttles repeats.
 const DRIVE_PULL_MIN_INTERVAL_MS=15000;
-const DRIVE_PULL_POLL_MS=60000;
+// v148: was 60s. The poll is one metadata request against a tiny file, and it
+// is the only thing that notices another device's rating while this one sits
+// idle in the foreground. A minute of staleness on a device you are looking at
+// reads as "sync is broken".
+const DRIVE_PULL_POLL_MS=25000;
+let drivePullRequestedDuringSync=false;
+
+// Called wherever the sync lane is released. The delay lets the just-finished
+// sync's own manifest write settle so the probe compares against a stable
+// version rather than racing it.
+function runDeferredDrivePull() {
+  if (!drivePullRequestedDuringSync) return;
+  drivePullRequestedDuringSync=false;
+  setTimeout(() => { Promise.resolve(pullDriveIfRemoteChanged({force:true})).catch(()=>{}); }, 400);
+}
 
 function noteDriveManifestVersion(version) {
   if (version) driveManifestRemoteVersion=String(version);
@@ -13851,7 +13865,16 @@ function driveHasLocalChanges() {
 async function pullDriveIfRemoteChanged({force=false}={}) {
   if (!state.drive?.enabled || !state.drive.manifestFileId) return false;
   if (!state.drive.connected && !state.drive.accessToken) return false;
-  if (driveSyncInProgress || driveRestoreInProgress) return false;
+  if (driveSyncInProgress || driveRestoreInProgress) {
+    // v148: this used to just return. A forced pull is raised at exactly the
+    // moments another device's work is most likely waiting - coming back to the
+    // tab, coming back online - and those are also the moments this device is
+    // most likely mid-sync, so the request was dropped precisely when it
+    // mattered and nothing re-raised it until the next poll tick. Remember it
+    // and run it the moment the lane is free.
+    if (force) drivePullRequestedDuringSync = true;
+    return false;
+  }
   if (drivePullInFlight) return drivePullInFlight;
   const now=Date.now();
   if (!force && now - drivePullLastCheckAt < DRIVE_PULL_MIN_INTERVAL_MS) return false;
@@ -13891,7 +13914,7 @@ async function pullDriveIfRemoteChanged({force=false}={}) {
       driveSyncInProgress=false;
       if (driveSyncQueued) { driveSyncQueued=false; queueDriveSync(350); }
     }
-  })().finally(() => { drivePullInFlight=null; });
+  })().finally(() => { drivePullInFlight=null; runDeferredDrivePull(); });
   return drivePullInFlight;
 }
 
@@ -14094,6 +14117,85 @@ function buildDriveChunkPayload(key) {
 // Normal local edits do not need reconciliation: startup already loaded the
 // authoritative manifest. Persist only the changed profile/chunks, then patch
 // the cached manifest. Manual sync and startup retain the full merge path.
+// v148: A RATING IS PROFILE-ONLY WORK AND MUST NOT COST A LIBRARY HASH.
+// Ratings, watchlist flags and settings live in the profile, never in a
+// catalogue chunk (catalogueMovieForDrive strips them), so rateMovie marks only
+// driveProfileDirty. Both existing paths still charged the full price for it:
+// syncDirtyDrive bails to the merging path the moment the remote manifest has
+// moved - which it has, precisely because the other device just rated something
+// - and syncChunkedDrive then rebuilds and hashes EVERY chunk, stringifying the
+// whole library, before it looks at the profile at all. On a large library that
+// is seconds of main-thread work per sync, and while it runs driveSyncInProgress
+// refuses every pull. A device busy backfilling is dirty most of the time, so it
+// spent most of its time in the one state where the other device's rating could
+// not arrive.
+//
+// When nothing but the profile is dirty, none of that work is relevant: read the
+// manifest, settle the profile against the remote copy, write the manifest back.
+// Two small files, no chunk hashing, and it converges in BOTH directions - the
+// remote profile is merged in on the way past, so this path also delivers the
+// other device's rating rather than only shipping ours.
+//
+// Returns null for "not applicable, use another path" - the same contract
+// syncDirtyDrive uses - and on a manifest conflict, so the full merging path
+// gets the last word.
+async function syncProfileOnlyDrive() {
+  if (!driveProfileDirty || driveAllChunksDirty || driveDirtyChunkKeys.size) return null;
+  if (!state.drive.manifestFileId) return null;
+  let manifest;
+  try { manifest = await readDriveJson(state.drive.manifestFileId); }
+  catch(error) { return null; }
+  if (manifest?.schema !== DRIVE_SYNC_MODEL_V2 || !manifest.profile?.id) return null;
+
+  const remoteProfile = manifest.profile;
+  const cachedProfileHash = state.meta?.driveProfileHash || '';
+  const localProfile = exportDriveProfile();
+  const localHash = driveHash(localProfile);
+  const remoteChanged = remoteProfile.hash !== cachedProfileHash;
+  const localChanged = localHash !== cachedProfileHash;
+  let pulledRemote = false;
+  let nextProfile = remoteProfile;
+
+  if (remoteChanged) {
+    // Merge, never overwrite: applyDriveProfile settles each title's overlay on
+    // its own rating stamp, so neither device's rating can lose to the other's
+    // upload order.
+    applyDriveProfile(await readDriveJson(remoteProfile.id), {merge:true});
+    pulledRemote = true;
+    const merged = exportDriveProfile();
+    const mergedHash = driveHash(merged);
+    if (mergedHash !== remoteProfile.hash) {
+      await uploadDriveJson(remoteProfile.id, merged);
+      nextProfile = {...remoteProfile, hash:mergedHash, updatedAt:nowStamp()};
+    }
+  } else if (localChanged && localHash !== remoteProfile.hash) {
+    await uploadDriveJson(remoteProfile.id, localProfile);
+    nextProfile = {...remoteProfile, hash:localHash, updatedAt:nowStamp()};
+  } else {
+    // Already in agreement. Clearing the flag here is what stops a permanently
+    // dirty profile from re-entering this path on every queued sync.
+    driveProfileDirty = false;
+    return false;
+  }
+
+  manifest.profile = nextProfile;
+  manifest.updatedAt = nowStamp();
+  try {
+    await writeDriveManifest(state.drive.manifestFileId, manifest);
+  } catch(error) {
+    if (isDriveConflictError(error)) return null;
+    throw error;
+  }
+  state.meta = state.meta || {};
+  state.meta.driveProfileHash = nextProfile.hash;
+  driveManifestCache = JSON.parse(JSON.stringify(manifest));
+  driveProfileDirty = false;
+  drivePullLastCheckAt = Date.now();
+  if (pulledRemote) deferRecommendationRefresh();
+  saveLocalState({preserveUpdatedAt:true, silentUi:true, skipDriveDirty:true});
+  return pulledRemote;
+}
+
 async function syncDirtyDrive() {
   if (!driveManifestCache?.profile?.id || !state.drive.manifestFileId || driveAllChunksDirty) return null;
   // The cached manifest is a safe base only while it still describes what is
@@ -14669,6 +14771,7 @@ async function syncDrive(manual=false) {
       driveSyncQueued=false;
       queueDriveSync(350);
     }
+    runDeferredDrivePull();
   };
   driveSyncInProgress=true;
   try {
@@ -14684,7 +14787,13 @@ async function syncDrive(manual=false) {
     // The first sync after installing v2 performs a one-time split from the
     // legacy file. All later syncs read one tiny manifest and transfer only the
     // profile and catalogue chunks whose hashes changed.
-    const fastResult=!manual ? await syncDirtyDrive() : null;
+    // Cheapest applicable path first: profile-only, then dirty-chunks, then the
+    // full merging rebuild. Each returns null for "not my case".
+    let fastResult = null;
+    if (!manual) {
+      fastResult = await syncProfileOnlyDrive();
+      if (fastResult === null) fastResult = await syncDirtyDrive();
+    }
     if (fastResult === null) await syncChunkedDrive(manual);
     state.drive.connected=true;
     state.drive.lastConnectedAt=Date.now();
