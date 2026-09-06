@@ -95,11 +95,10 @@
     <label>Since</label>
     <input class="year-input" type="number" id="minYear" min="1900" max="2026" step="1" value="1970" onchange="updateMinYear(this.value)">
     <label>Language</label>
-    <select class="platform-select" id="languageFilter" onchange="updateLanguageFilter(this.value)">
-      <option value="all">Hindi + English</option>
-      <option value="Hindi">Hindi</option>
-      <option value="English">English</option>
-    </select>
+    <div class="genre-control">
+     <select class="platform-select genre-filter-select" id="languageFilter" multiple size="1" onchange="updateLanguageFilter()" aria-label="Languages" title="Show titles in any of these languages">
+     </select>
+    </div>
     <label>Genre</label>
     <div class="genre-control">
      <select class="platform-select genre-filter-select" id="genreFilter" multiple size="1" onchange="updateGenreFilter()" aria-label="Genres" title="Select one or more genres">
@@ -145,20 +144,21 @@
       <option value="shows-strong">Strongly favour shows</option>
     </select>
     <label>Rating</label>
-    <select class="platform-select" id="ratingFilter" onchange="updateRatingFilter(this.value)">
-      <option value="all">All ratings</option>
+    <div class="genre-control">
+     <select class="platform-select genre-filter-select" id="ratingFilter" multiple size="1" onchange="updateRatingFilter()" aria-label="Your rating" title="Show titles at any of these ratings">
       <option value="unrated">Unrated</option>
-      <option value="5">5 stars &amp; above</option>
-      <option value="4">4 stars &amp; above</option>
-      <option value="3">3 stars &amp; above</option>
-      <option value="2">2 stars &amp; above</option>
-      <option value="1">1 star &amp; above</option>
-    </select>
+      <option value="5">5 stars</option>
+      <option value="4">4 stars</option>
+      <option value="3">3 stars</option>
+      <option value="2">2 stars</option>
+      <option value="1">1 star</option>
+     </select>
+    </div>
     <label>Content level</label>
     <div class="content-filter-control">
-      <select class="platform-select" id="sexContentMax" onchange="updateContentGuideFilter('sex',this.value)" aria-label="Sexual content level"><option value="any">S any</option><option value="0">S 0</option><option value="1">S 1</option><option value="2">S 2</option><option value="3">S 3</option><option value="4">S 4</option><option value="5">S 5</option></select>
-      <select class="platform-select" id="violenceContentMax" onchange="updateContentGuideFilter('violence',this.value)" aria-label="Violence level"><option value="any">V any</option><option value="0">V 0</option><option value="1">V 1</option><option value="2">V 2</option><option value="3">V 3</option><option value="4">V 4</option><option value="5">V 5</option></select>
-      <select class="platform-select" id="languageContentMax" onchange="updateContentGuideFilter('language',this.value)" aria-label="Language level"><option value="any">L any</option><option value="0">L 0</option><option value="1">L 1</option><option value="2">L 2</option><option value="3">L 3</option><option value="4">L 4</option><option value="5">L 5</option></select>
+      <select class="platform-select content-level-select" id="sexContentMax" multiple size="1" onchange="updateContentGuideFilter('sex')" aria-label="Sexual content level" title="Sexual content level: show titles at any of these levels, or ? for no evidence"><option value="unknown">S ?</option><option value="0">S 0</option><option value="1">S 1</option><option value="2">S 2</option><option value="3">S 3</option><option value="4">S 4</option><option value="5">S 5</option></select>
+      <select class="platform-select content-level-select" id="violenceContentMax" multiple size="1" onchange="updateContentGuideFilter('violence')" aria-label="Violence level" title="Violence level: show titles at any of these levels, or ? for no evidence"><option value="unknown">V ?</option><option value="0">V 0</option><option value="1">V 1</option><option value="2">V 2</option><option value="3">V 3</option><option value="4">V 4</option><option value="5">V 5</option></select>
+      <select class="platform-select content-level-select" id="languageContentMax" multiple size="1" onchange="updateContentGuideFilter('language')" aria-label="Language level" title="Language level: show titles at any of these levels, or ? for no evidence"><option value="unknown">L ?</option><option value="0">L 0</option><option value="1">L 1</option><option value="2">L 2</option><option value="3">L 3</option><option value="4">L 4</option><option value="5">L 5</option></select>
     </div>
     <label>Where to watch</label>
     <div class="genre-control">
@@ -183,6 +183,7 @@
     <input class="title-search-input" id="titleSearch" type="search" placeholder="search local + TMDB + Wikipedia" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)">
     <button class="tb-filter-btn" id="unifiedSearchBtn" onclick="searchWikipediaFromUnifiedInput()">search</button>
     <button class="tb-filter-btn tag-delete-mode" id="tagDeleteModeBtn" onclick="toggleTagDeleteMode()">Tag clicks: explore</button>
+    <button class="tb-filter-btn clear-filters-btn" id="clearFiltersBtn" onclick="clearAllFilters()" hidden>Clear filters</button>
   </div>
   <div class="wiki-search-results" id="tmdbSearchResults" hidden></div>
   <div class="wiki-search-results" id="wikiSearchResults" hidden></div>

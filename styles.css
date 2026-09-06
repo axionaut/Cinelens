@@ -286,6 +286,9 @@
   .genre-chip{font-size:9px;color:var(--tag-text,var(--muted));border:1px solid var(--tag-border,var(--border));border-radius:10px;padding:2px 7px;text-transform:capitalize;background:var(--palette-chip-bg,transparent);font-family:inherit;line-height:inherit}.genre-chip.clickable{cursor:pointer}.genre-chip.clickable:hover,.genre-chip.clickable:focus-visible{color:var(--accent);border-color:var(--accent2);background:color-mix(in srgb,var(--accent) 12%,transparent);outline:none}
   .genre-chip.matched{color:var(--accent);border-color:var(--accent2);background:color-mix(in srgb,var(--accent) 12%,transparent)}
   .content-filter-control{display:flex;gap:5px;flex-wrap:wrap}.content-filter-control .platform-select{min-width:58px;max-width:72px}
+  /* v147: as multi-selects these need room for a checkable row, not just the
+     three characters of "S 3". */
+  .content-filter-control .content-level-select{min-width:66px;max-width:80px}
   .content-guide{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:5px 0 3px;color:var(--muted);font-family:'DM Mono',monospace;font-size:9px}.content-guide span{white-space:nowrap}.content-cert{color:var(--accent);border:1px solid var(--border);border-radius:9px;padding:1px 6px}
   .watch-row{display:flex;flex-direction:column;gap:4px;margin:6px 0}
   .watch-platform-row-item{display:flex;align-items:baseline;gap:7px;flex-wrap:wrap}
@@ -540,6 +543,17 @@
   min-width:176px !important;
   max-width:176px !important;
 }
+
+.settings-bar select.content-level-select {
+  width:70px !important;
+  min-width:70px !important;
+  max-width:70px !important;
+}
+
+/* Only meaningful while something is filtered, so it is styled as a quiet
+   escape hatch rather than a primary action. */
+.clear-filters-btn { border-color:rgba(var(--accent-rgb), .35) !important; color:var(--accent); }
+.clear-filters-btn[hidden] { display:none !important; }
 
 .settings-bar select.genre-match-select {
   width:58px !important;

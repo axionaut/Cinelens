@@ -75,7 +75,10 @@ with a reason: unbumped `APP_VERSION`, failing `node --check`, whitespace
 damage, a missing `## <NEW>.` section in `spec.md`, a `Co-Authored-By` trailer,
 double-decoded characters, or a staged local-only file. It is quiet for every
 other command and for commits that do not touch `app.js`. A blocked commit means
-fix the named thing — never work around the gate.
+fix the named thing — never work around the gate. It runs *before* the command it
+gates, so appending the `spec.md` section and committing in one chained shell
+command always fails — the section does not exist yet when the hook reads it.
+Two calls.
 
 This is a testing-scope preference, not licence to skip safety or hide
 uncertainty. Destructive actions, Drive/IndexedDB migrations and anything that

@@ -5810,3 +5810,58 @@ four descriptor shapes, the board-over-synopsis precedence in both directions,
 the v145 certificate fallback still intact, and ten index-article titles against
 six real ones — *Schindler's List*, *Shortlist (film)* and *The Vicar of Dibley*
 among them.
+
+## 147. Every filter is a multi-select
+
+Language, Rating and the three content axes were single selects sitting beside
+Genre, Mood and Where to watch, which are not. Same job, two idioms, and the
+single ones could each express only one thing at a time.
+
+All five are multi-selects now, and the change is not only cosmetic — each
+gained expressiveness the old control did not have:
+
+- **Language** — the options are built from the languages the library actually
+  holds, not the hardcoded Hindi/English pair. v144 made the stored label
+  truthful, so a rated Korean title now says Korean and has to be reachable.
+- **Rating** — was a `>= n` ladder ("4 stars & above"). Now exact stars, any
+  combination: 5 and 2 without 3 and 4 is expressible, and it was not before.
+- **S / V / L** — the old control was named `contentGuideMaxSetting` but
+  compared with `===`, so "S 3" meant *exactly* 3 and never "3 or less". Rather
+  than silently redefining it, the checkbox list makes the set explicit. Levels
+  within an axis are ORed, axes are ANDed. **`?` is now a selectable value** —
+  there was previously no way to ask for the titles nothing is known about.
+
+### Both shapes have to work at once
+
+Settings ride the Drive profile, so a phone still on v146 can push its scalar
+shape into a v147 device at any moment, and v147 can push arrays back. This is
+not politeness to history — it is a live two-way requirement for as long as any
+device is behind. Every reader accepts either shape (array first, scalar
+fallback) and every writer keeps the scalar mirror in step:
+
+- one language selected mirrors to that language; two or more mirror to `all`,
+  because the old scalar cannot say "Hindi or English";
+- a rating set mirrors to its lowest star, which is the closest thing a `>= n`
+  ladder can express, and a legacy `4` expands to `['4','5']` — the stars it
+  used to show;
+- a single content level mirrors to the old max; `?` or a multi-selection
+  mirrors to `any`, since neither is expressible.
+
+`loadLocalState` also stopped assigning `.value` on these controls. On a
+`multiple` select that silently selects nothing; `updateControlDeck` syncs all
+of them from state on the next render, which it already did for Genre and Mood.
+
+### Clear filters
+
+Eight filters, most of them multi-selects showing only their first row when
+closed — it is easy to leave one set and blame the recommendations. One button
+returns the view to "everything", names the count (`Clear 3 filters`), and stays
+hidden while there is nothing to clear so it never reads as a pending action. It
+drops `scoredMovieCache` along with the platform selection, which is the one
+filter baked into the score.
+
+Verified by throwaway probe, not a stored assertion: 23 checks covering each
+matcher on both storage shapes, the legacy ladder expansion, `?` matching only
+no-evidence titles, OR-within-axis and AND-across-axes, all four scalar mirrors,
+the clear button's count, and a full DOM round trip — select an option, dispatch
+`change`, read state, re-sync the control.

@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 146;
+const APP_VERSION = 147;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -935,7 +935,7 @@ let state = {
   tagWeights: {},
   genreWeights: {},
   moodWeights: {},
-  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', genreFilters:[], genreMatchMode:'or', moodFilters:[], ratingFilter:'all', contentMaxSex:'any', contentMaxViolence:'any', contentMaxLanguage:'any', sortMode:'recommended', sortDirection:'desc', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, formatPreference:DEFAULT_FORMAT_PREFERENCE, tmdbBackfillPaused:false },
+  settings: { topN: 10, minYear: 1970, languageFilter: 'all', genreFilter: 'all', genreFilters:[], genreMatchMode:'or', moodFilters:[], languageFilters:[], ratingFilter:'all', ratingFilters:[], contentMaxSex:'any', contentMaxViolence:'any', contentMaxLanguage:'any', contentLevelsSex:[], contentLevelsViolence:[], contentLevelsLanguage:[], sortMode:'recommended', sortDirection:'desc', shuffleSeed:Date.now(), titleSearch:'', controlDeckCollapsed:false, tagDeleteMode:false, tagPreferences:{}, formatPreference:DEFAULT_FORMAT_PREFERENCE, tmdbBackfillPaused:false },
   drive: { connected: false, accessToken: '', folderId: '', fileId: '', manifestFileId:'', enabled: false, lastConnectedAt: 0 },
   hiddenTitles: {},
   wrongPicks: {},
@@ -2963,6 +2963,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   window.addEventListener('resize', onResizeEvent);
   renderAppVersion();
   renderWatchPlatformOptions();
+  renderLanguageFilterOptions();
   loadLocalState();
   applyCardSize();
   await loadIndexedDbState();
@@ -8063,10 +8064,7 @@ function updateControlDeck() {
   if (genreMatchMode) genreMatchMode.value=state.settings.genreMatchMode || 'or';
   const formatPreference=document.getElementById('formatPreference');
   if (formatPreference) formatPreference.value=formatPreferenceKey();
-  const languageFilter=document.getElementById('languageFilter');
-  if (languageFilter && languageFilter.value !== (state.settings.languageFilter || 'all')) languageFilter.value=state.settings.languageFilter || 'all';
-  const ratingFilter=document.getElementById('ratingFilter');
-  if (ratingFilter && ratingFilter.value !== (state.settings.ratingFilter || 'all')) ratingFilter.value=state.settings.ratingFilter || 'all';
+  renderLanguageFilterOptions();
   CONTENT_GUIDE_AXES.forEach(axis => {
     const key=`contentMax${axis[0].toUpperCase()}${axis.slice(1)}`;
     const control=document.getElementById(`${axis}ContentMax`);
@@ -8105,6 +8103,23 @@ function updateControlDeck() {
     const selected = new Set(selectedWatchPlatforms());
     [...watchPlatformFilter.options].forEach(option => { option.selected = selected.has(option.value); });
   }
+  const ratingFilterControl=document.getElementById('ratingFilter');
+  if (ratingFilterControl) {
+    const selected = new Set(selectedRatingFilters());
+    [...ratingFilterControl.options].forEach(option => { option.selected = selected.has(option.value); });
+  }
+  CONTENT_GUIDE_AXES.forEach(axis => {
+    const control=document.getElementById(`${axis}ContentMax`);
+    if (!control) return;
+    const selected = new Set(selectedContentLevels(axis));
+    [...control.options].forEach(option => { option.selected = selected.has(option.value); });
+  });
+  const clearFiltersBtn=document.getElementById('clearFiltersBtn');
+  if (clearFiltersBtn) {
+    const active = activeFilterCount();
+    clearFiltersBtn.hidden = !active;
+    clearFiltersBtn.textContent = `Clear ${active} filter${active === 1 ? '' : 's'}`;
+  }
   updateLibraryHealth();
 }
 
@@ -8139,9 +8154,9 @@ function scrollViewToTop() {
   }
 }
 
-function updateLanguageFilter(language) {
-  state.settings.languageFilter = language || 'all';
-  applyViewChange();
+function updateLanguageFilter() {
+  const control = document.getElementById('languageFilter');
+  setLanguageFilters(control ? [...control.selectedOptions].map(option => option.value) : []);
 }
 
 function selectedGenreFilters() {
@@ -8248,9 +8263,44 @@ function updateWatchPlatformFilter() {
   setWatchPlatforms(control ? [...control.selectedOptions].map(option => option.value) : []);
 }
 
-function updateRatingFilter(rating) {
-  state.settings.ratingFilter = String(rating || 'all');
+// Eight filters, most of them multi-selects that show only their first line
+// when closed: it is easy to leave one set and blame the recommendations. One
+// control returns the view to "everything", and it stays hidden while there is
+// nothing to clear so it never reads as an action waiting to be taken.
+function activeFilterCount() {
+  return selectedLanguageFilters().length
+    + selectedGenreFilters().length
+    + selectedMoodFilters().length
+    + selectedRatingFilters().length
+    + selectedWatchPlatforms().length
+    + CONTENT_GUIDE_AXES.reduce((sum, axis) => sum + selectedContentLevels(axis).length, 0)
+    + (titleSearchNeedle() ? 1 : 0);
+}
+
+function clearAllFilters() {
+  state.settings.languageFilters = [];
+  state.settings.languageFilter = 'all';
+  state.settings.genreFilters = [];
+  state.settings.genreFilter = 'all';
+  state.settings.moodFilters = [];
+  state.settings.ratingFilters = [];
+  state.settings.ratingFilter = 'all';
+  state.settings.watchPlatforms = [];
+  CONTENT_GUIDE_AXES.forEach(axis => {
+    state.settings[contentLevelSettingKey(axis)] = [];
+    state.settings[legacyContentMaxKey(axis)] = 'any';
+  });
+  state.settings.titleSearch = '';
+  // The platform selection is the one filter baked into the score, so its
+  // cache has to go with it (see setWatchPlatforms).
+  scoredMovieCache = null;
   applyViewChange();
+  showToast('Filters cleared');
+}
+
+function updateRatingFilter() {
+  const control = document.getElementById('ratingFilter');
+  setRatingFilters(control ? [...control.selectedOptions].map(option => option.value) : []);
 }
 
 // v95: a genre chip now behaves EXACTLY like a tag chip — it opens the panel
@@ -8378,9 +8428,50 @@ function discoveryPool() {
   return Object.values(state.movies).filter(m => m.rating===0 && !m.skipped && !m.watchlist && matchesTab(m) && matchesGlobalFilters(m) && recommendableTitle(m));
 }
 
+// v147: Language, Rating and the three content axes became multi-selects, so
+// each reads a LIST now. Every one of these readers still accepts the old
+// scalar, and every writer keeps the old scalar in step. That is not
+// politeness to history: settings ride the Drive profile, so a phone still on
+// v146 can push its scalar shape into this device at any moment, and a device
+// on v147 can push arrays back. Both shapes have to keep working
+// simultaneously, in both directions, for as long as any device is behind.
+function selectedLanguageFilters() {
+  const stored = Array.isArray(state.settings?.languageFilters) ? state.settings.languageFilters : [];
+  const clean = [...new Set(stored.map(value => String(value || '').trim()).filter(Boolean))];
+  if (clean.length) return clean;
+  const legacy = String(state.settings?.languageFilter || 'all').trim();
+  return legacy && legacy !== 'all' ? [legacy] : [];
+}
+
+function setLanguageFilters(languages) {
+  const clean = [...new Set((languages || []).map(value => String(value || '').trim()).filter(Boolean))];
+  state.settings.languageFilters = clean;
+  state.settings.languageFilter = clean.length === 1 ? clean[0] : 'all';
+  applyViewChange();
+}
+
 function matchesLanguageFilter(movie) {
-  const filter = state.settings.languageFilter || 'all';
-  return filter === 'all' || movie.language === filter;
+  const filters = selectedLanguageFilters();
+  return !filters.length || filters.includes(movie?.language);
+}
+
+// The options are the languages the library actually holds, not a hardcoded
+// pair. English and Hindi are always offered because they are what the
+// pipeline collects, but v144 made the stored label truthful, so a rated
+// Korean title now says Korean and has to be reachable.
+function renderLanguageFilterOptions() {
+  const control = document.getElementById('languageFilter');
+  if (!control) return;
+  const present = new Set(['English', 'Hindi']);
+  Object.values(state.movies || {}).forEach(movie => {
+    const language = String(movie?.language || '').trim();
+    if (language) present.add(language);
+  });
+  const ordered = ['English', 'Hindi', ...[...present].filter(name => name !== 'English' && name !== 'Hindi').sort()];
+  const selected = new Set(selectedLanguageFilters());
+  control.innerHTML = ordered
+    .map(name => `<option value="${attrSafe(name)}"${selected.has(name) ? ' selected' : ''}>${attrSafe(name)}</option>`)
+    .join('');
 }
 
 function matchesGenreFilter(movie) {
@@ -8423,12 +8514,36 @@ function matchesMoodFilter(movie) {
   return filters.some(filter => moods.includes(filter));
 }
 
+const RATING_FILTER_VALUES = ['unrated', '1', '2', '3', '4', '5'];
+
+function selectedRatingFilters() {
+  const stored = Array.isArray(state.settings?.ratingFilters) ? state.settings.ratingFilters : [];
+  const clean = [...new Set(stored.map(value => String(value || '').trim()).filter(value => RATING_FILTER_VALUES.includes(value)))];
+  if (clean.length) return clean;
+  const legacy = String(state.settings?.ratingFilter || 'all').trim();
+  if (!legacy || legacy === 'all') return [];
+  if (legacy === 'unrated') return ['unrated'];
+  // The old control was a ">= n" ladder; the checkboxes are exact stars, so a
+  // legacy "4" means the two values it used to show.
+  const floor = Number(legacy);
+  return Number.isFinite(floor) ? RATING_FILTER_VALUES.filter(value => value !== 'unrated' && Number(value) >= floor) : [];
+}
+
+function setRatingFilters(ratings) {
+  const clean = [...new Set((ratings || []).map(value => String(value || '').trim()).filter(value => RATING_FILTER_VALUES.includes(value)))];
+  state.settings.ratingFilters = clean;
+  // The scalar an older device reads is the closest thing its ">= n" ladder can
+  // express: the lowest star picked. Never 'unrated' unless that is all there is.
+  const stars = clean.filter(value => value !== 'unrated').map(Number);
+  state.settings.ratingFilter = stars.length ? String(Math.min(...stars)) : (clean.length ? 'unrated' : 'all');
+  applyViewChange();
+}
+
 function matchesRatingFilter(movie) {
-  const filter = String(state.settings.ratingFilter || 'all');
-  if (filter === 'all') return true;
+  const filters = selectedRatingFilters();
+  if (!filters.length) return true;
   const rating = Number(movie?.rating || 0);
-  if (filter === 'unrated') return rating === 0;
-  return rating >= Number(filter);
+  return filters.includes(rating > 0 ? String(rating) : 'unrated');
 }
 
 // v142: WHERE TO WATCH IS A FILTER, NOT A BADGE.
@@ -8747,30 +8862,55 @@ function contentGuideForMovieUncached(movie) {
   return guide;
 }
 
-function contentGuideMaxSetting(axis) {
-  const key=`contentMax${axis[0].toUpperCase()}${axis.slice(1)}`;
-  const value=String(state.settings?.[key] ?? 'any');
-  return value === 'any' ? null : Math.max(0,Math.min(5,Number(value)));
+const CONTENT_LEVEL_VALUES = ['unknown', '0', '1', '2', '3', '4', '5'];
+
+function contentLevelSettingKey(axis) {
+  return `contentLevels${axis[0].toUpperCase()}${axis.slice(1)}`;
+}
+
+function legacyContentMaxKey(axis) {
+  return `contentMax${axis[0].toUpperCase()}${axis.slice(1)}`;
+}
+
+// The old control was one value per axis, matched with === despite being named
+// "max" - so "S 3" meant exactly 3, never "3 or less". The checkbox list makes
+// that explicit rather than fixing it silently: pick the levels you want. "?"
+// is now a selectable value, which the old control could not express at all -
+// there was no way to ask for the titles nothing is known about.
+function selectedContentLevels(axis) {
+  const stored = state.settings?.[contentLevelSettingKey(axis)];
+  const clean = Array.isArray(stored)
+    ? [...new Set(stored.map(value => String(value || '').trim()).filter(value => CONTENT_LEVEL_VALUES.includes(value)))]
+    : [];
+  if (clean.length) return clean;
+  const legacy = String(state.settings?.[legacyContentMaxKey(axis)] ?? 'any').trim();
+  return legacy && legacy !== 'any' && CONTENT_LEVEL_VALUES.includes(legacy) ? [legacy] : [];
+}
+
+function setContentLevels(axis, levels) {
+  const clean = [...new Set((levels || []).map(value => String(value || '').trim()).filter(value => CONTENT_LEVEL_VALUES.includes(value)))];
+  state.settings[contentLevelSettingKey(axis)] = clean;
+  state.settings[legacyContentMaxKey(axis)] = clean.length === 1 && clean[0] !== 'unknown' ? clean[0] : 'any';
+  applyViewChange();
 }
 
 function contentGuideFilterActive() {
-  return CONTENT_GUIDE_AXES.some(axis => contentGuideMaxSetting(axis) != null);
+  return CONTENT_GUIDE_AXES.some(axis => selectedContentLevels(axis).length > 0);
 }
 
 function matchesContentGuideFilter(movie) {
-  if (!contentGuideFilterActive()) return true;
-  const guide=contentGuideForMovie(movie);
-  return CONTENT_GUIDE_AXES.every(axis => {
-    const selectedLevel=contentGuideMaxSetting(axis);
-    return selectedLevel == null || guide[axis] === selectedLevel;
-  });
+  const active = CONTENT_GUIDE_AXES.map(axis => [axis, selectedContentLevels(axis)]).filter(([, levels]) => levels.length);
+  if (!active.length) return true;
+  const guide = contentGuideForMovie(movie);
+  // Axes are ANDed (each one you constrain must hold), levels within an axis
+  // are ORed - the same shape as the genre control's OR mode.
+  return active.every(([axis, levels]) => levels.includes(guide[axis] == null ? 'unknown' : String(guide[axis])));
 }
 
-function updateContentGuideFilter(axis, value) {
+function updateContentGuideFilter(axis) {
   if (!CONTENT_GUIDE_AXES.includes(axis)) return;
-  const key=`contentMax${axis[0].toUpperCase()}${axis.slice(1)}`;
-  state.settings[key]=value === 'any' ? 'any' : String(Math.max(0,Math.min(5,Number(value))));
-  applyViewChange();
+  const control = document.getElementById(`${axis}ContentMax`);
+  setContentLevels(axis, control ? [...control.selectedOptions].map(option => option.value) : []);
 }
 
 function titleSearchNeedle(value=state.settings.titleSearch) {
@@ -12638,7 +12778,7 @@ function saveLocalState(opts={}) {
   try {
     localStorage.setItem('cinelens_v2_bootstrap',JSON.stringify({
       schema:'cinelens-local-v3',
-      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,genreFilter:state.settings?.genreFilter,genreFilters:state.settings?.genreFilters,genreMatchMode:state.settings?.genreMatchMode,moodFilters:state.settings?.moodFilters,ratingFilter:state.settings?.ratingFilter,contentMaxSex:state.settings?.contentMaxSex,contentMaxViolence:state.settings?.contentMaxViolence,contentMaxLanguage:state.settings?.contentMaxLanguage,sortMode:state.settings?.sortMode,sortDirection:state.settings?.sortDirection,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
+      settings:{minYear:state.settings?.minYear,languageFilter:state.settings?.languageFilter,languageFilters:state.settings?.languageFilters,genreFilter:state.settings?.genreFilter,genreFilters:state.settings?.genreFilters,genreMatchMode:state.settings?.genreMatchMode,moodFilters:state.settings?.moodFilters,ratingFilter:state.settings?.ratingFilter,ratingFilters:state.settings?.ratingFilters,contentMaxSex:state.settings?.contentMaxSex,contentMaxViolence:state.settings?.contentMaxViolence,contentMaxLanguage:state.settings?.contentMaxLanguage,contentLevelsSex:state.settings?.contentLevelsSex,contentLevelsViolence:state.settings?.contentLevelsViolence,contentLevelsLanguage:state.settings?.contentLevelsLanguage,sortMode:state.settings?.sortMode,sortDirection:state.settings?.sortDirection,titleSearch:state.settings?.titleSearch,topN:state.settings?.topN},
       drive:{enabled:state.drive.enabled,folderId:state.drive.folderId,fileId:state.drive.fileId,manifestFileId:state.drive.manifestFileId||'',lastConnectedAt:state.drive.lastConnectedAt},
       updatedAt:state.meta?.updatedAt || nowStamp()
     }));
@@ -12682,11 +12822,10 @@ function loadLocalState() {
       }
       state.drive.accessToken=getStoredDriveToken()||'';
       document.getElementById('minYear').value=state.settings.minYear;
-      document.getElementById('languageFilter').value=state.settings.languageFilter||'all';
-      // The genre multiselect toggle/label is synced by updateControlDeck() on
-      // the next render — nothing to set on a plain <select> here anymore.
-      const ratingFilter=document.getElementById('ratingFilter');
-      if (ratingFilter) ratingFilter.value=state.settings.ratingFilter||'all';
+      // Language, genre, mood, rating, content level and platform are all
+      // multi-selects now, and updateControlDeck() syncs every one of them from
+      // state on the next render. Setting .value on a multiple <select> here
+      // silently selected nothing.
       const sortMode=document.getElementById('sortMode');
       if (sortMode) sortMode.value=state.settings.sortMode||'recommended';
       const titleSearch=document.getElementById('titleSearch');
