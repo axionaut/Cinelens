@@ -5600,3 +5600,79 @@ rather than left as an unused second path. The filter semantics from section 142
 are untouched: country-blind availability, the 0.15-star India rank bonus,
 unanswered TMDB records kept, rated titles never hidden. `setWatchPlatforms`
 still drops `scoredMovieCache`, since the bonus is computed inside `scoreMovies`.
+
+## 144. Audio language, and the cost of not knowing
+
+Three things, all one question: is a recommended title actually watchable?
+
+### The audio language of a title
+
+**What is not obtainable.** TMDB's watch-provider payload carries no audio-track
+data — provider name, logo, link and offer type is the whole of it. JustWatch,
+the source behind it, does track audio and subtitle languages per offer, but
+TMDB does not expose that and JustWatch has no free public API. So "is this
+offered with English audio on Prime in the Netherlands" cannot be answered from
+our upstreams, and nothing here pretends to answer it.
+
+**What is obtainable, and was being thrown away.** The details response
+CineLens already fetches carries `original_language` (the language the title was
+*made* in — never a dub, by definition) and `spoken_languages` (every language
+heard in it). `TMDB_DATA_VERSION` goes to 9 to read them, which refetches the
+library through the existing backfill.
+
+**The rule (owner, 2026-09-06):** every entry in `spoken_languages` must be
+English or Hindi. Not "mostly", not "the original one". Past Lives is an
+English-language film by `original_language` and is still excluded, because half
+its dialogue is Korean. Subtitles are irrelevant to the test in both directions.
+The cost was stated and accepted: an English film with one subtitled scene in
+another language is excluded too, because TMDB gives no proportions to threshold
+on — only the list. `matchesSpokenLanguageRule` joins the
+`matchesGlobalFilters` chain and, like the platform filter, spares rated titles.
+
+**A defect this exposed.** `language` was derived as
+`original_language === 'hi' ? 'Hindi' : 'English'` — so *every* non-Hindi title
+called itself English. A Korean or Spanish film entered the library labelled
+English, invisible to the Language filter, with a card header stating something
+plainly untrue. `languageNameFromCode` now resolves the real name from a
+39-language table, falling back to the uppercased code, which is at least not a
+claim.
+
+### An unchecked title may not outrank a checked one
+
+Section 142 kept titles TMDB has not answered for, on the grounds that absence
+of data is not evidence of absence. True, but they were then free to sit at the
+top of the recommendations — waved through by both filters precisely because
+nothing was known about them, above titles that had actually been checked.
+
+`tmdbDataComplete` is now a hard tier in the `scoreMovies` comparator, directly
+below the tag-floor tier and *above* `rankScore`. "Must not be above" is an
+ordering claim, not a nudge, so it is not a score penalty that a strong match
+could outweigh. The tier empties itself as the TMDB backfill works through the
+library, and while the whole library is stale — as it is immediately after this
+release — every title is in the same tier and the rule is inert rather than
+wrong.
+
+### Add-on channels are not the subscription
+
+TMDB lists add-on channels under `flatrate` exactly like the parent service:
+"Lionsgate Play Amazon Channel", "MGM Plus Amazon Channel", "Paramount+ Apple TV
+Channel". A title sold through one was reported as "on Amazon Prime Video", and
+what waits on opening it is a second paywall. Worse, the pattern list resolved
+"Apple TV Plus Amazon Channel" to Apple TV+ — naming a service the title is not
+on at all.
+
+`OTT_ADDON_CHANNEL_PATTERN` drops them in `matchOttPlatform`, before canonical
+matching, so they never enter `watchAvailability`. TMDB's naming is consistent
+("<Brand> Amazon Channel", "<Brand> Apple TV Channel", "<Brand> Roku Premium
+Channel"), and the brand word is part of the test — matching the storefront word
+alone would take Channel 4 with it. Ad-supported tiers of a real subscription
+("Amazon Prime Video with Ads") are not add-ons and still match.
+
+Verified by throwaway probe, not a stored assertion: the language rule and its
+rated-title exemption, the code-to-name table, all four add-on shapes against
+four real provider names, and the ranking tier — the last one falsified by
+removing the tier line, which flipped the order. The probe's first form was
+vacuous twice over: it asserted the order of titles named "checked" and
+"unchecked", which the alphabetical final tiebreak produced on its own, and its
+first fixture scored nothing at all because every rated title carried a 5, so
+the baseline was 5 and no candidate could beat it.

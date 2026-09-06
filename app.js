@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 143;
+const APP_VERSION = 144;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -728,7 +728,9 @@ const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // the fixed matcher below. Records matched by the old popularity fallback are
 // carrying the wrong poster, genres, reception and review text, and only a
 // re-search can find that out.
-const TMDB_DATA_VERSION = 8;
+// Bumped to 9 in v144 to read original_language and spoken_languages, which the
+// details response has always carried and CineLens has always thrown away.
+const TMDB_DATA_VERSION = 9;
 // Minimum title similarity (see tmdbTitleSimilarity) for a TMDB search result
 // to be accepted as the same title. Unrelated results sharing one common word
 // score 0.5, so this rejects them while tolerating subtitle and punctuation
@@ -783,6 +785,32 @@ function ottSearchUrl(platform, title) {
   const template = OTT_PLATFORM_SEARCH_URLS[platform];
   if (!template || !title) return '';
   return template.replace('%s', encodeURIComponent(title));
+}
+
+// ISO 639-1 -> English name. TMDB reports every language as a bare code, and
+// v18 read exactly one of them: anything that was not 'hi' was labelled
+// English. A Korean or Spanish title therefore entered the library calling
+// itself an English film, where the Language filter could not see it and the
+// card header stated something plainly untrue. Codes outside this table fall
+// back to the uppercased code, which is at least not a claim.
+const LANGUAGE_NAMES = {
+  ar:'Arabic', bn:'Bengali', cn:'Cantonese', cs:'Czech', da:'Danish', de:'German',
+  el:'Greek', en:'English', es:'Spanish', fa:'Persian', fi:'Finnish', fr:'French',
+  he:'Hebrew', hi:'Hindi', hu:'Hungarian', id:'Indonesian', it:'Italian', ja:'Japanese',
+  kn:'Kannada', ko:'Korean', ml:'Malayalam', mr:'Marathi', ms:'Malay', nl:'Dutch',
+  no:'Norwegian', pa:'Punjabi', pl:'Polish', pt:'Portuguese', ro:'Romanian', ru:'Russian',
+  sv:'Swedish', ta:'Tamil', te:'Telugu', th:'Thai', tl:'Tagalog', tr:'Turkish',
+  uk:'Ukrainian', ur:'Urdu', vi:'Vietnamese', yue:'Cantonese', zh:'Chinese'
+};
+function languageNameFromCode(code) {
+  const key = String(code || '').trim().toLowerCase();
+  if (!key) return '';
+  return LANGUAGE_NAMES[key] || key.toUpperCase();
+}
+function normaliseLanguageCodes(list) {
+  return [...new Set((list || [])
+    .map(entry => String(entry?.iso_639_1 || entry || '').trim().toLowerCase())
+    .filter(Boolean))].sort();
 }
 
 // ISO 3166-1 alpha-2 -> English name, for the countries TMDB/JustWatch
@@ -5162,7 +5190,7 @@ function tmdbCandidateFromResult(result, mediaType) {
     title,
     year:tmdbCandidateYear(result, type) || null,
     format:type === 'tv' ? 'series' : null,
-    language:String(result?.original_language || '') === 'hi' ? 'Hindi' : 'English',
+    language:languageNameFromCode(result?.original_language) || 'English',
     tmdbId:Number(result?.id) || 0,
     tmdbMediaType:type,
     tmdbResult:result
@@ -5754,8 +5782,23 @@ async function tmdbSearchCandidate(title, year, mediaType) {
   return {...best.item, cinelensMatchScore:best.score};
 }
 
+// v144: add-on channels are not the subscription. TMDB lists them under
+// flatrate exactly like the parent service - "Lionsgate Play Amazon Channel",
+// "MGM Plus Amazon Channel", "Paramount+ Apple TV Channel" - so a title sold
+// through one used to be reported as "on Amazon Prime Video", and the answer
+// on opening it is a second paywall. Worse, the pattern list would resolve
+// "Apple TV Plus Amazon Channel" to Apple TV+, naming a service that is not
+// where the title actually is.
+//
+// TMDB's naming for these is consistent: "<Brand> Amazon Channel",
+// "<Brand> Apple TV Channel", "<Brand> Roku Premium Channel". Matching the
+// storefront word alone would take Channel 4 with it, so the brand word has to
+// be part of the test.
+const OTT_ADDON_CHANNEL_PATTERN = /\b(?:amazon|apple tv|roku premium)\s+channel\b/i;
+
 function matchOttPlatform(providerName) {
   const name = String(providerName || '');
+  if (OTT_ADDON_CHANNEL_PATTERN.test(name)) return null;
   for (const [canonical, pattern] of OTT_PLATFORM_PATTERNS) {
     if (pattern.test(name)) return canonical;
   }
@@ -5851,6 +5894,11 @@ async function tmdbDetailsWithAvailability(id, mediaType) {
     tmdbYear: tmdbCandidateYear(data, mediaType) || null,
     voteAverage: Number.isFinite(Number(data.vote_average)) && Number(data.vote_average) > 0 ? Number(data.vote_average) : null,
     voteCount: Math.max(0, parseInt(data.vote_count, 10) || 0),
+    // v144: the audio question. original_language is the language the title was
+    // MADE in, so it can never describe a dub; spoken_languages is every
+    // language heard in it. Both ride the details response already fetched.
+    originalLanguage:String(data.original_language || '').trim().toLowerCase(),
+    spokenLanguages:normaliseLanguageCodes(data.spoken_languages),
     contentKeywords:compactTmdbContentKeywords(data.keywords),
     contentCertification:tmdbRegionalCertification(data, mediaType),
     reviewText:compactTmdbReviewText(data.reviews),
@@ -5883,6 +5931,8 @@ async function fetchTmdbDetailsById(tmdbId, mediaType) {
     reviewCount: details.reviewCount || 0,
     contentKeywords:details.contentKeywords || [],
     contentCertification:details.contentCertification || null,
+    originalLanguage:details.originalLanguage || '',
+    spokenLanguages:details.spokenLanguages || [],
     detailsFetched: true
   };
 }
@@ -5921,6 +5971,8 @@ async function fetchTmdbDetails(title, year, format) {
       reviewCount:details?.reviewCount || 0,
       contentKeywords:details?.contentKeywords || [],
       contentCertification:details?.contentCertification || null,
+      originalLanguage:details?.originalLanguage || String(candidate.original_language || '').trim().toLowerCase(),
+      spokenLanguages:details?.spokenLanguages || [],
       detailsFetched:!!details
     };
   } catch(_) {
@@ -5954,6 +6006,12 @@ function applyTmdbDetails(movie, tmdb) {
       movie.tmdbReviewCount=Math.max(0,Number(tmdb.reviewCount || 0));
       movie.contentKeywords=Array.isArray(tmdb.contentKeywords) ? tmdb.contentKeywords : [];
       movie.contentCertification=tmdb.contentCertification || null;
+      movie.originalLanguage=String(tmdb.originalLanguage || '');
+      movie.spokenLanguages=Array.isArray(tmdb.spokenLanguages) ? tmdb.spokenLanguages : [];
+      // The label follows TMDB's structured answer rather than the old
+      // "not Hindi, so English" guess. For en/hi this rewrites the same value;
+      // it only changes anything where the stored label was wrong.
+      if (movie.originalLanguage) movie.language = languageNameFromCode(movie.originalLanguage);
       movie.tmdbDataVersion = TMDB_DATA_VERSION;
     }
     if (tmdb.voteAverage != null) applyTmdbReceptionSignal(movie, {voteAverage:tmdb.voteAverage, voteCount:tmdb.voteCount});
@@ -8242,7 +8300,7 @@ function matchesGlobalFilters(movie) {
   // when the search text is a pasted Wikipedia URL that cannot match its title.
   // It remains pinned until that same card is rated, which clears the search.
   if (isPendingManualSearchResult(movie)) return true;
-  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesMoodFilter(movie) && matchesRatingFilter(movie) && matchesContentGuideFilter(movie) && matchesWatchPlatformFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
+  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesMoodFilter(movie) && matchesRatingFilter(movie) && matchesContentGuideFilter(movie) && matchesWatchPlatformFilter(movie) && matchesSpokenLanguageRule(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
 }
 
 function discoveryPool() {
@@ -8357,6 +8415,57 @@ function matchesWatchPlatformFilter(movie) {
   if (Number(movie?.rating || 0) > 0) return true;
   if (!watchAvailabilityKnown(movie)) return true;
   return movieOnSelectedPlatforms(movie, platforms);
+}
+
+// v144: A TITLE MUST BE WATCHABLE IN A LANGUAGE NITIN UNDERSTANDS.
+// Availability answered "can I reach it"; this answers "can I follow it".
+// TMDB's watch-provider payload carries no audio-track data at all (provider
+// name, logo, link and offer type is the whole of it), and JustWatch, which
+// does track audio per offer, has no free API - so a per-platform audio answer
+// is not obtainable. What IS obtainable rides the details response already
+// fetched: spoken_languages, every language heard in the title.
+//
+// The rule Nitin chose (2026-09-06): EVERY spoken language must be English or
+// Hindi. Not "mostly", not "the original one" - Past Lives is an
+// English-language film by original_language and is still excluded, because
+// half its dialogue is Korean. Dubs cannot sneak in either: spoken_languages
+// describes the work, not a distributor's audio track. Subtitles are
+// irrelevant to the test in either direction.
+//
+// The cost is deliberate and was accepted: an English film with one subtitled
+// scene in another language is excluded too, because TMDB gives no proportions
+// to threshold on - only the list.
+const ALLOWED_SPOKEN_LANGUAGE_CODES = new Set(['en', 'hi']);
+
+function spokenLanguageCodes(movie) {
+  return Array.isArray(movie?.spokenLanguages) ? movie.spokenLanguages : [];
+}
+
+// Same discipline as the platform filter: rated titles keep their place (the
+// history is the taste model's only input), and a record TMDB has not answered
+// for is kept rather than guessed at - it ranks below every answered one
+// instead, via tmdbDataComplete.
+function matchesSpokenLanguageRule(movie) {
+  if (Number(movie?.rating || 0) > 0) return true;
+  const spoken = spokenLanguageCodes(movie);
+  if (!spoken.length) {
+    // No spoken_languages yet. original_language is the weaker but still real
+    // answer where it exists, and it is what the record already had.
+    const original = String(movie?.originalLanguage || '').trim().toLowerCase();
+    return !original || ALLOWED_SPOKEN_LANGUAGE_CODES.has(original);
+  }
+  return spoken.every(code => ALLOWED_SPOKEN_LANGUAGE_CODES.has(code));
+}
+
+// v144: "either make sure top recommendations have availability information, or
+// they must not sit above the ones that do" (owner). A record whose TMDB data
+// is not current has no availability map and no spoken_languages, so both new
+// filters wave it through on ignorance - and it would otherwise outrank titles
+// that were actually checked. It is a hard tier above rankScore rather than a
+// score penalty, because "not above" is an ordering claim, not a nudge. The
+// TMDB backfill empties this tier on its own as it works through the library.
+function tmdbDataComplete(movie) {
+  return watchAvailabilityKnown(movie);
 }
 
 // The India half of the contract: everything that survived the filter is
@@ -10529,6 +10638,9 @@ function scoreMovies() {
     // Underfilled titles rank below every title with a complete tag set, no
     // matter how well their few tags happen to fit.
     Number(tagFloorMet(b.movie)) - Number(tagFloorMet(a.movie)) ||
+    // And a title nobody has checked for availability or language ranks below
+    // every title that was checked, however well it scores.
+    Number(tmdbDataComplete(b.movie)) - Number(tmdbDataComplete(a.movie)) ||
     b.rankScore - a.rankScore ||
     b.predictedRating - a.predictedRating ||
     b.positiveScore - a.positiveScore ||
@@ -10697,6 +10809,8 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
     contentCertification:normalisedFresh.contentCertification || previous.contentCertification || null,
     tmdbTitle:normalisedFresh.tmdbTitle || previous.tmdbTitle || '',
     tmdbYear:normalisedFresh.tmdbYear || previous.tmdbYear || null,
+    originalLanguage:normalisedFresh.originalLanguage || previous.originalLanguage || '',
+    spokenLanguages:(normalisedFresh.spokenLanguages?.length ? normalisedFresh.spokenLanguages : previous.spokenLanguages) || [],
     tmdbIdVerified:!!(normalisedFresh.tmdbIdVerified || previous.tmdbIdVerified)
   } : {
     // Identity changed: take only what the fresh article brought, and let the
