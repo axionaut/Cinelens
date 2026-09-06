@@ -160,6 +160,14 @@
       <select class="platform-select" id="violenceContentMax" onchange="updateContentGuideFilter('violence',this.value)" aria-label="Violence level"><option value="any">V any</option><option value="0">V 0</option><option value="1">V 1</option><option value="2">V 2</option><option value="3">V 3</option><option value="4">V 4</option><option value="5">V 5</option></select>
       <select class="platform-select" id="languageContentMax" onchange="updateContentGuideFilter('language',this.value)" aria-label="Language level"><option value="any">L any</option><option value="0">L 0</option><option value="1">L 1</option><option value="2">L 2</option><option value="3">L 3</option><option value="4">L 4</option><option value="5">L 5</option></select>
     </div>
+    <label>Where to watch</label>
+    <details class="watch-platform-picker" id="watchPlatformPicker">
+      <summary id="watchPlatformSummary" title="Filter recommendations to titles you can actually stream">Any platform</summary>
+      <div class="watch-platform-panel">
+        <div class="watch-platform-row" id="watchPlatformRow"></div>
+        <p class="watch-platform-note">Recommendations are limited to unrated titles streaming on these platforms in any country — India availability just ranks higher. Titles TMDB has not answered for yet are kept.</p>
+      </div>
+    </details>
     <label>Sort</label>
     <div class="sort-control">
      <select class="platform-select" id="sortMode" onchange="updateSortMode(this.value)">
@@ -192,10 +200,6 @@
       <button class="platform-btn" id="tmdbBackfillToggleBtn" onclick="toggleTmdbBackfillPaused()">Pause TMDB refresh</button>
       <button class="platform-btn" onclick="exportSeedCatalogue()">Export seed catalogue</button>
     </div>
-    <details class="watch-platform-picker">
-      <summary>Where to watch — pick platforms</summary>
-      <div class="watch-platform-row" id="watchPlatformRow"></div>
-    </details>
     <details class="maintenance-danger">
       <summary>Danger zone</summary>
       <p>Reset erases the local library and the connected Drive copy. You must type RESET to continue.</p>

@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 141;
+const APP_VERSION = 142;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -2916,7 +2916,11 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
 function renderWatchPlatformPicker() {
   const row = document.getElementById('watchPlatformRow');
   if (!row) return;
-  row.innerHTML = OTT_PLATFORM_NAMES.map(name => {
+  // "Any platform" is a chip rather than a Clear button because it is the
+  // filter's off state, not an action: it lights up when nothing is picked,
+  // exactly like every other chip that is currently in force.
+  const anyChip = `<button type="button" class="watch-platform-chip watch-platform-any" data-platform="" onclick="clearWatchPlatforms(event)" title="Do not filter recommendations by platform">Any platform</button>`;
+  row.innerHTML = anyChip + OTT_PLATFORM_NAMES.map(name => {
     const safe = attrSafe(name);
     return `<button type="button" class="watch-platform-chip" data-platform="${safe}" onclick="toggleWatchPlatform('${safe}',event)">${safe}</button>`;
   }).join('');
@@ -7965,10 +7969,25 @@ function updateControlDeck() {
   if (deck) deck.classList.toggle('collapsed', !!state.settings.controlDeckCollapsed);
   const toggle=document.getElementById('controlToggle');
   if (toggle) toggle.textContent = state.settings.controlDeckCollapsed ? 'Show filters & tools' : 'Hide filters & tools';
-  const selectedPlatforms = new Set(state.settings.watchPlatforms || []);
+  const platformList = selectedWatchPlatforms();
+  const selectedPlatforms = new Set(platformList);
   document.querySelectorAll('.watch-platform-chip').forEach(chip => {
-    chip.classList.toggle('active', selectedPlatforms.has(chip.dataset.platform));
+    chip.classList.toggle('active', chip.classList.contains('watch-platform-any')
+      ? !platformList.length
+      : selectedPlatforms.has(chip.dataset.platform));
   });
+  const platformSummary = document.getElementById('watchPlatformSummary');
+  if (platformSummary) {
+    // The picker is collapsed by default, so the summary is the only place an
+    // active platform filter is visible. A filter you cannot see is a filter
+    // you blame the recommendations for.
+    platformSummary.textContent = !platformList.length
+      ? 'Any platform'
+      : platformList.length <= 2 ? platformList.join(' + ') : `${platformList[0]} +${platformList.length - 1}`;
+    platformSummary.classList.toggle('active', platformList.length > 0);
+  }
+  const platformPicker = document.getElementById('watchPlatformPicker');
+  if (platformPicker) platformPicker.classList.toggle('filtering', platformList.length > 0);
   updateLibraryHealth();
 }
 
@@ -8088,20 +8107,38 @@ function applyCardSize() {
   document.documentElement.style.setProperty('--card-min-width', next);
 }
 
-// Which platforms to check availability for is a personal viewing-service
-// preference, not a recommendation filter — it only changes what the
-// watch-availability row on a card shows, never which titles are recommended
-// or how they are scored. Persisted like any other view setting (v9 sync
-// discipline): local-only, rides along passively with the next real sync.
+// v142: this is a recommendation filter, not a display preference. Selecting
+// platforms decides which unrated titles are recommended at all, and India
+// availability among them earns a rank bonus. Persisted like any other view
+// setting (v9 sync discipline): local-only, rides along passively with the
+// next real sync.
+//
+// The rank bonus is applied inside scoreMovies, so unlike every other filter -
+// which runs over the already-scored list - a platform change has to drop the
+// scored cache or the new ordering would not appear until something else
+// invalidated it.
+function applyWatchPlatformChange() {
+  scoredMovieCache = null;
+  // The chips sit in the filter bar and are tapped in runs of two or three.
+  // Yanking the page to the top would pull the next chip out from under the
+  // finger that is still tapping.
+  applyViewChange({scrollToTop:false});
+}
+
 function toggleWatchPlatform(platform, event) {
   if (event) event.stopPropagation();
   if (!OTT_PLATFORM_NAMES.includes(platform)) return;
-  const selected = new Set(state.settings.watchPlatforms || []);
+  const selected = new Set(selectedWatchPlatforms());
   if (selected.has(platform)) selected.delete(platform); else selected.add(platform);
   state.settings.watchPlatforms = [...selected];
-  // A platform chip lives inside the maintenance panel, so yanking the page to
-  // the top would pull the chip the user is still tapping out from under them.
-  applyViewChange({scrollToTop:false});
+  applyWatchPlatformChange();
+}
+
+function clearWatchPlatforms(event) {
+  if (event) event.stopPropagation();
+  if (!selectedWatchPlatforms().length) return;
+  state.settings.watchPlatforms = [];
+  applyWatchPlatformChange();
 }
 
 function updateRatingFilter(rating) {
@@ -8227,7 +8264,7 @@ function matchesGlobalFilters(movie) {
   // when the search text is a pasted Wikipedia URL that cannot match its title.
   // It remains pinned until that same card is rated, which clears the search.
   if (isPendingManualSearchResult(movie)) return true;
-  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesMoodFilter(movie) && matchesRatingFilter(movie) && matchesContentGuideFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
+  return matchesLanguageFilter(movie) && matchesGenreFilter(movie) && matchesMoodFilter(movie) && matchesRatingFilter(movie) && matchesContentGuideFilter(movie) && matchesWatchPlatformFilter(movie) && matchesTitleSearch(movie) && meetsYearCutoff(movie);
 }
 
 function discoveryPool() {
@@ -8285,6 +8322,71 @@ function matchesRatingFilter(movie) {
   const rating = Number(movie?.rating || 0);
   if (filter === 'unrated') return rating === 0;
   return rating >= Number(filter);
+}
+
+// v142: WHERE TO WATCH IS A FILTER, NOT A BADGE.
+// Picking platforms used to change only what the "Available on" row printed on
+// a card, so the recommendations themselves still filled with titles Nitin has
+// no way to watch. The selection is now a real discovery filter, and it lives
+// in the filter bar instead of three levels down inside Library maintenance.
+//
+// Country is deliberately not part of the test. A VPN reaches any region, so
+// "on Netflix somewhere" counts as available. India is not ignored either - it
+// is the one region that needs no VPN, so it earns a rank bonus
+// (watchPlatformRankBonus) rather than a gate.
+const WATCH_HOME_COUNTRY = 'IN';
+// In stars, the same scale as predictedRating and the top-ten tenure bonus
+// (max 0.3). Enough to lift a home-region title past an equally good one that
+// needs a VPN; never enough to outrank a genuinely better match.
+const WATCH_HOME_RANK_BONUS = 0.15;
+
+function selectedWatchPlatforms() {
+  // Never trust the stored shape: settings are merged back raw from the Drive
+  // and IndexedDB profile, so a non-array here must not throw out of a filter
+  // that now runs on every card (see selectedMoodFilters).
+  const stored = Array.isArray(state.settings?.watchPlatforms) ? state.settings.watchPlatforms : [];
+  return [...new Set(stored.filter(name => OTT_PLATFORM_NAMES.includes(name)))];
+}
+
+// A title only counts as "not on my platforms" once TMDB has actually answered
+// for it at the current data version. A record still queued for its TMDB
+// backfill carries no availability map at all, and absence of data is not
+// evidence of absence - filtering those out would empty the library mid-backfill
+// and make the filter look broken.
+function watchAvailabilityKnown(movie) {
+  return !!movie?.tmdbId && Number(movie?.tmdbDataVersion || 0) >= TMDB_DATA_VERSION;
+}
+
+function movieOnSelectedPlatforms(movie, platforms = selectedWatchPlatforms()) {
+  const availability = movie?.watchAvailability;
+  if (!availability) return false;
+  return platforms.some(platform => (availability[platform] || []).length > 0);
+}
+
+function movieOnSelectedPlatformsAtHome(movie, platforms = selectedWatchPlatforms()) {
+  const availability = movie?.watchAvailability;
+  if (!availability) return false;
+  return platforms.some(platform => (availability[platform] || []).includes(WATCH_HOME_COUNTRY));
+}
+
+// Rated titles are never hidden by this filter. The rating history is the
+// record of what Nitin has watched and the only input the taste model has; it
+// must not change shape because a subscription lapsed. Only the unrated side -
+// recommendations, the pool, recently added - is filtered.
+function matchesWatchPlatformFilter(movie) {
+  const platforms = selectedWatchPlatforms();
+  if (!platforms.length) return true;
+  if (Number(movie?.rating || 0) > 0) return true;
+  if (!watchAvailabilityKnown(movie)) return true;
+  return movieOnSelectedPlatforms(movie, platforms);
+}
+
+// The India half of the contract: everything that survived the filter is
+// watchable, but the titles that need no VPN rank first among equals.
+function watchPlatformRankBonus(movie) {
+  const platforms = selectedWatchPlatforms();
+  if (!platforms.length) return 0;
+  return movieOnSelectedPlatformsAtHome(movie, platforms) ? WATCH_HOME_RANK_BONUS : 0;
 }
 
 const CONTENT_GUIDE_AXES = ['sex','violence','language'];
@@ -9696,11 +9798,14 @@ function renderContentGuide(movie) {
   return `<div class="content-guide" title="Evidence-based 0-5 advisory; ? means insufficient evidence">${certificate}<span>S ${score(guide.sex)}</span><span>V ${score(guide.violence)}</span><span>L ${score(guide.language)}</span></div>`;
 }
 
-// Availability is informational only — it is never a recommendation filter.
-// Nothing renders until the user picks at least one platform in Library
-// maintenance; then, for each selected platform the title is actually on,
-// show which countries carry it (derived once at fetch/backfill/retag time
-// from TMDB's own multi-region response, not queried live per card).
+// v142: the platform selection now filters recommendations (see
+// matchesWatchPlatformFilter), and this row is where a surviving title shows
+// its side of that decision. Nothing renders until at least one platform is
+// picked in the filter bar; then, for each selected platform the title is
+// actually on, show which countries carry it (derived once at
+// fetch/backfill/retag time from TMDB's own multi-region response, not queried
+// live per card). Countries sort nearest-first, so India leads when it is
+// there and the rest is the VPN list.
 function renderWatchProviders(movie) {
   const selected = state.settings?.watchPlatforms || [];
   if (!selected.length) return '';
@@ -10433,7 +10538,11 @@ function scoreMovies() {
       // Ordering only. predictedRating and matchScore keep describing fit, so
       // the match percentage on a card never inflates because a title is old.
       item.tenureBonus = topTenTenureBonus(item.movie);
-      item.rankScore = item.predictedRating + item.tenureBonus;
+      // Ordering only, like tenureBonus: matchScore and predictedRating still
+      // describe taste fit alone, so a card's match percentage never moves
+      // because the title happens to stream in India.
+      item.watchBonus = watchPlatformRankBonus(item.movie);
+      item.rankScore = item.predictedRating + item.tenureBonus + item.watchBonus;
       return item;
     });
 

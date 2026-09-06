@@ -5502,3 +5502,60 @@ promptless request add **zero** further popups. A simulated tap buys back
 exactly one. Separately it flips the status five times over a 60-second outage
 and asserts `driveReconnectStalled()` is still true — the assertion the v140
 code fails.
+
+## 142. Where to watch became a filter
+
+The platform picker had exactly one effect: it decided which platforms the
+"Available on" row printed on a card. The recommendations themselves were
+unchanged by it, so the list kept filling with titles Nitin has no way to
+watch, and the one control that could have said so was three levels down —
+inside Library maintenance, behind a collapsed sub-section.
+
+Both halves are fixed here.
+
+**It is a filter now.** `matchesWatchPlatformFilter` joins the
+`matchesGlobalFilters` chain, so a platform selection decides which unrated
+titles are recommended, pooled, and counted, not just how they are captioned.
+
+**Country is not part of the test.** Nitin uses a VPN, so a title streaming on
+a selected platform *anywhere* is watchable. `movieOnSelectedPlatforms` asks
+only whether the platform carries it in some region. India is not thereby
+ignored — it is the one region that needs no VPN, so it earns
+`WATCH_HOME_RANK_BONUS` (0.15 stars, the same scale as the top-ten tenure
+bonus, max 0.3) inside `scoreMovies`. Availability changes the *order* of the
+result, never the match percentage a card displays: `watchBonus` is added to
+`rankScore` alongside `tenureBonus`, and `predictedRating`/`matchScore` keep
+describing taste fit alone.
+
+**Two things the filter deliberately does not hide.**
+
+- *A title TMDB has not answered for.* `watchAvailabilityKnown` requires both a
+  `tmdbId` and `tmdbDataVersion >= TMDB_DATA_VERSION`. A record still queued
+  for its TMDB backfill has no availability map at all, and absence of data is
+  not evidence of absence. Filtering those would empty the library mid-backfill
+  and read as a broken filter rather than an incomplete one.
+- *A rated title.* The rating history is the record of what Nitin has watched
+  and the taste model's only input. It must not change shape because a
+  subscription lapsed, so the filter applies only where `rating === 0`. This is
+  keyed off the record, not the active tab, so every surface agrees.
+
+**The control moved into the filter bar**, next to Content level, as a
+collapsed `<details>` whose summary reads the selection back — "Any platform",
+"Netflix + Hulu", "Netflix +2" — and turns accent-coloured while a filter is in
+force. A filter you cannot see is a filter you blame the recommendations for.
+An explicit *Any platform* chip is the off state (lit when nothing is picked)
+rather than a Clear button, matching how every other chip in the app shows what
+is currently in force. Open, the picker takes the full row, so expanding it
+never reflows the controls beside it.
+
+One wiring note: the rank bonus is computed *inside* `scoreMovies`, unlike every
+other filter, which runs over the already-scored list. A platform change
+therefore has to drop `scoredMovieCache` (`applyWatchPlatformChange`) or the new
+ordering would not appear until something unrelated invalidated it.
+
+`dev/assert-v142.mjs` is 16/16, falsified twice — unwiring the filter reddened
+exactly the two "is filtered out" assertions, and zeroing the bonus reddened
+exactly the India one. Its first form was vacuous and the falsification is what
+caught it: the assertions called `matchesWatchPlatformFilter` directly, so
+removing it from `matchesGlobalFilters` broke the app while every assertion
+stayed green. They now go through `matchesGlobalFilters`.
