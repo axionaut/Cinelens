@@ -5676,3 +5676,66 @@ vacuous twice over: it asserted the order of titles named "checked" and
 "unchecked", which the alphabetical final tiebreak produced on its own, and its
 first fixture scored nothing at all because every rated title carried a 5, so
 the baseline was 5 and no candidate could beat it.
+
+## 145. The advisory had one source, and index articles were not titles
+
+### Why most cards read "S ? V ? L ?"
+
+The content advisory was derived entirely by keyword patterns over the title's
+own text — story, tags, TMDB keywords, review excerpts. That source can only
+speak when a plot summary happens to use one of about fifteen words, so a quiet
+drama scored `?` on violence and language. The `?` was not "nothing is known
+about this title"; it was "the one source consulted was silent". Past Lives, a
+PG-13 film with a stored certificate, read `PG-13 S 1 V ? L ?`.
+
+The certificate was already fetched, already stored, already printed on the same
+row — and used for two hardcoded lines: zero everything for `G|U|TV-Y|TV-G`, and
+violence 1 for `TV-Y7`.
+
+A certificate is a rating board's published verdict on exactly these three axes.
+That makes it *stronger* evidence than the word "gun" appearing in a synopsis,
+not weaker, so `CONTENT_CERTIFICATE_GUIDE` now gives every certificate two
+things:
+
+- **levels** — what the certificate implies for sex/violence/language when the
+  text is silent. `PG-13` → 2/3/2, `R` → 3/4/3, `U` → 0/0/0, `NC-17` → 4/5/4.
+- **ceiling** — the highest any axis may reach under that certificate, however
+  lurid the synopsis. A `U` film whose plot summary says "murder" no longer
+  scores violence 4; an `R` film keeps its 5.
+
+The table covers US (G…NC-17), CBFC (U, UA, UA 7+/13+/16+, A, S), BBFC
+(U…18, R18) and US TV (TV-Y…TV-MA). `normaliseCertificateRating` strips spaces,
+dots and slashes, so "U/A 13+" and "UA13+" are one key. `NR`/`Unrated` resolves
+to no profile — an absent verdict is not a mild one — and where neither the
+certificate nor the text speaks, `?` still stands. The tooltip now names both
+sources.
+
+### "List of The Vicar of Dibley episodes" was in the library, at 87% match
+
+An episode-list page passes every media test the parser applies, because all of
+that evidence is really about the series it indexes: it carries the series'
+categories, opens by describing the series, and its body — a long run of episode
+synopses — reads to the story extractor exactly like a plot.
+
+`isShowListPage` already existed but was written to recognise **crawl seeds**,
+and matches only `List of …television` or `…television series`. An episode list
+for one show is neither.
+
+`WIKI_INDEX_ARTICLE_PATTERN` tests the title against Wikipedia's own naming
+convention for index articles — `List(s) of`, `Index of`, `Outline of`,
+`Timeline of`, `Glossary of`, `Chronology of`, `Comparison of`, `Filmography of`,
+and `(disambiguation)` — and rejects the page immediately after the
+disambiguation check, before any parsing work. The word boundary matters:
+*Schindler's List* is not an index article.
+
+`purgeIndexArticleRecords` removes the ones already stored, at startup, through
+`excludeStoredTitles` — so the page is also blocked from being fetched again.
+This is not a conflict with "never evict titles": an index article is not a
+title that might match better after a later tagger change, it is not a title at
+all.
+
+Verified by throwaway probe, not a stored assertion: six certificate profiles
+including both CBFC and TV forms, the ceiling in both directions (a `U`
+synopsis about a massacre capped at 1, an `R` one left at 5), `NR` and
+no-certificate still returning `?`, six index-article titles against two real
+ones, and the parser returning null with the new reason string.

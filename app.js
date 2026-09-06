@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 144;
+const APP_VERSION = 145;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -2971,11 +2971,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   // catalogue instead of starting blank. Never runs for an existing library.
   await loadSeedCatalogueIfEmpty();
   const startupRemovedHindiShows = purgeDisallowedHindiShows();
+  const startupRemovedIndexArticles = purgeIndexArticleRecords();
   const startupClearedHorrorExclusions = clearConventionalHorrorExclusions();
   const startupAddedAtMigrated = ensureAddedAtMetadata();
   const startupRatedAtMigrated = ensureRatedAtMetadata();
   const startupRetiredWatchlist = retireWatchlistForRecentlyAdded();
-  if (startupRemovedHindiShows || startupClearedHorrorExclusions || startupAddedAtMigrated || startupRatedAtMigrated || startupRetiredWatchlist) saveLocalState({preserveUpdatedAt:true});
+  if (startupRemovedHindiShows || startupRemovedIndexArticles || startupClearedHorrorExclusions || startupAddedAtMigrated || startupRatedAtMigrated || startupRetiredWatchlist) saveLocalState({preserveUpdatedAt:true});
   startupInitialLibraryPresent = libraryRecordCount() > 0;
   recVisibleLimit = Math.max(REC_INFINITE_PAGE_SIZE, parseInt(state.settings.topN || 10));
   // The browser cache is the immediate, durable UI source. Drive reconciliation
@@ -3592,6 +3593,27 @@ function newestTitleFirst(titles) {
 
 function rejectKey(title, mode) { return `${mode}:${normaliseTitleKey(title)}`; }
 
+// v145: AN INDEX ARTICLE IS NOT A TITLE.
+// "List of The Vicar of Dibley episodes" reached the library as an 87%-match
+// SHOW. Every media test it passed was really evidence about the series it
+// indexes: it carries the series' categories, opens by describing the series,
+// and its body is a long run of episode synopses, which reads to the story
+// extractor exactly like a plot. isShowListPage below already existed but was
+// written to recognise CRAWL SEEDS, and only matches "List of ... television"
+// or "... television series" - which this title is not.
+//
+// Wikipedia names index articles by a fixed convention, so the title is the
+// reliable test and it costs one regex before any parsing work.
+const WIKI_INDEX_ARTICLE_PATTERN = /^(?:lists? of|index of|outline of|timeline of|glossary of|chronology of|comparison of|filmography of)\b|\(disambiguation\)$/i;
+
+function isWikiIndexArticle(title) {
+  return WIKI_INDEX_ARTICLE_PATTERN.test(String(title || '').trim());
+}
+
+function isIndexArticleRecord(movie) {
+  return isWikiIndexArticle(movie?.wikiTitle) || isWikiIndexArticle(movie?.pageTitle) || isWikiIndexArticle(movie?.title);
+}
+
 function isShowListPage(title) {
   return /^List of .*television/i.test(title)
     || /^Lists of .*television/i.test(title)
@@ -3719,6 +3741,14 @@ function excludeStoredTitles(predicate, reason) {
 
 function purgeDisallowedHindiShows() {
   return excludeStoredTitles(isHindiShowRecord, 'hindi-show-excluded');
+}
+
+// Records already stored from before the parser rejected them. They are
+// removed rather than kept, because an index article is not a title that might
+// match better later - it is not a title at all - and excludeStoredTitles
+// blocks the page from being fetched again.
+function purgeIndexArticleRecords() {
+  return excludeStoredTitles(isIndexArticleRecord, 'index-article-excluded');
 }
 
 // v96: reality/competition/talk/game/news television has no plot for the
@@ -6654,6 +6684,7 @@ function parseWikiMovieResponse(data, requestedTitle, mode='all', diagnostics=nu
   const page = Object.values(pages)[0];
   if (!page || page.missing !== undefined) return rejectWikiParse(diagnostics, 'Wikipedia page not found');
   if (page.pageprops?.disambiguation !== undefined) return rejectWikiParse(diagnostics, 'Wikipedia disambiguation page, not one title');
+  if (isWikiIndexArticle(page.title || requestedTitle)) return rejectWikiParse(diagnostics, 'index or list article, not one title');
 
   const extract = page.extract || '';
   const pageTitle = page.title || requestedTitle;
@@ -8523,6 +8554,66 @@ function contentGuideForMovie(movie) {
   return value;
 }
 
+// v145: MOST TITLES READ "?" ON MOST AXES.
+// The advisory was derived from keyword patterns over the story text alone, so
+// it could only speak when a plot summary happened to use one of about fifteen
+// words. A quiet drama scored "?" for violence and language - not because
+// nothing was known about it, but because the single source consulted was
+// silent. The certificate was already stored, already printed on the same row,
+// and used for almost nothing: a hardcoded zero for G/U and one line for TV-Y7.
+//
+// A certificate is a rating board's own published verdict on exactly these
+// three axes. That makes it stronger evidence than the appearance of the word
+// "gun" in a synopsis, not weaker, so it now does two jobs: it ANSWERS an axis
+// the text could not, and it CAPS an axis the text answered higher than the
+// certificate a censor actually issued. Where neither speaks, "?" stands - the
+// point is to stop discarding an answer we already had, not to invent one.
+//
+// levels: what the certificate implies for [sex, violence, language] when the
+// text is silent. ceiling: the highest any axis may reach with this
+// certificate, however lurid the plot summary reads.
+const CONTENT_CERTIFICATE_GUIDE = {
+  // Everyone, no gate: US G, India U, UK U, US TV.
+  G:{levels:[0,0,0], ceiling:1}, U:{levels:[0,0,0], ceiling:1},
+  'TV-Y':{levels:[0,0,0], ceiling:1}, 'TV-G':{levels:[0,0,0], ceiling:1},
+  E:{levels:[0,0,0], ceiling:1}, AL:{levels:[0,0,0], ceiling:1},
+  // Older children.
+  'TV-Y7':{levels:[0,1,0], ceiling:2}, 'UA7+':{levels:[0,1,0], ceiling:2},
+  '7':{levels:[0,1,0], ceiling:2}, '6':{levels:[0,1,0], ceiling:2},
+  // Parental guidance.
+  PG:{levels:[1,2,1], ceiling:3}, 'TV-PG':{levels:[1,2,1], ceiling:3},
+  '9':{levels:[1,2,1], ceiling:3}, '10':{levels:[1,2,1], ceiling:3},
+  // Teen.
+  'PG-13':{levels:[2,3,2], ceiling:4}, 'TV-14':{levels:[2,3,2], ceiling:4},
+  UA:{levels:[2,3,2], ceiling:4}, 'UA13+':{levels:[2,3,2], ceiling:4},
+  '12':{levels:[2,3,2], ceiling:4}, '12A':{levels:[2,3,2], ceiling:4},
+  '13':{levels:[2,3,2], ceiling:4}, '14':{levels:[2,3,2], ceiling:4},
+  // Older teen.
+  '15':{levels:[3,3,3], ceiling:5}, '16':{levels:[3,3,3], ceiling:5},
+  'UA16+':{levels:[3,3,3], ceiling:5},
+  // Adults.
+  R:{levels:[3,4,3], ceiling:5}, A:{levels:[3,4,3], ceiling:5},
+  'TV-MA':{levels:[3,4,3], ceiling:5}, '18':{levels:[3,4,3], ceiling:5},
+  'MA15+':{levels:[3,4,3], ceiling:5}, '17':{levels:[3,4,3], ceiling:5},
+  // Restricted adult.
+  'NC-17':{levels:[4,5,4], ceiling:5}, S:{levels:[4,5,4], ceiling:5},
+  X:{levels:[4,5,4], ceiling:5}, R18:{levels:[4,5,4], ceiling:5},
+  '21':{levels:[4,5,4], ceiling:5}
+};
+
+// Boards write the same rating several ways ("U/A 13+", "UA13+", "ua 13+"),
+// and TMDB passes the board's own string through untouched. NR/Unrated is an
+// absence of a verdict, not a mild one, and must not resolve to a profile.
+function normaliseCertificateRating(rating) {
+  return String(rating || '').toUpperCase().replace(/[\s./]/g, '');
+}
+
+function certificateGuideProfile(certification) {
+  const key = normaliseCertificateRating(certification?.rating);
+  if (!key) return null;
+  return CONTENT_CERTIFICATE_GUIDE[key] || null;
+}
+
 function contentGuideForMovieUncached(movie) {
   const text=contentGuideEvidenceText(movie);
   const guide={
@@ -8531,9 +8622,13 @@ function contentGuideForMovieUncached(movie) {
     language:contentGuideScore(text, CONTENT_GUIDE_PATTERNS.language),
     certification:movie?.contentCertification || null
   };
-  const rating=String(guide.certification?.rating || '').toUpperCase().replace(/\s+/g,'');
-  if (/^(?:G|U|TV-Y|TV-G)$/.test(rating)) CONTENT_GUIDE_AXES.forEach(axis => { if (guide[axis] == null) guide[axis]=0; });
-  if (rating === 'TV-Y7' && guide.violence == null) guide.violence=1;
+  const profile = certificateGuideProfile(guide.certification);
+  if (!profile) return guide;
+  CONTENT_GUIDE_AXES.forEach((axis, index) => {
+    guide[axis] = guide[axis] == null
+      ? profile.levels[index]
+      : Math.min(guide[axis], profile.ceiling);
+  });
   return guide;
 }
 
@@ -9882,7 +9977,7 @@ function renderContentGuide(movie) {
   const certificate=guide.certification?.rating
     ? `<span class="content-cert" title="${attrSafe(guide.certification.country || '')} certification">${attrSafe(guide.certification.rating)}</span>`
     : '';
-  return `<div class="content-guide" title="Evidence-based 0-5 advisory; ? means insufficient evidence">${certificate}<span>S ${score(guide.sex)}</span><span>V ${score(guide.violence)}</span><span>L ${score(guide.language)}</span></div>`;
+  return `<div class="content-guide" title="0-5 advisory from the official certificate and the title's own text; ? means neither said anything">${certificate}<span>S ${score(guide.sex)}</span><span>V ${score(guide.violence)}</span><span>L ${score(guide.language)}</span></div>`;
 }
 
 // v142: the platform selection now filters recommendations (see
