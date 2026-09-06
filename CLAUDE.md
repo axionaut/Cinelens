@@ -68,7 +68,6 @@ The compact checks are the whole release bar for a scoped change:
 ```sh
 node --check app.js
 git diff --check
-node dev/harness.mjs dev/assert-v<NEW>.mjs   # when one focused check is practical
 ```
 
 `.claude/gate.sh` runs the mechanical half at `git commit` and blocks the commit
@@ -83,44 +82,36 @@ uncertainty. Destructive actions, Drive/IndexedDB migrations and anything that
 can lose rated titles still need the normal care and an explicit decision from
 Nitin where the call is his.
 
-## Testing — one focused check, not the museum
+## Testing — there is no assertion suite, and none is to be created
 
-**The historical suite is retired from the release workflow.** `dev/archive/`
-holds `assert-current`, `assert-multidevice` and `assert-v104 … v140`. They pin
-contracts that later versions deliberately superseded, so red there is not
-evidence a change is wrong, and green there buys no confidence in a scoped edit.
-Do not run them as a release step, do not repair them, and do not let their
-count stand in for judgement. Run one only when Nitin asks for that diagnostic.
+**Nitin does the testing.** Claude writes the code, reads the actual data path
+before changing it, runs the compact checks above, and confirms at UI/UX level
+when that is warranted. Nitin runs the app and reports regressions.
 
-Write at most **one focused assertion per release**, `dev/assert-v<NEW>.mjs`,
-covering only the contract that release changed. Copy `dev/assert-template.mjs`,
-which carries the fixture helpers and runs green as-is.
+**Do not create `dev/assert-v<N>.mjs`, a "current" suite, a template, or any
+file that accumulates one contract per release.** That set existed and was
+deleted (2026-09-06, owner). Every file pinned the behaviour of the release
+that wrote it, and the app then evolved past it, so later runs argued with
+history instead of finding defects — the reconciliation cost more than the bugs
+were worth. Writing one focused assertion per release rebuilds the same pile a
+release at a time. Depth belongs in reading the code path, not in a stored
+claim about it.
+
+`dev/harness.mjs` remains for a **throwaway** browser probe when a question
+genuinely cannot be settled by reading the code. Write it in the session
+scratchpad, never in `dev/`, and delete it once it has answered:
 
 ```sh
-node dev/harness.mjs dev/assert-v141.mjs
+node dev/harness.mjs "$SCRATCHPAD/probe.mjs"
 ```
 
-Assertion files export `default async function run(t)` and use `t.assert`,
-`t.equal`, `t.deepEqual`, `t.page.evaluate`, `t.resetStorage`,
-`t.seedIndexedDb`, `t.readIndexedDb`, `t.openApp`,
-`t.waitForNoPendingLocalSave`. Wikipedia/TMDB/Gemini are stubbed via
-`window.__CINELENS_HARNESS__`. Any fatal console error fails the run. See
-`dev/README.md` for the full API.
-
-Two rules make a focused check worth the time:
-
-- **See it fail before you trust it.** Run it against the unfixed code, or break
-  the fix once the file is written and confirm only that assertion reddens. A
-  green-first test confirms your mental model, not the app's behaviour — and a
-  wrong model with a green suite is worse than no suite. Record what you broke
-  on a `FALSIFIED:` line in the file.
-- **Assert behaviour, not source text.** `t.page.evaluate` running the real
-  function beats grepping `app.js`: a regex matches comments, matches a
-  similarly-named function, and keeps passing after the code moves.
+A probe that calls the helper you just added proves nothing about whether it is
+wired in — reach the real entry point (`matchesGlobalFilters`, not
+`matchesWatchPlatformFilter`). `dev/README.md` has the API and the two traps.
 
 `dev/` is gitignored, local-only and unbacked — nothing in it is ever staged,
-and no release depends on it. `dev/assert-perf.mjs` is the profiler; run it
-before optimising.
+and no release depends on it. `dev/assert-perf.mjs` is the profiler despite the
+name; run it before optimising.
 
 ## Backend
 

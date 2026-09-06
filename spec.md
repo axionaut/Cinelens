@@ -5559,3 +5559,13 @@ exactly the India one. Its first form was vacuous and the falsification is what
 caught it: the assertions called `matchesWatchPlatformFilter` directly, so
 removing it from `matchesGlobalFilters` broke the app while every assertion
 stayed green. They now go through `matchesGlobalFilters`.
+
+**Superseded (2026-09-06, owner):** the paragraph above refers to
+`dev/assert-v142.mjs`. There is no assertion suite any more. The whole set was
+deleted the same day, and no replacement is to be written: each file pinned the
+behaviour of the release that produced it, the app then evolved past it, and
+later runs argued with history instead of finding defects. What the file
+actually established — the filter is reached through `matchesGlobalFilters`,
+the India bonus is 0.15 stars, an unanswered TMDB record is kept, a rated title
+is never hidden — is recorded in this section and in the code comments, which
+is where it belongs. Testing is Nitin's; see `CLAUDE.md`.
