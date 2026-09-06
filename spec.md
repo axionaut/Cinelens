@@ -5917,3 +5917,36 @@ when a chunk is dirty, an agreeing profile writing nothing while still clearing
 the dirty flag, and the mid-sync forced pull being remembered. That last check
 first failed for the right reason — the probe had no Drive session, and the
 remember-branch correctly sits *after* the session check.
+
+## 148.1 Groq as the tagger's second provider (backend only)
+
+No `APP_VERSION` bump: nothing in `app.js`, `index.html` or `styles.css`
+changes, and this ships only when Nitin redeploys the Apps Script web app. The
+decimal marks that it is not a client release.
+
+"Gemini cooling down" is the free tier's per-minute and per-day cap, not a model
+choice — `gemini-3.1-flash-lite` is already the model with the most generous
+free quota, so there was no headroom left to find there. Groq's free tier is a
+genuinely different ceiling.
+
+`callGemini` becomes a two-provider chain: `callGeminiOnce`, then `callGroq`.
+Every existing call site is untouched, because the wrapper kept the name.
+
+**The fallback is deliberately narrow.** Only HTTP 429, 408 and 5xx mark the
+error `cinelensRetryable`. A schema or validation failure would fail identically
+on the second provider and would spend the second quota to learn nothing, so
+those still throw on the spot.
+
+Groq speaks the OpenAI chat API. Gemini's `responseJsonSchema` has no equivalent
+every Groq model honours, so the schema is stated in the prompt and JSON mode
+(`response_format: {type:'json_object'}`) guarantees the response parses. Same
+prompt, same parsing, same downstream sanitizers — only the transport differs.
+Model is `llama-3.3-70b-versatile`.
+
+Until `GROQ_API_KEY` exists in Script Properties, `groqApiKey()` returns empty
+and the file behaves exactly as it did before — a 429 throws as it always has.
+`doGet` reports `fallbackModel` so the deployment can be checked from a browser.
+
+Verified by running the real file in a VM with stubbed Apps Script globals: a
+200 uses Gemini alone, a 429 and a 503 each fall through to Groq, a 400 throws
+without touching Groq, and with no Groq key a 429 throws exactly as before.
