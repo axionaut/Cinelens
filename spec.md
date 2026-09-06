@@ -5569,3 +5569,34 @@ actually established — the filter is reached through `matchesGlobalFilters`,
 the India bonus is 0.15 stars, an unanswered TMDB record is kept, a rated title
 is never hidden — is recorded in this section and in the code comments, which
 is where it belongs. Testing is Nitin's; see `CLAUDE.md`.
+
+## 143. Where to watch became a filter control, not a chip strip
+
+v142 put the platform selection in the filter bar but kept its old shape: a
+collapsed `<details>` holding eleven chips and an explanatory paragraph. Sitting
+between Content level and Sort, it was the one control in the row that did not
+look or work like the others — a second interaction vocabulary for a filter
+doing exactly the job Genre and Mood do next to it, and one that had to be
+opened before it said anything.
+
+It is now `<select id="watchPlatformFilter" multiple size="1">` with the
+`genre-filter-select` class, so it inherits the multi-select behaviour, styling
+and mobile layout the genre and mood filters already have. `updateControlDeck`
+syncs it with the same three lines those two use, `updateWatchPlatformFilter`
+reads `selectedOptions` like `updateGenreFilter` does, and selecting nothing is
+the off state — no "Any platform" chip is needed, because that is what an empty
+multi-select already means.
+
+Options are still generated from `OTT_PLATFORM_NAMES`
+(`renderWatchPlatformOptions`) rather than hardcoded into `index.html`, so the
+curated platform list stays the one source of truth and a new platform appears
+in the filter for free. The one deviation from the genre control is width:
+176px against 146px, because "Amazon Prime Video" does not fit the narrower
+cell.
+
+`toggleWatchPlatform`, `clearWatchPlatforms`, `applyWatchPlatformChange` and the
+whole `.watch-platform-chip` / `.watch-platform-picker` style block are deleted
+rather than left as an unused second path. The filter semantics from section 142
+are untouched: country-blind availability, the 0.15-star India rank bonus,
+unanswered TMDB records kept, rated titles never hidden. `setWatchPlatforms`
+still drops `scoredMovieCache`, since the bonus is computed inside `scoreMovies`.

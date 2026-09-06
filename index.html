@@ -161,13 +161,10 @@
       <select class="platform-select" id="languageContentMax" onchange="updateContentGuideFilter('language',this.value)" aria-label="Language level"><option value="any">L any</option><option value="0">L 0</option><option value="1">L 1</option><option value="2">L 2</option><option value="3">L 3</option><option value="4">L 4</option><option value="5">L 5</option></select>
     </div>
     <label>Where to watch</label>
-    <details class="watch-platform-picker" id="watchPlatformPicker">
-      <summary id="watchPlatformSummary" title="Filter recommendations to titles you can actually stream">Any platform</summary>
-      <div class="watch-platform-panel">
-        <div class="watch-platform-row" id="watchPlatformRow"></div>
-        <p class="watch-platform-note">Recommendations are limited to unrated titles streaming on these platforms in any country — India availability just ranks higher. Titles TMDB has not answered for yet are kept.</p>
-      </div>
-    </details>
+    <div class="genre-control">
+     <select class="platform-select genre-filter-select" id="watchPlatformFilter" multiple size="1" onchange="updateWatchPlatformFilter()" aria-label="Streaming platforms" title="Show only titles streaming on these platforms (any country — India availability ranks higher)">
+     </select>
+    </div>
     <label>Sort</label>
     <div class="sort-control">
      <select class="platform-select" id="sortMode" onchange="updateSortMode(this.value)">

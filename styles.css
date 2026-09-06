@@ -533,6 +533,14 @@
   max-width:146px !important;
 }
 
+/* Platform names run long ("Amazon Prime Video"), so this one multi-select
+   needs more room than the genre list it otherwise matches. */
+.settings-bar select#watchPlatformFilter {
+  width:176px !important;
+  min-width:176px !important;
+  max-width:176px !important;
+}
+
 .settings-bar select.genre-match-select {
   width:58px !important;
   min-width:58px !important;
@@ -621,8 +629,7 @@
   font-size:11px;
 }
 .maintenance-panel > summary,
-.maintenance-danger > summary,
-.watch-platform-picker > summary {
+.maintenance-danger > summary {
   cursor:pointer;
   list-style:none;
 }
@@ -633,8 +640,7 @@
   color:var(--muted);
 }
 .maintenance-panel > summary::-webkit-details-marker,
-.maintenance-danger > summary::-webkit-details-marker,
-.watch-platform-picker > summary::-webkit-details-marker { display:none; }
+.maintenance-danger > summary::-webkit-details-marker { display:none; }
 .maintenance-panel > summary::before { content:'+'; color:var(--accent); font-size:15px; line-height:1; }
 .maintenance-panel[open] > summary::before { content:'−'; }
 .maintenance-health { margin:9px 0; color:var(--muted); line-height:1.5; }
@@ -645,30 +651,6 @@
 .tmdb-attribution{margin-top:10px;font-size:10px;color:var(--muted2,var(--muted));line-height:1.4;max-width:620px}
 .page-footer{padding:0 16px 24px}
 .page-footer .tmdb-attribution{margin:0 auto}
-/* v142: the picker moved out of Library maintenance and into the filter bar,
-   where it now behaves like the other filter controls - a closed summary that
-   reads as a select, showing what is in force. It stays collapsed by default
-   because eleven chips is a lot of weight to dump on an already-busy bar, and
-   it takes the full row when open so expanding it never reflows the controls
-   beside it. */
-.watch-platform-picker{position:relative; min-width:0}
-.watch-platform-picker[open]{flex:1 1 100%}
-.watch-platform-picker > summary{
-  display:inline-flex; align-items:center; gap:6px;
-  background:var(--surface2); border:1px solid var(--border); border-radius:3px;
-  color:var(--text); font-family:'DM Mono',monospace; font-size:10px;
-  padding:4px 7px; white-space:nowrap;
-}
-.watch-platform-picker > summary::after{content:'▾'; color:var(--muted); font-size:9px}
-.watch-platform-picker[open] > summary::after{content:'▴'}
-.watch-platform-picker > summary.active{border-color:var(--accent); color:var(--accent)}
-.watch-platform-panel{padding:8px 0 2px}
-.watch-platform-note{margin:8px 0 0; max-width:640px; color:var(--muted); font-size:10px; line-height:1.5}
-.watch-platform-row{display:flex;flex-wrap:wrap;gap:6px;margin-top:0}
-.watch-platform-any{font-style:italic}
-.watch-platform-chip{font-size:11px;padding:5px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);cursor:pointer;font-family:inherit;transition:all .15s}
-.watch-platform-chip:hover{border-color:var(--accent);color:var(--text)}
-.watch-platform-chip.active{border-color:var(--accent);color:var(--button-text,#000);background:var(--accent)}
 @media (max-width:768px) {
   .library-status { max-width:100%; font-size:10px; }
   .library-health-label { max-width:190px; }
@@ -1028,7 +1010,7 @@ body.movie-modal-open{overflow:hidden}
    (header/content, stats bar, search results, the danger-zone divider).
    Those need their own higher-specificity !important to win back over the
    blanket rule above. */
-header,.stats-bar,.wiki-search-results,.tag-detail,.manual-add-row,.maintenance-danger,.platform-bar.manual-add-row,.watch-platform-picker>summary{
+header,.stats-bar,.wiki-search-results,.tag-detail,.manual-add-row,.maintenance-danger,.platform-bar.manual-add-row{
   border-color:var(--border,rgba(255,255,255,.08))!important;
 }
 hr.sep{border-top-color:var(--border,rgba(255,255,255,.08))!important}

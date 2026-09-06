@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 142;
+const APP_VERSION = 143;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -2913,24 +2913,26 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
   }
 }
 
-function renderWatchPlatformPicker() {
-  const row = document.getElementById('watchPlatformRow');
-  if (!row) return;
-  // "Any platform" is a chip rather than a Clear button because it is the
-  // filter's off state, not an action: it lights up when nothing is picked,
-  // exactly like every other chip that is currently in force.
-  const anyChip = `<button type="button" class="watch-platform-chip watch-platform-any" data-platform="" onclick="clearWatchPlatforms(event)" title="Do not filter recommendations by platform">Any platform</button>`;
-  row.innerHTML = anyChip + OTT_PLATFORM_NAMES.map(name => {
-    const safe = attrSafe(name);
-    return `<button type="button" class="watch-platform-chip" data-platform="${safe}" onclick="toggleWatchPlatform('${safe}',event)">${safe}</button>`;
-  }).join('');
+// v143: the platform list is a multi-select in the filter bar, identical in
+// shape and behaviour to Genre and Mood. The v142 chip strip inside a
+// <details> was a second interaction vocabulary for a control doing the same
+// job as its neighbours, and it did not read as a filter. Options are still
+// built from OTT_PLATFORM_NAMES rather than hardcoded in index.html, so the
+// curated platform list stays the single source of truth. Selecting none is
+// the off state, exactly as with the other two.
+function renderWatchPlatformOptions() {
+  const control = document.getElementById('watchPlatformFilter');
+  if (!control) return;
+  control.innerHTML = OTT_PLATFORM_NAMES
+    .map(name => `<option value="${attrSafe(name)}">${attrSafe(name)}</option>`)
+    .join('');
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
   syncMaintenancePanelPlacement();
   window.addEventListener('resize', onResizeEvent);
   renderAppVersion();
-  renderWatchPlatformPicker();
+  renderWatchPlatformOptions();
   loadLocalState();
   applyCardSize();
   await loadIndexedDbState();
@@ -7969,25 +7971,11 @@ function updateControlDeck() {
   if (deck) deck.classList.toggle('collapsed', !!state.settings.controlDeckCollapsed);
   const toggle=document.getElementById('controlToggle');
   if (toggle) toggle.textContent = state.settings.controlDeckCollapsed ? 'Show filters & tools' : 'Hide filters & tools';
-  const platformList = selectedWatchPlatforms();
-  const selectedPlatforms = new Set(platformList);
-  document.querySelectorAll('.watch-platform-chip').forEach(chip => {
-    chip.classList.toggle('active', chip.classList.contains('watch-platform-any')
-      ? !platformList.length
-      : selectedPlatforms.has(chip.dataset.platform));
-  });
-  const platformSummary = document.getElementById('watchPlatformSummary');
-  if (platformSummary) {
-    // The picker is collapsed by default, so the summary is the only place an
-    // active platform filter is visible. A filter you cannot see is a filter
-    // you blame the recommendations for.
-    platformSummary.textContent = !platformList.length
-      ? 'Any platform'
-      : platformList.length <= 2 ? platformList.join(' + ') : `${platformList[0]} +${platformList.length - 1}`;
-    platformSummary.classList.toggle('active', platformList.length > 0);
+  const watchPlatformFilter=document.getElementById('watchPlatformFilter');
+  if (watchPlatformFilter) {
+    const selected = new Set(selectedWatchPlatforms());
+    [...watchPlatformFilter.options].forEach(option => { option.selected = selected.has(option.value); });
   }
-  const platformPicker = document.getElementById('watchPlatformPicker');
-  if (platformPicker) platformPicker.classList.toggle('filtering', platformList.length > 0);
   updateLibraryHealth();
 }
 
@@ -8117,28 +8105,18 @@ function applyCardSize() {
 // which runs over the already-scored list - a platform change has to drop the
 // scored cache or the new ordering would not appear until something else
 // invalidated it.
-function applyWatchPlatformChange() {
+function setWatchPlatforms(platforms) {
+  state.settings.watchPlatforms = [...new Set((platforms || []).filter(name => OTT_PLATFORM_NAMES.includes(name)))];
+  // The rank bonus is computed inside scoreMovies, unlike every other filter,
+  // which runs over the already-scored list. Without dropping the cache the new
+  // ordering would not appear until something unrelated invalidated it.
   scoredMovieCache = null;
-  // The chips sit in the filter bar and are tapped in runs of two or three.
-  // Yanking the page to the top would pull the next chip out from under the
-  // finger that is still tapping.
-  applyViewChange({scrollToTop:false});
+  applyViewChange();
 }
 
-function toggleWatchPlatform(platform, event) {
-  if (event) event.stopPropagation();
-  if (!OTT_PLATFORM_NAMES.includes(platform)) return;
-  const selected = new Set(selectedWatchPlatforms());
-  if (selected.has(platform)) selected.delete(platform); else selected.add(platform);
-  state.settings.watchPlatforms = [...selected];
-  applyWatchPlatformChange();
-}
-
-function clearWatchPlatforms(event) {
-  if (event) event.stopPropagation();
-  if (!selectedWatchPlatforms().length) return;
-  state.settings.watchPlatforms = [];
-  applyWatchPlatformChange();
+function updateWatchPlatformFilter() {
+  const control = document.getElementById('watchPlatformFilter');
+  setWatchPlatforms(control ? [...control.selectedOptions].map(option => option.value) : []);
 }
 
 function updateRatingFilter(rating) {
@@ -9801,7 +9779,8 @@ function renderContentGuide(movie) {
 // v142: the platform selection now filters recommendations (see
 // matchesWatchPlatformFilter), and this row is where a surviving title shows
 // its side of that decision. Nothing renders until at least one platform is
-// picked in the filter bar; then, for each selected platform the title is
+// picked in the Where to watch filter; then, for each selected platform the
+// title is
 // actually on, show which countries carry it (derived once at
 // fetch/backfill/retag time from TMDB's own multi-region response, not queried
 // live per card). Countries sort nearest-first, so India leads when it is
