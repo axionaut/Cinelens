@@ -5739,3 +5739,74 @@ including both CBFC and TV forms, the ceiling in both directions (a `U`
 synopsis about a massacre capped at 1, an `R` one left at 5), `NR` and
 no-certificate still returning `?`, six index-article titles against two real
 ones, and the parser returning null with the new reason string.
+
+## 146. The rating board's own words, and index articles beyond episode lists
+
+### Where the advisory actually comes from
+
+The certificate has always come from TMDB — `release_dates` for film,
+`content_ratings` for TV, both appended to the details request. What TMDB does
+**not** publish anywhere is a 0–5 severity per axis; the numbers on the card are
+CineLens's. v145 derived them from the certificate letter plus a plot-summary
+regex.
+
+Two fields on that same response were never read, and both are the board
+describing these exact three axes in its own words:
+
+- **`content_ratings[].descriptors`** (TV) — the US TV system's own flags:
+  D suggestive dialogue, L coarse language, S sexual situations, V violence,
+  FV fantasy violence. Their real power is the *absence* of a flag. A TV-14 show
+  whose descriptor list is `["V"]` is violent and is **not** sexual or profane —
+  something no amount of plot-summary reading could ever establish. A flagged
+  axis takes the certificate's implied level, an unflagged one is 0, and FV
+  grades one below V at the same certificate. An *empty* list means "not
+  supplied", not "nothing applies", so it falls through to the certificate.
+- **`release_dates[].note`** (film) — the reason string, in the board's rigid
+  house style: an intensity word in front of the thing rated. "Rated R for
+  strong bloody violence, language throughout and some sexual content" grades
+  violence 5, language 5, sex 2. Grading it is reading a scale the board already
+  applied.
+
+**Precedence, strongest first:** what the board said about *this* title → what
+the certificate implies → what the plot summary happens to say. The synopsis
+regex is the weakest and is the only one that can be wrong about a title it
+never mentions, so a PG film noted "for mild peril" now reads violence 2 even
+when its plot summary contains the word "massacre".
+
+`TMDB_DATA_VERSION` goes to 10. No new request — the fields were already in the
+response.
+
+**A defect the probe caught before release.** The first form graded each axis by
+scanning a 34-character window around the matched word, so in the string above
+the "throughout" belonging to *language* outvoted the "some" in front of
+*sexual content*, and a mild axis graded 5. Boards write one intensity per
+clause, so the clause is the unit: the note is split on commas and "and", and
+each clause grades only the axes it names.
+
+### Index articles: the episode list was one shape of many
+
+Section 145 keyed on episode lists because that was the example to hand. The
+family is much larger, and every member carries the categories and lead sentence
+of the work it indexes — which is exactly why they pass every media test the
+parser applies. `WIKI_INDEX_ARTICLE_PATTERN` now covers three shapes:
+
+- **prefix** — `List(s) of`, `Index of`, `Outline of`, `Timeline of`,
+  `Chronology of`, `Glossary of`, `Comparison of`, `Filmography of`,
+  `Awards and nominations`, and year indexes (`1994 in film`,
+  `2019 in American television`, including `1994–95` ranges)
+- **phrase** — `awards and nominations received by`, `accolades received by`,
+  `awards received by`
+- **suffix** — `filmography`, `discography`, `videography`, `bibliography`,
+  and `(disambiguation)`, `(franchise)`, `(film series)`, `(media franchise)`
+
+Built with `new RegExp` from an array of strings, which introduced its own trap:
+inside a JS string literal a single `\b` is a **backspace character**, not a word
+boundary, and the pattern would have silently matched nothing. Every backslash
+in those strings is doubled, and the comment says why.
+
+Verified by throwaway probe, not a stored assertion: four reason-string shapes
+(including the cross-clause bug, which failed first and passed after the fix),
+four descriptor shapes, the board-over-synopsis precedence in both directions,
+the v145 certificate fallback still intact, and ten index-article titles against
+six real ones — *Schindler's List*, *Shortlist (film)* and *The Vicar of Dibley*
+among them.

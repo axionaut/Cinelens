@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 145;
+const APP_VERSION = 146;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -730,7 +730,9 @@ const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // re-search can find that out.
 // Bumped to 9 in v144 to read original_language and spoken_languages, which the
 // details response has always carried and CineLens has always thrown away.
-const TMDB_DATA_VERSION = 9;
+// Bumped to 10 in v146 for the rating-board evidence on the same response: the
+// TV content descriptors and the film reason string.
+const TMDB_DATA_VERSION = 10;
 // Minimum title similarity (see tmdbTitleSimilarity) for a TMDB search result
 // to be accepted as the same title. Unrelated results sharing one common word
 // score 0.5, so this rejects them while tolerating subtitle and punctuation
@@ -3604,7 +3606,26 @@ function rejectKey(title, mode) { return `${mode}:${normaliseTitleKey(title)}`; 
 //
 // Wikipedia names index articles by a fixed convention, so the title is the
 // reliable test and it costs one regex before any parsing work.
-const WIKI_INDEX_ARTICLE_PATTERN = /^(?:lists? of|index of|outline of|timeline of|glossary of|chronology of|comparison of|filmography of)\b|\(disambiguation\)$/i;
+// v146: broadened. The episode list was one shape of the same thing, and
+// Wikipedia has a whole family of them - awards and accolades, year-in-film
+// indexes, filmographies, franchise overviews. Each carries the categories and
+// lead sentence of the work it indexes, which is precisely why they pass every
+// media test the parser applies.
+//
+// Three shapes, all keyed on Wikipedia's own naming conventions:
+//   prefix   "List of ...", "Index of ...", "1994 in film"
+//   phrase   "... awards and nominations received by ...", "... accolades ..."
+//   suffix   "... filmography", "... (disambiguation)"
+const WIKI_INDEX_ARTICLE_PATTERN = new RegExp([
+  // These are JS string literals, so every regex backslash is doubled: a
+  // single \b in a quoted string is a backspace character, not a word
+  // boundary, and the pattern would silently never match.
+  '^(?:lists? of|index of|outline of|timeline of|chronology of|glossary of|comparison of|filmography of|awards and nominations)\\b',
+  '^\\d{4}(?:–\\d{2,4})? in (?:film|cinema|television|american television|british television|hindi cinema|indian cinema)\\b',
+  '\\b(?:awards and nominations|accolades|awards) received by\\b',
+  '\\b(?:filmography|discography|videography|bibliography)$',
+  '\\((?:disambiguation|film series|franchise|media franchise)\\)$'
+].join('|'), 'i');
 
 function isWikiIndexArticle(title) {
   return WIKI_INDEX_ARTICLE_PATTERN.test(String(title || '').trim());
@@ -5881,13 +5902,27 @@ function compactTmdbContentKeywords(keywordsPayload) {
   return [...new Set(rows.map(item => String(item?.name || '').trim().toLowerCase()).filter(Boolean))].slice(0,80);
 }
 
+// v146: the certificate letter was all we kept, and it is not all TMDB sends.
+// Two fields on this same response are the rating board describing the exact
+// three axes the advisory reports, in the board's own words:
+//   - TV: content_ratings[].descriptors, the US TV system's D/L/S/V/FV flags.
+//   - Film: release_dates[].note, which for the US carries the reason string
+//     ("Rated R for strong bloody violence, language throughout and some
+//     sexual content").
+// Both are stored raw so the grading stays re-derivable; neither is guaranteed
+// to be present, and everything downstream treats absence as absence.
 function tmdbRegionalCertification(data, mediaType) {
   const countries=['IN','US','GB'];
   if (mediaType === 'tv') {
     const rows=data?.content_ratings?.results || [];
     for (const country of countries) {
       const found=rows.find(row => row?.iso_3166_1 === country && String(row?.rating || '').trim());
-      if (found) return {country, rating:String(found.rating).trim()};
+      if (found) {
+        const descriptors=Array.isArray(found.descriptors)
+          ? found.descriptors.map(entry => String(entry || '').trim().toUpperCase()).filter(Boolean)
+          : [];
+        return {country, rating:String(found.rating).trim(), descriptors};
+      }
     }
     return null;
   }
@@ -5895,8 +5930,13 @@ function tmdbRegionalCertification(data, mediaType) {
   for (const country of countries) {
     const region=regions.find(row => row?.iso_3166_1 === country);
     const releases=(region?.release_dates || []).filter(row => String(row?.certification || '').trim());
-    const found=releases.find(row => Number(row?.type) === 3) || releases[0];
-    if (found) return {country, rating:String(found.certification).trim()};
+    // Prefer a release that actually carries a reason string; type 3 is the
+    // theatrical release and is the one the board rated, so it stays the
+    // tie-break when several notes exist.
+    const withNote=releases.filter(row => String(row?.note || '').trim());
+    const found=withNote.find(row => Number(row?.type) === 3) || withNote[0]
+      || releases.find(row => Number(row?.type) === 3) || releases[0];
+    if (found) return {country, rating:String(found.certification).trim(), note:String(found.note || '').trim()};
   }
   return null;
 }
@@ -8614,6 +8654,75 @@ function certificateGuideProfile(certification) {
   return CONTENT_CERTIFICATE_GUIDE[key] || null;
 }
 
+// v146: THE BOARD'S OWN WORDS OUTRANK BOTH THE LETTER AND THE SYNOPSIS.
+// The certificate table added in v145 answers "what does a PG-13 usually
+// mean". These two read what the board actually said about THIS title.
+//
+// US TV descriptors are flags, not severities: D suggestive dialogue,
+// L coarse language, S sexual situations, V violence, FV fantasy violence.
+// Their real power is the ABSENCE of a flag - a TV-14 show whose descriptor
+// list is ["V"] is violent and is not sexual or profane, which no amount of
+// plot-summary reading could establish. A flagged axis takes the certificate's
+// implied level; an unflagged one is 0, but only when the list is non-empty,
+// because an empty list means "not supplied", not "nothing applies".
+const TV_CONTENT_DESCRIPTOR_AXES = {D:'sex', S:'sex', L:'language', V:'violence', FV:'violence'};
+
+function descriptorGuideLevels(certification, profile) {
+  const flags = (certification?.descriptors || []).filter(code => TV_CONTENT_DESCRIPTOR_AXES[code]);
+  if (!flags.length) return null;
+  const flagged = new Set(flags.map(code => TV_CONTENT_DESCRIPTOR_AXES[code]));
+  const levels = {};
+  CONTENT_GUIDE_AXES.forEach((axis, index) => {
+    // FV is fantasy violence and is deliberately milder than V at the same
+    // certificate - a cartoon punch-up is not a shooting.
+    const fantasyOnly = axis === 'violence' && flags.includes('FV') && !flags.includes('V');
+    const level = profile ? profile.levels[index] : 3;
+    levels[axis] = flagged.has(axis) ? Math.max(1, fantasyOnly ? level - 1 : level) : 0;
+  });
+  return levels;
+}
+
+// The film reason string is prose, but it is the board's prose and it follows a
+// rigid house style: an intensity word in front of the thing being rated
+// ("strong bloody violence", "brief nudity", "language throughout"). Grading it
+// is reading a scale the board already applied, not guessing from a plot.
+const RATING_NOTE_AXIS_PATTERNS = {
+  sex:/(?:sexual\w*|sexuality|nudity|nude|sex scenes?|sex|erotic\w*|prostitution)/i,
+  violence:/(?:violence|violent|gore|gory|bloody|blood|terror|peril|torture|carnage|menace)/i,
+  language:/(?:language|profanity|expletives?)/i
+};
+const RATING_NOTE_STRONG = /(?:strong|pervasive|graphic|explicit|brutal|extreme|intense|constant|relentless|throughout)/i;
+const RATING_NOTE_MILD = /(?:some|brief|mild|partial|limited|momentary|a few|occasional|thematic|suggestive|rude|crude)/i;
+
+function ratingNoteGuideLevels(certification) {
+  const note = String(certification?.note || '').trim();
+  if (!note) return null;
+  // Grade CLAUSE BY CLAUSE, not by a character window around each term. The
+  // first form read 34 characters back from the matched word, so in "strong
+  // bloody violence, language throughout and some sexual content" the "some"
+  // in front of "sexual content" was outvoted by the "throughout" belonging to
+  // the previous clause, and a mild axis graded 5. The board writes one
+  // intensity per clause, so the clause is the unit.
+  const body = note.replace(/^rated\s+\S+\s+for\s+/i, '');
+  const clauses = body.split(/[,;]|\band\b/i).map(part => part.trim()).filter(Boolean);
+  const levels = {sex:0, violence:0, language:0};
+  let matched = false;
+  clauses.forEach(clause => {
+    CONTENT_GUIDE_AXES.forEach(axis => {
+      if (!RATING_NOTE_AXIS_PATTERNS[axis].test(clause)) return;
+      matched = true;
+      const level = RATING_NOTE_STRONG.test(clause) ? 5 : RATING_NOTE_MILD.test(clause) ? 2 : 3;
+      // One axis can appear in two clauses ("violence" and "bloody images");
+      // the board's harshest word for it is the one that counts.
+      levels[axis] = Math.max(levels[axis], level);
+    });
+  });
+  // A note that mentions none of the three axes ("Rated PG for thematic
+  // elements") says nothing about them, and zeroing all three on that basis
+  // would be a claim the board did not make.
+  return matched ? levels : null;
+}
+
 function contentGuideForMovieUncached(movie) {
   const text=contentGuideEvidenceText(movie);
   const guide={
@@ -8623,8 +8732,14 @@ function contentGuideForMovieUncached(movie) {
     certification:movie?.contentCertification || null
   };
   const profile = certificateGuideProfile(guide.certification);
-  if (!profile) return guide;
+  // Precedence, strongest evidence first: what the board said about this title,
+  // then what the certificate implies, then what the plot summary happens to
+  // say. The synopsis regex is the weakest of the three and is the only one
+  // that can be wrong about a title it never mentions.
+  const boardLevels = ratingNoteGuideLevels(guide.certification) || descriptorGuideLevels(guide.certification, profile);
   CONTENT_GUIDE_AXES.forEach((axis, index) => {
+    if (boardLevels) { guide[axis] = boardLevels[axis]; return; }
+    if (!profile) return;
     guide[axis] = guide[axis] == null
       ? profile.levels[index]
       : Math.min(guide[axis], profile.ceiling);
