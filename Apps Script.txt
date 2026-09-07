@@ -11,6 +11,13 @@ function doGet() {
     service: 'CineLens Gemini Tagger',
     model: MODEL,
     fallbackModel: groqApiKey() ? GROQ_MODEL : '',
+    // v153: the client keys the second lane off THIS field, not off
+    // fallbackModel. A deployment that reports a fallback model but does not
+    // honour request.provider (the 148.1 script) would send both lanes to
+    // Gemini first and simply double the rate it was meant to relieve. Only a
+    // deployment that actually routes advertises the lanes.
+    lanes: groqApiKey() ? ['gemini', 'groq'] : ['gemini'],
+    providerRouting: true,
     supports: ['tag-titles', 'normalize-tag-cloud', 'mood-titles', 'generate-taste-story']
   });
 }

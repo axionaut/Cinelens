@@ -6162,3 +6162,27 @@ yielding no pickable lane; and a taste story succeeding down the Groq lane while
 Gemini cools, ending in a `ready` card. The backend routing was exercised
 separately in a VM: provider `groq` and `gemini` each go where asked, and a 429
 on either falls through to the other.
+
+## 153. The second lane is gated on a deployment that can actually route
+
+v152 decided the Groq lane existed if `doGet` reported a `fallbackModel`. The
+148.1 script reports one — it has the key and uses Groq as a fallback — but it
+predates `request.provider` and routes **every** request to Gemini first. A
+v152 client against that deployment would deal half its batches to a "Groq lane"
+that is Gemini wearing a hat, doubling the Gemini request rate it was written to
+relieve.
+
+The client keys off the deployment's own lane list now. `doGet` reports
+`lanes: ['gemini','groq']` only when it both has a key and honours
+`request.provider`, and `probeAiLanes` stores exactly that. A response without a
+`lanes` array — every older deployment, or anything unrecognisable — resolves to
+`['gemini']`, which is the safe answer in every case.
+
+This closes the window between deploying a client and redeploying the backend:
+during it the app is single-lane and behaves as v151 did, rather than
+misbehaving in a way that looks like worse rate-limiting.
+
+Verified by throwaway probe, not a stored assertion: the v153 deployment with a
+key giving two lanes and without one giving one; the 148.1 response — a real
+`fallbackModel` and no `lanes` — giving one lane; and an unrecognisable response
+giving one.

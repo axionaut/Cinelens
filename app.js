@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 152;
+const APP_VERSION = 153;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -367,8 +367,14 @@ function aiLaneConfig(lane) {
 const AI_LANE_PROBE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 let aiLaneProbeInFlight = null;
 
+// v153: keyed on the deployment's own lane list, not on the presence of a
+// fallback model. 148.1's script reports a fallbackModel but predates
+// request.provider, so it routes every lane to Gemini first - a client that
+// believed it had two lanes there would double the Gemini rate it was trying to
+// relieve. Only a deployment that advertises `lanes` actually routes.
 function groqLaneAvailable() {
-  return !!String(state.meta?.aiFallbackModel || '');
+  const lanes = state.meta?.aiLanes;
+  return Array.isArray(lanes) && lanes.includes('groq');
 }
 
 function availableAiLanes() {
@@ -386,6 +392,11 @@ function probeAiLanes() {
       const payload = await response.json();
       state.meta = state.meta || {};
       state.meta.aiFallbackModel = String(payload?.fallbackModel || '');
+      // An older deployment sends no `lanes`, which is exactly the signal that
+      // it cannot route: fall back to the one lane every version has.
+      state.meta.aiLanes = Array.isArray(payload?.lanes) && payload.lanes.length
+        ? payload.lanes.map(lane => String(lane || '')).filter(lane => lane === 'gemini' || lane === 'groq')
+        : ['gemini'];
       state.meta.aiFallbackCheckedAt = nowStamp();
       saveLocalState({silentUi:true, preserveUpdatedAt:true, driveProfileOnly:true});
       return groqLaneAvailable();
