@@ -6069,3 +6069,31 @@ ladder climbing across repeated failures without latching; a genuine
 `pointerdown` restoring the session with no chip tap; the listener releasing
 itself and not firing on a second click; and the scheduled retry waking on its
 own.
+
+## 151. The v87 flash was a stale placeholder, not a fallback
+
+Reported: every cold load shows **v87** for a beat, then the real version.
+
+Nothing was falling back. `index.html` line 52 carried the version as literal
+text in the markup — `<span id="appVersion">87</span>` — the value of the build
+that happened to write that line. The browser paints it the moment the HTML
+parses, before `app.js` has been fetched, let alone run; `renderAppVersion()`
+then overwrites it with the real `APP_VERSION` on `DOMContentLoaded`. The gap
+between those two moments is the flash, and it grows with however long `app.js`
+takes to arrive — longest on a cold cache or a phone, which is exactly when a
+version number is being checked.
+
+It matters more here than a cosmetic flicker would elsewhere. This badge is how
+Nitin tells whether a deploy landed, and per the working agreement it is the
+first thing to check when reported behaviour contradicts a recent change. A
+number that must be disbelieved for the first second is worse than no number.
+
+The span now ships **empty and `hidden`**, and `renderAppVersion` unhides it
+after setting the text. The only number it can display is the running build's
+own, and if `app.js` fails to load the badge stays absent rather than asserting a
+version that is not there.
+
+Verified by throwaway probe, not a stored assertion: fetching the served
+`index.html` and reading the badge out of the raw markup — the state the browser
+paints before any script runs — confirms it is empty and hidden, and the live
+page then shows `APP_VERSION` with a matching tooltip.

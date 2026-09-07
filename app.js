@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 150;
+const APP_VERSION = 151;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -8043,11 +8043,23 @@ function render() {
 }
 
 
+// v151: the badge markup used to carry a literal 87 - the value of the build
+// that wrote it - which the browser painted the moment index.html parsed,
+// before app.js had even been fetched. Every cold load therefore showed v87 for
+// a beat and then the real number. Nothing had fallen back: it was a stale
+// placeholder being read as a version.
+//
+// It matters more here than a cosmetic flicker would elsewhere. This badge is
+// how Nitin tells whether a deploy landed, and a version he has to disbelieve
+// for the first second is worse than no version at all. The span now ships
+// empty and hidden, so the only number it can ever show is this build's own -
+// and if app.js fails to load, it stays absent rather than lying.
 function renderAppVersion() {
   const label = document.getElementById('appVersion');
   if (!label) return;
   label.textContent = String(APP_VERSION);
   label.title = `CineLens version ${APP_VERSION}`;
+  label.hidden = false;
 }
 
 function updateControlDeck() {
