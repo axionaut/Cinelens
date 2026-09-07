@@ -5950,3 +5950,63 @@ and the file behaves exactly as it did before — a 429 throws as it always has.
 Verified by running the real file in a VM with stubbed Apps Script globals: a
 200 uses Gemini alone, a 429 and a 503 each fall through to Groq, a 400 throws
 without touching Groq, and with no Groq key a 429 throws exactly as before.
+
+## 149. The catalogue had no clock, so stale records won every merge
+
+Reported: the laptop finished its TMDB refresh; opening the phone started the
+refresh again; going back to the laptop showed **5410 pending** again. v148 made
+ratings sync quickly and did nothing for this, because this is a different bug
+in a different half of the model.
+
+**`catalogueMovieForDrive` deletes `_updatedAt`** — deliberately, so that a
+rating can never dirty a catalogue chunk. But `recordTimestamp` reads only
+`_updatedAt || updatedAt || lastSeenAt || hiddenAt || at`, and **not one of
+those survives into a chunk**. So on a chunk merge every catalogue record on
+both sides timestamped **zero**, every comparison tied, and `newestRecord`'s
+tie-break returns the *local* copy.
+
+That is the loop, exactly:
+
+1. Laptop refreshes 5410 titles to `tmdbDataVersion` 10 and uploads its chunks.
+2. Phone opens holding version 9 records. Its sync merges chunk by chunk, every
+   record ties at zero, **its stale copy wins**, and Drive is rewritten
+   backwards.
+3. Laptop pulls that back, sees version 9, and starts the same 5410-title
+   refresh over.
+
+Nothing converges, and the same hole could silently revert tags, genres,
+reception, availability or spoken languages — anything catalogue-side.
+
+**`_catalogueUpdatedAt`** is a second, catalogue-scoped clock. `touchRecord`
+still stamps `_updatedAt` on any edit including a rating; `touchCatalogueRecord`
+stamps this one only where catalogue data is written — `applyTmdbDetails`, the
+AI tag commit, both reception-backfill outcomes, the TMDB reception signal, and
+a fresh Wikipedia record. It therefore changes exactly when the chunk payload
+changes, which is why keeping it in the payload does not reintroduce the chunk
+churn the profile/catalogue split exists to avoid. A rating still cannot dirty a
+chunk, and that is asserted.
+
+`mergeCatalogueRecordMap` replaces `mergeRecordMap` for chunk merges only —
+tombstones, wrongPicks and hidden titles carry real timestamps of their own and
+are untouched. It compares the catalogue clock first, then breaks a tie on
+`catalogueRecordDepth`: data version, then tag count, then story/reception/
+poster presence. **Every record written before this release has no catalogue
+stamp**, so the depth tie-break is what carries the transition without losing
+work in either direction.
+
+**A second instance of the same blind spot.** `recoverRacedChunks` compared a
+chunk revision against the live record with `recordTimestamp` — the revision
+always scored 0 against a local record that had `_updatedAt`, so its guard was
+always true and the race repair recovered nothing it was written to recover. It
+now compares on the catalogue clock.
+
+Note on the churn itself: `TMDB_DATA_VERSION` went 8 → 9 in v144 and 9 → 10 in
+v146, so two full sweeps were genuinely owed. The defect is that they never
+*finished* — each device kept handing the other its older copy.
+
+Verified by throwaway probe, not a stored assertion: the newer stamp winning
+from either side, the depth tie-break resolving unstamped legacy records in both
+directions and on tag count, a stamped record beating an unstamped one, records
+present on only one side surviving, `_catalogueUpdatedAt` surviving into the
+chunk payload while `_updatedAt` and personal state still do not, a TMDB refresh
+stamping the clock, and `rateMovie` not stamping it.

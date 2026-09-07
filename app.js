@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 148;
+const APP_VERSION = 149;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -2390,6 +2390,7 @@ function commitAiTagSet(movie, cleaned, model='', opts={}) {
   movie.tagged = true;
   movie.aiTagEvidence = reconciled.evidence;
   movie.moods = cleanMoodArray(cleaned?.moods);
+  touchCatalogueRecord(movie);
   delete movie.aiTagPartial;
   movie.aiTagging = {
     status:'verified',
@@ -6090,6 +6091,10 @@ function applyTmdbDetails(movie, tmdb) {
   delete movie.watchProviders;
   delete movie.posterBackfillAttemptedAt;
   if (!movie.posterUrl) movie.posterBackfillAttemptedAt = nowStamp();
+  // Everything above is catalogue data, and the whole point of the refresh is
+  // that this device's copy is now the better one. Without this stamp another
+  // device's older copy wins the chunk merge and the refresh runs again.
+  if (tmdb) touchCatalogueRecord(movie);
   return movie;
 }
 
@@ -6339,6 +6344,7 @@ async function runReceptionBackfill() {
           delete movie.receptionBackfillAttemptedAt;
           delete movie.receptionBackfillFailCount;
           touchRecord(movie);
+          touchCatalogueRecord(movie);
           changedMovieIds.push(String(movie.id));
           return;
         }
@@ -6347,6 +6353,7 @@ async function runReceptionBackfill() {
         delete movie.receptionBackfillFailCount;
         movie.wikiParserVersion = Math.max(Number(movie.wikiParserVersion || 0), Number(fresh.wikiParserVersion || WIKI_PARSER_VERSION));
         touchRecord(movie);
+        touchCatalogueRecord(movie);
         changedMovieIds.push(String(movie.id));
       } catch(error) {
         // A fetch error may be transient, so don't permanently skip — but
@@ -7173,6 +7180,7 @@ function applyTmdbReceptionSignal(movie, {voteAverage, voteCount}={}) {
   reception.present = reception.present || strength > 0;
   reception.parsedAt = nowStamp();
   movie.reception = reception;
+  touchCatalogueRecord(movie);
 }
 
 function extractInlineNarrative(text) {
@@ -11185,6 +11193,7 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
     wikiUrl: normalisedFresh.wikiUrl || previous.wikiUrl
   };
   touchRecord(next, stamp);
+  touchCatalogueRecord(next, stamp);
   if (oldId && oldId !== next.id) {
     delete state.movies[oldId];
     state.deletedMovieRecords = state.deletedMovieRecords || {};
@@ -12353,6 +12362,66 @@ function touchRecord(record, stamp=nowStamp()) {
   if (!record || typeof record !== 'object') return record;
   record._updatedAt = stamp;
   return record;
+}
+
+// v149: THE CATALOGUE HAD NO CLOCK, SO STALE RECORDS WON EVERY MERGE.
+// catalogueMovieForDrive deletes _updatedAt on purpose - a rating must never
+// dirty a catalogue chunk - but recordTimestamp reads only _updatedAt/
+// updatedAt/lastSeenAt/hiddenAt/at, none of which survive into a chunk. So
+// every catalogue record on both sides of a chunk merge timestamped ZERO, the
+// comparison tied, and newestRecord's tie-break returns the LOCAL copy.
+//
+// That is the "TMDB refresh, again" loop. The laptop refreshes 5410 titles to
+// data version 10 and uploads. The phone opens holding version 9 records, its
+// own sync merges chunk by chunk, every record ties at zero, its stale copy
+// wins, and Drive is rewritten backwards. The laptop pulls that back, sees
+// version 9, and starts the same 5410-title refresh over. Nothing converges,
+// and the same hole could revert tags, genres, reception or availability.
+//
+// This stamp is catalogue-scoped: bumped only where catalogue data is written,
+// never by a rating, so keeping it in the chunk payload does not reintroduce
+// the chunk churn the split exists to avoid.
+function touchCatalogueRecord(record, stamp=nowStamp()) {
+  if (!record || typeof record !== 'object') return record;
+  record._catalogueUpdatedAt = stamp;
+  return record;
+}
+
+// How much resolved catalogue work a record represents. Used only to break a
+// tie between two records that carry no catalogue stamp - every record written
+// before v149 - so the transition cannot lose work either. It is deliberately
+// monotonic in the things that cost a network round trip.
+function catalogueRecordDepth(record) {
+  if (!record || typeof record !== 'object') return 0;
+  return Number(record.tmdbDataVersion || 0) * 1000
+    + (Array.isArray(record.tags) ? Math.min(record.tags.length, 40) : 0) * 10
+    + (record.storyText ? 4 : 0)
+    + (record.reception ? 2 : 0)
+    + (record.posterUrl ? 1 : 0);
+}
+
+function catalogueRecordTimestamp(record) {
+  if (!record || typeof record !== 'object') return 0;
+  return Date.parse(record._catalogueUpdatedAt || '') || 0;
+}
+
+// Chunk merges only. mergeRecordMap stays as it is for wrongPicks, tombstones
+// and hidden titles, which all carry real timestamps of their own.
+function mergeCatalogueRecordMap(localMap={}, remoteMap={}) {
+  const merged={};
+  new Set([...Object.keys(localMap || {}), ...Object.keys(remoteMap || {})]).forEach(id => {
+    const local=localMap?.[id];
+    const remote=remoteMap?.[id];
+    if (!local) { if (remote) merged[id]=copyRecord(remote); return; }
+    if (!remote) { merged[id]=copyRecord(local); return; }
+    const localTime=catalogueRecordTimestamp(local);
+    const remoteTime=catalogueRecordTimestamp(remote);
+    if (remoteTime !== localTime) { merged[id]=copyRecord(remoteTime > localTime ? remote : local); return; }
+    const localDepth=catalogueRecordDepth(local);
+    const remoteDepth=catalogueRecordDepth(remote);
+    merged[id]=copyRecord(remoteDepth > localDepth ? remote : local);
+  });
+  return merged;
 }
 
 function recordTimestamp(record) {
@@ -13640,6 +13709,9 @@ function catalogueMovieForDrive(movie) {
   delete copy.topTenCount;
   delete copy.topTenFirstAt;
   delete copy.hiddenAt;
+  // _updatedAt goes; _catalogueUpdatedAt stays. The first is bumped by any edit
+  // including a rating, which is why it cannot live here. The second is bumped
+  // only by catalogue writes, so it changes exactly when this payload changes.
   delete copy._updatedAt;
   return copy;
 }
@@ -13974,11 +14046,16 @@ async function recoverRacedChunks(keys) {
         const movies=payload?.movies || {};
         Object.entries(movies).forEach(([id,record]) => {
           const local=state.movies?.[id];
-          // Same rule mergeRecordMap uses, applied one record at a time so a
-          // repair never rehashes the whole library.
-          if (local && recordTimestamp(record) <= recordTimestamp(local)) return;
-          const chosen=newestRecord(local,record);
-          if (!chosen) return;
+          // v149: this compared with recordTimestamp, which reads _updatedAt -
+          // a field catalogueMovieForDrive strips before writing a chunk. The
+          // revision's record therefore always scored 0 against a local record
+          // that had one, the guard was always true, and the repair recovered
+          // nothing it was written to recover. Catalogue records are compared
+          // on the catalogue clock, one record at a time so a repair never
+          // rehashes the whole library.
+          if (!local) { state.movies[id]=copyRecord(record); recovered=true; return; }
+          const chosen=mergeCatalogueRecordMap({[id]:local},{[id]:record})[id];
+          if (!chosen || chosen === local) return;
           state.movies[id]=chosen;
           recovered=true;
         });
@@ -14336,7 +14413,7 @@ async function syncChunkedDrive(manual=false,attempt=0) {
     }
     if (localChanged && remoteChanged && localHash !== remote.hash) {
       const remotePayload=await readDriveJson(remote.id);
-      const merged=withoutRemovedTitles(mergeRecordMap(localPayload.movies,remotePayload.movies || {}));
+      const merged=withoutRemovedTitles(mergeCatalogueRecordMap(localPayload.movies,remotePayload.movies || {}));
       const mergedPayload={schema:DRIVE_SYNC_MODEL_V2,chunk:key,movies:merged};
       const mergedHash=driveHash(mergedPayload);
       if (mergedHash !== remote.hash) await uploadDriveJson(remote.id,mergedPayload);
