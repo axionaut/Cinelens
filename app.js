@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 153;
+const APP_VERSION = 154;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -808,7 +808,9 @@ const TMDB_BACKFILL_RETRY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 // details response has always carried and CineLens has always thrown away.
 // Bumped to 10 in v146 for the rating-board evidence on the same response: the
 // TV content descriptors and the film reason string.
-const TMDB_DATA_VERSION = 10;
+// Bumped to 11 in v154 for runtime, season and episode counts - the concrete
+// commitment numbers, also already on the same response.
+const TMDB_DATA_VERSION = 11;
 // Minimum title similarity (see tmdbTitleSimilarity) for a TMDB search result
 // to be accepted as the same title. Unrelated results sharing one common word
 // score 0.5, so this rejects them while tolerating subtitle and punctuation
@@ -6074,6 +6076,23 @@ async function tmdbDetailsWithAvailability(id, mediaType) {
     tmdbYear: tmdbCandidateYear(data, mediaType) || null,
     voteAverage: Number.isFinite(Number(data.vote_average)) && Number(data.vote_average) > 0 ? Number(data.vote_average) : null,
     voteCount: Math.max(0, parseInt(data.vote_count, 10) || 0),
+    // v154: how much of Nitin's life a title asks for, from TMDB's own numbers
+    // rather than a guess. Films carry `runtime`; shows carry
+    // number_of_seasons / number_of_episodes, and a per-episode length that is
+    // often missing from episode_run_time on newer shows - last_episode_to_air
+    // is the concrete fallback, and when neither exists the record simply says
+    // it does not know rather than inventing an average.
+    runtimeMinutes:Math.max(0, parseInt(data.runtime, 10) || 0) || null,
+    seasonCount:Math.max(0, parseInt(data.number_of_seasons, 10) || 0) || null,
+    episodeCount:Math.max(0, parseInt(data.number_of_episodes, 10) || 0) || null,
+    episodeRuntimeMinutes:(() => {
+      const listed=(Array.isArray(data.episode_run_time) ? data.episode_run_time : [])
+        .map(value => Math.max(0, parseInt(value, 10) || 0))
+        .filter(Boolean);
+      if (listed.length) return Math.round(listed.reduce((sum, value) => sum + value, 0) / listed.length);
+      const lastAired=Math.max(0, parseInt(data.last_episode_to_air?.runtime, 10) || 0);
+      return lastAired || null;
+    })(),
     // v144: the audio question. original_language is the language the title was
     // MADE in, so it can never describe a dub; spoken_languages is every
     // language heard in it. Both ride the details response already fetched.
@@ -6113,6 +6132,10 @@ async function fetchTmdbDetailsById(tmdbId, mediaType) {
     contentCertification:details.contentCertification || null,
     originalLanguage:details.originalLanguage || '',
     spokenLanguages:details.spokenLanguages || [],
+    runtimeMinutes:details.runtimeMinutes || null,
+    seasonCount:details.seasonCount || null,
+    episodeCount:details.episodeCount || null,
+    episodeRuntimeMinutes:details.episodeRuntimeMinutes || null,
     detailsFetched: true
   };
 }
@@ -6153,6 +6176,10 @@ async function fetchTmdbDetails(title, year, format) {
       contentCertification:details?.contentCertification || null,
       originalLanguage:details?.originalLanguage || String(candidate.original_language || '').trim().toLowerCase(),
       spokenLanguages:details?.spokenLanguages || [],
+      runtimeMinutes:details?.runtimeMinutes || null,
+      seasonCount:details?.seasonCount || null,
+      episodeCount:details?.episodeCount || null,
+      episodeRuntimeMinutes:details?.episodeRuntimeMinutes || null,
       detailsFetched:!!details
     };
   } catch(_) {
@@ -6188,6 +6215,10 @@ function applyTmdbDetails(movie, tmdb) {
       movie.contentCertification=tmdb.contentCertification || null;
       movie.originalLanguage=String(tmdb.originalLanguage || '');
       movie.spokenLanguages=Array.isArray(tmdb.spokenLanguages) ? tmdb.spokenLanguages : [];
+      movie.runtimeMinutes=tmdb.runtimeMinutes || null;
+      movie.seasonCount=tmdb.seasonCount || null;
+      movie.episodeCount=tmdb.episodeCount || null;
+      movie.episodeRuntimeMinutes=tmdb.episodeRuntimeMinutes || null;
       // The label follows TMDB's structured answer rather than the old
       // "not Hindi, so English" guess. For en/hi this rewrites the same value;
       // it only changes anything where the stored label was wrong.
@@ -8783,6 +8814,71 @@ function tmdbDataComplete(movie) {
   return watchAvailabilityKnown(movie);
 }
 
+// v154: SHORTER FIRST, SO MORE GETS WATCHED.
+// TMDB reports the numbers concretely on the details response - a film's
+// runtime, a show's season and episode counts, and a per-episode length - so
+// this is measured, never estimated from genre or format. A title with no
+// numbers scores neutral rather than being guessed at.
+//
+// The whole commitment is what matters, not the episode: a 22-minute sitcom
+// with 180 episodes asks for far more than a three-hour film, and ranking on
+// episode length alone would say the opposite.
+const COMMITMENT_UNKNOWN = null;
+// The band the bonus is spread across, in minutes: a feature film at the short
+// end, a long-running series at the long end. Beyond either edge the term
+// saturates instead of running away.
+const COMMITMENT_MIN_MINUTES = 90;
+const COMMITMENT_MAX_MINUTES = 6000;
+// In stars, the same scale as the tenure (0.3 max) and home-availability (0.15)
+// terms. Enough to separate two titles that fit alike, never enough to put a
+// short bad match above a long good one - "shorter" is a tie-break on taste,
+// not a replacement for it.
+const COMMITMENT_RANK_BONUS = 0.2;
+
+function titleCommitmentMinutes(movie) {
+  if (!movie) return COMMITMENT_UNKNOWN;
+  if (!isShow(movie)) {
+    const runtime = Math.max(0, Number(movie.runtimeMinutes || 0));
+    return runtime || COMMITMENT_UNKNOWN;
+  }
+  const episodes = Math.max(0, Number(movie.episodeCount || 0));
+  const perEpisode = Math.max(0, Number(movie.episodeRuntimeMinutes || 0));
+  if (!episodes || !perEpisode) return COMMITMENT_UNKNOWN;
+  return episodes * perEpisode;
+}
+
+// 0 for the longest commitments, COMMITMENT_RANK_BONUS for the shortest, on a
+// log scale because the difference between 90 and 300 minutes matters far more
+// than the difference between 5000 and 6000.
+function commitmentRankBonus(movie) {
+  const minutes = titleCommitmentMinutes(movie);
+  if (!minutes) return 0;
+  const clamped = Math.min(COMMITMENT_MAX_MINUTES, Math.max(COMMITMENT_MIN_MINUTES, minutes));
+  const span = Math.log10(COMMITMENT_MAX_MINUTES) - Math.log10(COMMITMENT_MIN_MINUTES);
+  const position = (Math.log10(clamped) - Math.log10(COMMITMENT_MIN_MINUTES)) / span;
+  return COMMITMENT_RANK_BONUS * (1 - position);
+}
+
+// "3 seasons · 24 episodes · ~9h" / "1h 46m". The card has to show the number
+// the ranking is using, or a short title jumping the queue looks arbitrary.
+function formatCommitmentLabel(movie) {
+  const minutes = titleCommitmentMinutes(movie);
+  const asDuration = value => {
+    const hours = Math.floor(value / 60);
+    const rest = Math.round(value % 60);
+    if (!hours) return `${rest}m`;
+    return rest ? `${hours}h ${rest}m` : `${hours}h`;
+  };
+  if (!isShow(movie)) return minutes ? asDuration(minutes) : '';
+  const seasons = Math.max(0, Number(movie.seasonCount || 0));
+  const episodes = Math.max(0, Number(movie.episodeCount || 0));
+  const parts = [];
+  if (seasons) parts.push(`${seasons} season${seasons === 1 ? '' : 's'}`);
+  if (episodes) parts.push(`${episodes} episode${episodes === 1 ? '' : 's'}`);
+  if (minutes) parts.push(`~${asDuration(minutes)}`);
+  return parts.join(' · ');
+}
+
 // The India half of the contract: everything that survived the filter is
 // watchable, but the titles that need no VPN rank first among equals.
 function watchPlatformRankBonus(movie) {
@@ -10070,6 +10166,7 @@ function cardMarkup(movie, opts={}) {
     : 'no current positive taste overlap';
   const safeId = movie.id.replace(/'/g,"\\'");
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';
+  const commitmentLabel = attrSafe(formatCommitmentLabel(movie));
   const wikiUrl = wikiUrlForMovie(movie);
   const googleUrl = googleSearchUrlForMovie(movie);
   const tmdbUrl = tmdbUrlForMovie(movie);
@@ -10096,7 +10193,7 @@ function cardMarkup(movie, opts={}) {
       <div class="card-head">
         <div class="card-head-copy"><div class="card-title">${titleHtml}</div>
         <div class="format-row"><span class="title-format">${formatLabel}</span></div>
-        <div class="card-meta">${movie.language} - ${movie.country} - ${movie.year||'?'}</div>
+        <div class="card-meta">${movie.language} - ${movie.country} - ${movie.year||'?'}${commitmentLabel ? ` - ${commitmentLabel}` : ''}</div>
         ${showMatch?`<div class="match-label">${matchSummary}</div><div class="match-bar"><div class="match-fill" style="width:${matchPct}%"></div></div>`:''}</div>
       </div>
       ${renderStars(safeId, movie.rating || 0)}
@@ -11115,7 +11212,9 @@ function scoreMovies() {
       // describe taste fit alone, so a card's match percentage never moves
       // because the title happens to stream in India.
       item.watchBonus = watchPlatformRankBonus(item.movie);
-      item.rankScore = item.predictedRating + item.tenureBonus + item.watchBonus;
+      // Ordering only, like the two above it.
+      item.commitmentBonus = commitmentRankBonus(item.movie);
+      item.rankScore = item.predictedRating + item.tenureBonus + item.watchBonus + item.commitmentBonus;
       return item;
     });
 
@@ -11294,6 +11393,10 @@ function applyFreshWikiMovie(oldId, fresh, previous={}) {
     contentCertification:normalisedFresh.contentCertification || previous.contentCertification || null,
     tmdbTitle:normalisedFresh.tmdbTitle || previous.tmdbTitle || '',
     tmdbYear:normalisedFresh.tmdbYear || previous.tmdbYear || null,
+    runtimeMinutes:normalisedFresh.runtimeMinutes || previous.runtimeMinutes || null,
+    seasonCount:normalisedFresh.seasonCount || previous.seasonCount || null,
+    episodeCount:normalisedFresh.episodeCount || previous.episodeCount || null,
+    episodeRuntimeMinutes:normalisedFresh.episodeRuntimeMinutes || previous.episodeRuntimeMinutes || null,
     originalLanguage:normalisedFresh.originalLanguage || previous.originalLanguage || '',
     spokenLanguages:(normalisedFresh.spokenLanguages?.length ? normalisedFresh.spokenLanguages : previous.spokenLanguages) || [],
     tmdbIdVerified:!!(normalisedFresh.tmdbIdVerified || previous.tmdbIdVerified)

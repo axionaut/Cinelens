@@ -6186,3 +6186,44 @@ Verified by throwaway probe, not a stored assertion: the v153 deployment with a
 key giving two lanes and without one giving one; the 148.1 response — a real
 `fallbackModel` and no `lanes` — giving one lane; and an unrecognisable response
 giving one.
+
+## 154. Commitment is measured, and shorter ranks first
+
+Yes, concretely — and it was being thrown away like the language fields before
+it. The details response already carries `runtime` for a film, and
+`number_of_seasons` / `number_of_episodes` / `episode_run_time` for a show.
+Nothing here is inferred from genre or format. `TMDB_DATA_VERSION` goes to 11.
+
+Per-episode length is the one number TMDB is often missing on newer shows, so
+`last_episode_to_air.runtime` is the fallback. When neither exists the record
+says it does not know, and every consumer treats that as unknown rather than
+substituting an average.
+
+**The whole commitment is what ranks, not the episode.** A 22-minute sitcom with
+180 episodes asks for 66 hours; a three-hour film asks for three. Ranking on
+episode length would say the opposite of the truth, so `titleCommitmentMinutes`
+is `episodes × episode length` for a show and `runtime` for a film.
+
+`commitmentRankBonus` maps that onto 0 – 0.2 stars, log-scaled between 90
+minutes and 6000, and joins `rankScore` beside the tenure (max 0.3) and
+home-availability (0.15) terms. Log scale because the gap between 90 and 300
+minutes matters far more than the gap between 5000 and 6000; saturating at both
+ends so a 20-minute short and a 40-hour epic each stop at the edge instead of
+running away with it.
+
+It is deliberately a **tie-break on taste, not a substitute for it**: 0.2 stars
+separates two titles that already fit alike, and cannot lift a short bad match
+above a long good one. Like every other term in `rankScore`, it moves the
+ordering and never the match percentage a card displays. An unknown commitment
+scores 0 — neutral, never penalised — so a title is not buried for missing data.
+
+The card now states the number the ranking is using — `1h 46m`, or
+`3 seasons · 24 episodes · ~18h` — appended to the existing identity line. A
+short title jumping the queue with nothing on the card to explain it would read
+as arbitrary.
+
+Verified by throwaway probe, not a stored assertion: a film's runtime and a
+show's episodes × length, the sitcom outweighing the long film, both unknown
+shapes staying null, the bonus ordering short film > long film > short series >
+long-running series with unknown at 0, saturation at the short end, and five
+label shapes including singular/plural and the empty label for no data.
