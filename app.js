@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 157;
+const APP_VERSION = 158;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -4827,8 +4827,15 @@ function aiRateLimitRemaining(now=Date.now(), lane='gemini') {
 // The lane to send the next request down: the first one not cooling down.
 // Returns '' only when every lane is blocked, which is the one case a caller
 // still has to fail on.
+//
+// v158: this asked only about the persisted 429 stamp and ignored the lane
+// limiter's own daily cap. So with Gemini's daily budget spent and Groq free,
+// every pass still dealt batches to Gemini, every one failed locally on the
+// cap, and each failure raised the "Daily CineLens tagging budget reached"
+// toast - roughly every two seconds, forever, while a perfectly good second
+// lane sat unused.
 function pickAvailableAiLane(now=Date.now()) {
-  return availableAiLanes().find(lane => !aiRateLimitRemaining(now, lane)) || '';
+  return availableAiLanes().find(lane => !laneCooldownRemaining(lane, now)) || '';
 }
 
 function laneCooldownRemaining(lane, now=Date.now()) {
@@ -4861,7 +4868,12 @@ function formatDurationShort(milliseconds) {
 
 // Only the local 24h counter, so the UI can name which of the two blocks it is.
 function aiDailyCapRemaining(now=Date.now()) {
-  return aiLimiter.dailyRetryAfter(now);
+  // Every lane has to be spent for the budget to be "reached" - one lane's cap
+  // is not the app's cap once there are two.
+  return availableAiLanes().reduce(
+    (shortest, lane) => Math.min(shortest, aiLaneConfig(lane).limiter.dailyRetryAfter(now)),
+    Infinity
+  ) || 0;
 }
 
 function aiRateLimitError(lane='gemini') {
@@ -7848,7 +7860,7 @@ function moodBackfillPendingCount() {
 // Prefer the lane the tagger is least likely to be occupying. With one lane
 // this is the same behaviour as before.
 function moodBackfillLane() {
-  const lanes = availableAiLanes().filter(lane => !aiRateLimitRemaining(Date.now(), lane));
+  const lanes = availableAiLanes().filter(lane => !laneCooldownRemaining(lane));
   if (!lanes.length) return availableAiLanes()[0] || 'gemini';
   if (lanes.length === 1) return lanes[0];
   return backgroundAiTaggingInProgress ? lanes[lanes.length - 1] : lanes[0];
@@ -9585,6 +9597,24 @@ function syncMaintenancePanelPlacement() {
   }
 }
 
+// Keyed on the window the message is about, so a new cap or a new cooldown
+// speaks again while the same one never repeats.
+let lastAiBudgetToastKey = '';
+
+function notifyAiBudgetOnce(localCapOnly) {
+  const now = Date.now();
+  const remaining = localCapOnly ? aiDailyCapRemaining(now) : effectiveAiCooldownRemaining(now);
+  const key = `${localCapOnly ? 'cap' : 'cooldown'}:${Math.round((now + remaining) / 60000)}`;
+  if (key === lastAiBudgetToastKey) return;
+  lastAiBudgetToastKey = key;
+  showToast(
+    localCapOnly
+      ? `Daily tagging budget reached — tagging resumes ${formatDurationShort(remaining)}.`
+      : `AI is cooling down — tagging resumes ${formatDurationShort(remaining)}.`,
+    ''
+  );
+}
+
 function scheduleBackgroundAiQueue(delay = 700) {
   const cooldown = effectiveAiCooldownRemaining();
   const pendingNow = pendingBackgroundAiCount();
@@ -9701,7 +9731,7 @@ async function runBackgroundAiQueue() {
     // v152: deal the batches across every available lane. Two providers now
     // work the same backlog at the same time against separate quotas, instead
     // of every batch queuing behind one.
-    const lanes = availableAiLanes().filter(lane => !aiRateLimitRemaining(Date.now(), lane));
+    const lanes = availableAiLanes().filter(lane => !laneCooldownRemaining(lane));
     const dealLanes = lanes.length ? lanes : availableAiLanes();
     const settled = await Promise.allSettled(batches.map((group, index) => requestAiTags(group, {
       deferUi:true,
@@ -9731,12 +9761,11 @@ async function runBackgroundAiQueue() {
     });
     if (rateLimited) {
       if (!aiRateLimitRemaining() && !localCapOnly) registerAiRateLimit();
-      showToast(
-        localCapOnly
-          ? 'Daily CineLens tagging budget reached; tagging resumes as the 24h window rolls forward.'
-          : 'Gemini is cooling down; collection is waiting for tagging to resume.',
-        ''
-      );
+      // v158: a toast per failed pass is not information, it is an alarm stuck
+      // on. The status line already carries this state with a live countdown,
+      // which is the useful form; the toast exists only to announce the
+      // TRANSITION into it, so it fires once per window and then keeps quiet.
+      notifyAiBudgetOnce(localCapOnly);
     }
     if (Number(result?.tagged || 0)) deferRecommendationRefresh();
     saveLocalState({silentUi:true,preserveUpdatedAt:true,changedMovieIds});

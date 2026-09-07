@@ -6355,3 +6355,36 @@ is cooling; and the new batch delay. The first two assertions failed on their
 first run for a fixture reason — all three queues held the same five titles, so
 "5" appearing three times was correct — which is why the fixture now gives each
 queue a distinct population.
+
+## 158. The budget toast every two seconds was a lane bug wearing a toast
+
+The message repeated because the condition kept re-occurring, not because the
+toast was chatty. Both halves are fixed; only one of them is the toast.
+
+**The cause.** `pickAvailableAiLane` and the background batch dealer asked only
+about the persisted 429 stamp (`aiRateLimitRemaining`) and ignored the lane
+limiter's own daily cap. So with Gemini's daily budget spent and Groq free,
+every pass still dealt batches to Gemini, every one failed locally on the cap,
+and each failure raised the toast — while a perfectly good second lane sat
+unused. Lane availability now means `laneCooldownRemaining`, which is the 429
+stamp, the limiter's AIMD cooldown *and* its daily cap together.
+
+`aiDailyCapRemaining` had the same single-lane assumption and reported the app's
+budget as spent when only Gemini's was. It is now the shortest remaining across
+lanes: one spent lane is not the app's cap once there are two.
+
+**The toast.** A toast per failed pass is not information, it is an alarm stuck
+on. The status line already carries this state with a live countdown — which is
+the useful form — so the toast now exists only to announce the *transition* into
+it. `notifyAiBudgetOnce` keys on the window the message is about
+(`cap:<minute>` / `cooldown:<minute>`), so a new cap or a new cooldown speaks
+once and the same one never repeats. It also names the wait rather than the
+vague "as the 24h window rolls forward": *"Daily tagging budget reached —
+tagging resumes in 30 min."*
+
+Verified by throwaway probe, not a stored assertion: with Gemini's daily budget
+spent and Groq free, both the general picker and the mood loop choose Groq, the
+app reports no cap and no pipeline stall; with both spent there is no lane to
+pick and the cap is reported; three consecutive failed passes raise exactly one
+toast; a new window speaks again; and a cooldown is separate news from a cap,
+each naming its own remaining time.
