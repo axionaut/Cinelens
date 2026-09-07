@@ -6010,3 +6010,62 @@ directions and on tag count, a stamped record beating an unstamped one, records
 present on only one side surviving, `_catalogueUpdatedAt` surviving into the
 chunk payload while `_updatedAt` and personal state still do not, a TMDB refresh
 stamping the clock, and `rateMovie` not stamping it.
+
+## 150. "Tap to reconnect" was a one-way latch on the first blip
+
+v141 stopped a Drive reconnect loop that flashed a Google popup every few
+seconds, and it stopped it by spending the page's one automatic recovery attempt
+on failure — `driveMarkAutoRecoverySpent`, which sets `driveAutoRecoveryExhausted`.
+That flag is a **one-way latch**: while it is set, `silentlyRenewDriveToken`
+returns immediately and `requestDriveTokenSilent` throws before doing anything.
+
+The catch block that called it did not look at *why* the renewal failed. So any
+of these spent the whole session's automatic recovery:
+
+- a slow mobile network,
+- a `driveFetch` timeout,
+- a token that arrived fine while `restoreDriveSession` did not finish — which
+  is exactly what a large library on a phone produces.
+
+Meanwhile `requestDriveTokenSilent` already had the right idea and two graded
+ladders — `DRIVE_SILENT_RENEW_GESTURE_BACKOFF_MS` for "Google needs the user",
+`DRIVE_SILENT_RENEW_TRANSIENT_BACKOFF_MS` for everything else, with a comment
+explaining precisely why a timeout must not earn the long block. All of it sat
+unreachable behind the latch.
+
+Three changes:
+
+**Classify before latching.** `driveFailureNeedsGesture` is now the single place
+that decides what "Google needs the user" means, and only that verdict calls
+`driveMarkAutoRecoverySpent`. A transient failure clears the token, climbs the
+transient ladder and stays automatic. The app's own refusal
+(`cinelensSilentRenewBlocked`) is explicitly not Google's verdict and cannot
+latch anything by itself.
+
+**Wake up when the rung expires.** The ladders set a block-until time that
+nothing ever woke for — recovery waited on a visibility change, an `online`
+event, or the token refresh timer, and on a phone that timer is the first thing
+the browser suspends. `setSilentDriveRenewalBlockUntil` now schedules its own
+retry. "It should reconnect itself" was right: the schedule existed, the alarm
+clock did not.
+
+**Use the gesture the user is about to make anyway.** When recovery really is
+spent, the only thing standing in the way is a user gesture — and the user is
+about to click something on this page for an unrelated reason. That click is
+what Google was asking for. `armDriveGestureRearm` listens for one
+`pointerdown`, clears the latch and makes exactly one more attempt. If that
+fails the latch closes again and the chip goes back to asking, which is the
+honest outcome. It is one attempt, not a loop, so the popup storm v141 killed
+cannot return.
+
+The chip's own rules are unchanged: `driveReconnectStalled` still offers a tap
+after a long unhealthy stretch. The difference is that the app no longer stops
+trying underneath it.
+
+Verified by throwaway probe, not a stored assertion: a transient failure leaving
+recovery unspent, unblocked of gesture claims, backed off and scheduled; the
+ladder climbing across repeated failures without latching; a genuine
+`interaction_required` still latching and arming the listener; a synthetic
+`pointerdown` restoring the session with no chip tap; the listener releasing
+itself and not firing on a second click; and the scheduled retry waking on its
+own.

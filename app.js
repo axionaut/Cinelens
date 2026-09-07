@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 149;
+const APP_VERSION = 150;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -12998,6 +12998,8 @@ let driveNeedsUserGestureFlag=false;
 // chip turns into a button; a success, coming back online, or the user tapping
 // Drive hands the shot back.
 let driveAutoRecoveryExhausted=false;
+let driveSilentRenewRetryTimer=null;
+let driveGestureRearmArmed=false;
 let driveSilentRenewInFlight=null;
 let driveSilentRenewBlockedUntil=0;
 let driveSilentRenewLastAttemptAt=0;
@@ -13047,6 +13049,24 @@ function setSilentDriveRenewalBlockUntil(until=0) {
     if (value) localStorage.setItem(DRIVE_SILENT_BLOCK_KEY, String(value));
     else localStorage.removeItem(DRIVE_SILENT_BLOCK_KEY);
   } catch(e) {}
+  scheduleDriveSilentRenewRetry(value);
+}
+
+// v150: the backoff ladders existed but nothing woke up when a rung expired.
+// Recovery waited for a visibility change, an online event or the token
+// refresh timer - and on a phone that timer is exactly what the browser
+// suspends. "It should reconnect itself" was right: the schedule was there and
+// the alarm clock was missing.
+function scheduleDriveSilentRenewRetry(until=0) {
+  clearTimeout(driveSilentRenewRetryTimer);
+  driveSilentRenewRetryTimer=null;
+  if (!until || !state.drive?.enabled) return;
+  const delay=Math.max(1000, until - Date.now() + 250);
+  driveSilentRenewRetryTimer=setTimeout(() => {
+    driveSilentRenewRetryTimer=null;
+    if (document.visibilityState !== 'visible') return;
+    silentlyRenewDriveToken();
+  }, delay);
 }
 
 function silentDriveRenewalBlocked(now=Date.now()) {
@@ -13092,7 +13112,25 @@ function silentlyRenewDriveToken() {
       // still a failed renewal. Leaving the half-usable token behind made
       // driveNeedsUserGesture() answer "no gesture needed", which is precisely
       // how the chip got stuck on "Reconnecting…" while the popup loop ran.
-      driveMarkAutoRecoverySpent();
+      //
+      // v150: but this used to spend the page's whole automatic recovery on
+      // ANY failure, and driveAutoRecoveryExhausted is a one-way latch that
+      // makes every later attempt return immediately. One slow mobile network
+      // moment, one interrupted catalogue read on a large library, and the app
+      // asked for a tap for the rest of the session - while the carefully
+      // graded transient/gesture ladders in requestDriveTokenSilent sat unused
+      // behind the latch. Only Google's definitive "a user must act" verdict
+      // earns it now; everything else backs off and tries again on its own.
+      if (driveFailureNeedsGesture(e)) {
+        driveMarkAutoRecoverySpent();
+      } else {
+        state.drive.connected=false;
+        state.drive.accessToken='';
+        const ladder=DRIVE_SILENT_RENEW_TRANSIENT_BACKOFF_MS;
+        const step=ladder[Math.min(driveSilentRenewFailures, ladder.length - 1)];
+        driveSilentRenewFailures++;
+        setSilentDriveRenewalBlockUntil(Date.now() + step);
+      }
       setDriveStatus('');
       return false;
     }
@@ -13109,12 +13147,46 @@ function silentlyRenewDriveToken() {
 // would help. Dropping the cached token is deliberate: an explicit reconnect
 // ignores it anyway, and keeping it would let driveNeedsUserGesture() go on
 // answering "no gesture needed" while nothing was actually working.
+// One place decides what "Google needs the user" means. A blocked silent
+// renewal (cinelensSilentRenewBlocked) is this app's own refusal, not Google's
+// verdict, so it must never latch the tap state by itself.
+function driveFailureNeedsGesture(error) {
+  if (!error) return false;
+  if (error.cinelensSilentRenewBlocked) return driveNeedsUserGestureFlag;
+  const code=String(error?.error || error?.message || '');
+  return /interaction_required|consent_required|login_required|access_denied/i.test(code);
+}
+
+// When automatic recovery is spent, the thing standing between the app and a
+// working session is a user gesture - and the user is about to make one, on
+// this page, for some entirely unrelated reason. That click satisfies exactly
+// what Google was asking for, so the next silent request usually succeeds.
+// Listening for it once turns "tap the chip" into "carry on using the app".
+function armDriveGestureRearm() {
+  if (driveGestureRearmArmed || typeof document === 'undefined') return;
+  driveGestureRearmArmed=true;
+  const onGesture=() => {
+    document.removeEventListener('pointerdown', onGesture, true);
+    driveGestureRearmArmed=false;
+    if (!driveAutoRecoveryExhausted || !state.drive?.enabled) return;
+    // One re-armed attempt, not a loop: if it fails the latch closes again and
+    // the chip goes back to asking, which is the honest outcome.
+    driveAutoRecoveryExhausted=false;
+    driveNeedsUserGestureFlag=false;
+    setSilentDriveRenewalBlockUntil(0);
+    driveSilentRenewLastAttemptAt=0;
+    silentlyRenewDriveToken();
+  };
+  document.addEventListener('pointerdown', onGesture, true);
+}
+
 function driveMarkAutoRecoverySpent() {
   state.drive.connected=false;
   state.drive.accessToken='';
   clearStoredDriveToken();
   driveAutoRecoveryExhausted=true;
   driveNeedsUserGestureFlag=true;
+  armDriveGestureRearm();
 }
 
 function scheduleDriveTokenRefresh(expiry=0) {
