@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 155;
+const APP_VERSION = 156;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -8834,6 +8834,12 @@ const COMMITMENT_MAX_MINUTES = 6000;
 // short bad match above a long good one - "shorter" is a tie-break on taste,
 // not a replacement for it.
 const COMMITMENT_RANK_BONUS = 0.2;
+// In stars, and deliberately far larger than any bonus: these replace hard
+// tiers, so they must dominate the terms that merely nudge. A full star for
+// thin tags (the fit is measured on too little to trust), half a star for a
+// record TMDB has never answered for.
+const UNDERFILLED_TAG_PENALTY = 1;
+const UNCHECKED_DATA_PENALTY = 0.5;
 
 function titleCommitmentMinutes(movie) {
   if (!movie) return COMMITMENT_UNKNOWN;
@@ -9779,7 +9785,7 @@ function renderRecs() {
     if (top.length) {
       document.getElementById('recCount').textContent =
         `${strongMatchCountForDisplay(fetchStatus)} strong (≥95%) · showing ${top.length} of ${scored.length} matches`;
-      renderCardsInto(grid, top.map(item => ({ movie:item.movie, opts:{ score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating, receptionEffect:item.receptionEffect } })));
+      renderCardsInto(grid, top.map(item => ({ movie:item.movie, opts:{ score:item.score, matchedTags:item.matchedTags, matchedGenres:item.matchedGenres, posOverlap:item.posOverlap, genreOverlap:item.genreOverlap, negativeOverlap:item.negativeOverlap, tasteFit:item.tasteFit, matchScore:item.matchScore, predictedRating:item.predictedRating, receptionEffect:item.receptionEffect, availabilityBonus:item.availabilityBonus, commitmentBonus:item.commitmentBonus, tagFloorPenalty:item.tagFloorPenalty, dataPenalty:item.dataPenalty } })));
       return;
     }
   }
@@ -10160,7 +10166,7 @@ function cardMarkup(movie, opts={}) {
   const resolvedMatch = suppressMatch
     ? null
     : hasSuppliedMatch
-      ? { matchScore:Number(matchScore ?? tasteFit) || 0, tasteFit:Number(tasteFit ?? matchScore) || 0, predictedRating:Number(predictedRating || 0), receptionEffect:Number(receptionEffect || 0), posOverlap:Number(posOverlap || 0), genreOverlap:Number(genreOverlap || 0), negativeOverlap:Number(negativeOverlap || 0), matchedTags:matchedTags || new Set(), matchedGenres:matchedGenres || new Set() }
+      ? { matchScore:Number(matchScore ?? tasteFit) || 0, tasteFit:Number(tasteFit ?? matchScore) || 0, predictedRating:Number(predictedRating || 0), receptionEffect:Number(receptionEffect || 0), availabilityBonus:Number(opts.availabilityBonus || 0), commitmentBonus:Number(opts.commitmentBonus || 0), tagFloorPenalty:Number(opts.tagFloorPenalty || 0), dataPenalty:Number(opts.dataPenalty || 0), posOverlap:Number(posOverlap || 0), genreOverlap:Number(genreOverlap || 0), negativeOverlap:Number(negativeOverlap || 0), matchedTags:matchedTags || new Set(), matchedGenres:matchedGenres || new Set() }
       : automaticMatch;
   const showMatch = !!resolvedMatch;
   const resolvedMatchScore = Number(resolvedMatch?.matchScore ?? resolvedMatch?.tasteFit ?? 0) || 0;
@@ -10176,12 +10182,22 @@ function cardMarkup(movie, opts={}) {
   // its own terms and must not be rescaled against the taste-fit reference.
   const matchPct = absoluteMatch ? Math.round(resolvedMatchScore * 100) : displayMatchPercent(resolvedMatchScore);
   const receptionHint = usableReception(movie) ? ` · reception ${formatReceptionEffect(resolvedReceptionEffect)}` : '';
-  // Tenure moves a title up the list without moving its match percentage, so
-  // the card has to name it or the ordering looks arbitrary.
+  // v156: every one of these now moves the percentage itself, so the line's job
+  // changed: it is no longer explaining an invisible reordering, it is showing
+  // the working behind the number above it.
   const tenureCount = topTenTenureCount(movie);
   const tenureHint = tenureCount ? ` · top 10 ×${tenureCount}` : '';
+  const scoreHints = [
+    [resolvedMatch?.availabilityBonus, 'on your platforms in India'],
+    [resolvedMatch?.commitmentBonus, 'length'],
+    [resolvedMatch?.tagFloorPenalty ? -resolvedMatch.tagFloorPenalty : 0, 'thin tags'],
+    [resolvedMatch?.dataPenalty ? -resolvedMatch.dataPenalty : 0, 'unchecked']
+  ]
+    .filter(([value]) => Math.abs(Number(value) || 0) >= 0.05)
+    .map(([value, label]) => ` · ${label} ${formatReceptionEffect(Number(value))}`)
+    .join('');
   const matchSummary = resolvedPosOverlap
-    ? `${resolvedPosOverlap} learned tag signal${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre signal${resolvedGenreOverlap===1?'':'s'}`:''} · ${matchPct}%${absoluteMatch ? ' similar' : ' of your best match'}${resolvedPredictedRating?` · model ${resolvedPredictedRating.toFixed(1)}★`:''}${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} negative`:''}${receptionHint}${tenureHint}`
+    ? `${resolvedPosOverlap} learned tag signal${resolvedPosOverlap===1?'':'s'}${resolvedGenreOverlap?` · ${resolvedGenreOverlap} genre signal${resolvedGenreOverlap===1?'':'s'}`:''} · ${matchPct}%${absoluteMatch ? ' similar' : ' of your best match'}${resolvedPredictedRating?` · model ${resolvedPredictedRating.toFixed(1)}★`:''}${resolvedNegativeOverlap?` · ${resolvedNegativeOverlap} negative`:''}${receptionHint}${scoreHints}${tenureHint}`
     : 'no current positive taste overlap';
   const safeId = movie.id.replace(/'/g,"\\'");
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';
@@ -11068,7 +11084,32 @@ function predictTasteFit(movie, model=null, opts={}) {
   const withReception = clamp(tasteOnlyPredictedRating + shift, 1, 5);
   const receptionEffect = withReception - tasteOnlyPredictedRating;
   const languageBonus = (!opts.tasteOnly && movie?.language === 'English') ? ENGLISH_PREFERENCE_STAR_BONUS : 0;
-  let predictedRating = opts.tasteOnly ? tasteOnlyPredictedRating : clamp(withReception + languageBonus, 1, 5);
+  // v156: PROMOTION MEANS THE SCORE, NOT A PARALLEL ORDER.
+  // Tenure, home availability and commitment were added to a separate rankScore
+  // that sorted the list, while matchScore - the number printed on the card -
+  // knew nothing about them. A For You row read 100%, 99%, 94%, 100%, 94%,
+  // 100%, 95%: ordered correctly by a number nobody could see, and scattered in
+  // the number they could. That makes the percentage worthless as an
+  // explanation of the order, which is the only job it has.
+  //
+  // Reception and the English preference were always folded in here. These join
+  // them, so there is exactly one number: it orders the list, it is what the
+  // card prints, and the two cannot disagree.
+  const tenureBonus = opts.tasteOnly ? 0 : topTenTenureBonus(movie);
+  const availabilityBonus = opts.tasteOnly ? 0 : watchPlatformRankBonus(movie);
+  const commitmentBonus = opts.tasteOnly ? 0 : commitmentRankBonus(movie);
+  // The two demotions were hard tiers in the sort comparator, sitting ABOVE the
+  // score - the same defect from the other direction. A complete-but-mediocre
+  // title outranking a strong one was intended, but with the reason invisible
+  // in the number it read as the list ignoring its own percentages. They are
+  // penalties now: large enough to stay decisive in practice, and visible,
+  // because a title whose tags are thin or whose data was never fetched
+  // genuinely is a weaker claim.
+  const tagFloorPenalty = (opts.tasteOnly || tagFloorMet(movie)) ? 0 : UNDERFILLED_TAG_PENALTY;
+  const dataPenalty = (opts.tasteOnly || tmdbDataComplete(movie)) ? 0 : UNCHECKED_DATA_PENALTY;
+  let predictedRating = opts.tasteOnly
+    ? tasteOnlyPredictedRating
+    : clamp(withReception + languageBonus + tenureBonus + availabilityBonus + commitmentBonus - tagFloorPenalty - dataPenalty, 1, 5);
   let finalMatchScore = clamp((predictedRating - 1) / 4, 0, 1);
   if (!opts.tasteOnly && !usableReception(movie) && finalMatchScore > RECEPTION_UNCORROBORATED_CAP) {
     finalMatchScore = RECEPTION_UNCORROBORATED_CAP;
@@ -11083,6 +11124,11 @@ function predictTasteFit(movie, model=null, opts={}) {
     receptionShift:shift,
     receptionEffect,
     languageBonus,
+    tenureBonus,
+    availabilityBonus,
+    commitmentBonus,
+    tagFloorPenalty,
+    dataPenalty,
     matchScore:finalMatchScore,
     tasteFit:finalMatchScore,
     posOverlap,
@@ -11223,28 +11269,22 @@ function scoreMovies() {
     .map(movie => predictTasteFit(movie, getTasteModel('', formatClass(movie))))
     // Discovery still needs some learned positive evidence. We do not fill For
     // You with neutral baseline guesses merely because every title has a rating.
-    .filter(item => item.posOverlap > 0 && item.predictedRating > Number(getTasteModel('', formatClass(item.movie)).baseline || 3))
+    // The baseline gate asks whether the TASTE evidence clears the bar, so it
+    // reads the taste-only rating. Left on the adjusted one, a penalty would
+    // delete titles from the list rather than demote them - a visibility change
+    // nobody asked for.
+    .filter(item => item.posOverlap > 0 && item.tasteOnlyPredictedRating > Number(getTasteModel('', formatClass(item.movie)).baseline || 3))
     .map(item => {
-      // Ordering only. predictedRating and matchScore keep describing fit, so
-      // the match percentage on a card never inflates because a title is old.
-      item.tenureBonus = topTenTenureBonus(item.movie);
-      // Ordering only, like tenureBonus: matchScore and predictedRating still
-      // describe taste fit alone, so a card's match percentage never moves
-      // because the title happens to stream in India.
-      item.watchBonus = watchPlatformRankBonus(item.movie);
-      // Ordering only, like the two above it.
-      item.commitmentBonus = commitmentRankBonus(item.movie);
-      item.rankScore = item.predictedRating + item.tenureBonus + item.watchBonus + item.commitmentBonus;
+      // v156: every adjustment now lives inside predictedRating, so the sort
+      // key IS the score the card prints. Adding them again here would count
+      // them twice and put the order back out of step with the number.
+      item.rankScore = item.predictedRating;
       return item;
     });
 
   ranked.sort((a, b) =>
-    // Underfilled titles rank below every title with a complete tag set, no
-    // matter how well their few tags happen to fit.
-    Number(tagFloorMet(b.movie)) - Number(tagFloorMet(a.movie)) ||
-    // And a title nobody has checked for availability or language ranks below
-    // every title that was checked, however well it scores.
-    Number(tmdbDataComplete(b.movie)) - Number(tmdbDataComplete(a.movie)) ||
+    // v156: the two tiers that sat here are penalties inside the score now.
+    // Nothing orders this list from outside the number the card prints.
     b.rankScore - a.rankScore ||
     b.predictedRating - a.predictedRating ||
     b.positiveScore - a.positiveScore ||

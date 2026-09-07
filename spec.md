@@ -6250,3 +6250,61 @@ including a round runtime and the empty case, the full form unchanged for both
 film and show, and a real card rendered into the DOM with both lines read back —
 tile `2024 - Show - ~18h`, body `English - USA - 2024 - 3 seasons · 24 episodes
 · ~18h`.
+
+## 156. Promotion means the score. There is only one number now
+
+Owner, on seeing a For You row read **100%, 99%, 94%, 100%, 94%, 100%, 95%**:
+
+> Whenever I say something needs promotion or demotion, it always means via the
+> route of adjusting the score. There's no point of the match score otherwise if
+> you just decide to scatter them randomly!
+
+He is right, and the fault is a principle stated three times in this spec and
+wrong every time: v136's tenure, v142's India availability and v154's commitment
+were each added to `rankScore` while `matchScore` — the number printed on the
+card — deliberately knew nothing about them. Each section justified that as
+protecting the percentage from inflation. The actual effect is that the list was
+ordered correctly by a number the user cannot see, and the number they can see
+looked random.
+
+A match percentage that does not explain the order has no job left.
+
+Reception and the English preference were always folded into `predictedRating`.
+The three bonuses now join them there, so there is exactly one number: it orders
+the list, it is what the card prints, and the two cannot disagree.
+`rankScore = predictedRating`.
+
+### The same defect from the other side
+
+Two **hard tiers** sat above the score in the sort comparator: underfilled tags,
+and a record TMDB has never answered for. Both were intended (v144 added the
+second at Nitin's request), but a tier is exactly the thing being complained
+about — an ordering rule the number cannot express. They are penalties inside
+the score now:
+
+- `UNDERFILLED_TAG_PENALTY` = 1 star — the fit is measured on too little to
+  trust.
+- `UNCHECKED_DATA_PENALTY` = 0.5 stars — nothing has been verified about it.
+
+Both are far larger than any bonus (0.3 tenure, 0.2 commitment, 0.15
+availability), so they stay decisive in practice while being visible in the
+number. The comparator now sorts on `rankScore` and its existing deterministic
+tie-breaks, and nothing orders the list from outside the score.
+
+**One consequence needed care.** `scoreMovies` filters candidates on "predicted
+rating beats the lane baseline". Left on the adjusted rating, a one-star penalty
+would push underfilled titles below the baseline and **delete** them from
+recommendations rather than demote them — a visibility change nobody asked for.
+That gate asks whether the *taste evidence* clears the bar, so it now reads
+`tasteOnlyPredictedRating`.
+
+The card's match line changes job accordingly: it no longer explains an
+invisible reordering, it shows the working behind the number above it —
+`on your platforms in India +0.2★ · length +0.1★ · thin tags -1.0★`.
+
+Verified by throwaway probe, not a stored assertion: an 85-title fixture where
+the displayed percentages never rise as the list descends; a short title
+outranking an identically-fitting long one **and showing a higher percentage**
+(100% against 64%, which can only pass if the term is inside `matchScore`); an
+unchecked title demoted with its percentage showing it; the two penalties at
+their stated magnitudes; and `rankScore === predictedRating`.
