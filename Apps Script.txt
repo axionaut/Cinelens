@@ -15,11 +15,18 @@ function doGet() {
   });
 }
 
+// Which provider this ONE request prefers. Apps Script runs every request in
+// its own isolated execution, so a module-level value is request-scoped here in
+// a way it would not be on a shared server. The client sets it per call so the
+// two lanes can run at the same time against different quotas.
+var REQUEST_PROVIDER = '';
+
 function doPost(e) {
   try {
     const request = JSON.parse(
       e && e.postData && e.postData.contents || '{}'
     );
+    REQUEST_PROVIDER = String(request && request.provider || '');
 
     if (
       request.task === 'normalize-tag-cloud' ||
@@ -602,14 +609,22 @@ function isRetryableProviderStatus(status) {
   return status === 429 || status === 408 || (status >= 500 && status < 600);
 }
 
+// v152: the client now drives BOTH providers at once rather than treating Groq
+// as an emergency exit, so this picks the requested lane first and keeps the
+// other as that lane's fallback. Either direction still only falls through on a
+// rate limit or a server error.
 function callGemini(prompt, schema, maxOutputTokens, temperature) {
+  const wantsGroq = REQUEST_PROVIDER === 'groq' && groqApiKey();
+  const first = wantsGroq ? callGroq : callGeminiOnce;
+  const second = wantsGroq ? callGeminiOnce : callGroq;
+  const secondAvailable = wantsGroq ? true : !!groqApiKey();
   try {
-    return callGeminiOnce(prompt, schema, maxOutputTokens, temperature);
+    return first(prompt, schema, maxOutputTokens, temperature);
   } catch (error) {
-    if (!error || !error.cinelensRetryable || !groqApiKey()) {
+    if (!error || !error.cinelensRetryable || !secondAvailable) {
       throw error;
     }
-    return callGroq(prompt, schema, maxOutputTokens, temperature);
+    return second(prompt, schema, maxOutputTokens, temperature);
   }
 }
 
@@ -649,11 +664,15 @@ function callGroq(prompt, schema, maxOutputTokens, temperature) {
   const body = JSON.parse(response.getContentText() || '{}');
 
   if (status < 200 || status >= 300) {
-    throw new Error(
+    const failure = new Error(
       body.error && body.error.message
         ? 'Groq: ' + body.error.message
         : 'Groq request failed: HTTP ' + status
     );
+    // Same marking as the Gemini side, so a Groq-first request can fall back to
+    // Gemini on a rate limit exactly as the reverse already did.
+    failure.cinelensRetryable = isRetryableProviderStatus(status);
+    throw failure;
   }
 
   const choice = body.choices && body.choices[0];

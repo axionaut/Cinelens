@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 151;
+const APP_VERSION = 152;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -333,8 +333,73 @@ const aiLimiter = new AdaptiveLimiter({
   dailyLimit: AI_TAG_LANE_RPD
 });
 
+// v152: Groq is a SECOND LANE, not a spare tyre. Fallback alone still spent
+// every request against one quota and stalled the entire pipeline whenever that
+// quota cooled down - including the taste story, which is a single request that
+// has nothing to do with the tagging backlog it was queuing behind.
+//
+// The two lanes are genuinely independent: their own limiter, their own daily
+// counter, their own cooldown. Groq's free tier meters differently from
+// Gemini's, so the numbers are its own rather than a copy.
+const AI_GROQ_LANE_RPM = 25;
+const AI_GROQ_LANE_RPD = 900;
+const groqLimiter = new AdaptiveLimiter({
+  name: 'groq',
+  rpm: AI_GROQ_LANE_RPM,
+  concurrency: AI_TAG_LANE_CONCURRENCY,
+  maxConcurrency: AI_TAG_LANE_CONCURRENCY,
+  burst: 1,
+  dailyLimit: AI_GROQ_LANE_RPD
+});
+
+const AI_LANES = {gemini:{limiter:aiLimiter, cooldownKey:'aiRateLimitUntil', countKey:'aiRateLimitCount', atKey:'aiRateLimitedAt'},
+                  groq:{limiter:groqLimiter, cooldownKey:'groqRateLimitUntil', countKey:'groqRateLimitCount', atKey:'groqRateLimitedAt'}};
+
+function aiLaneConfig(lane) {
+  return AI_LANES[lane] || AI_LANES.gemini;
+}
+
+// The Groq lane exists only if the deployed Apps Script actually has a key for
+// it. doGet reports that, and the answer is cached in meta so this costs one
+// request a day rather than one per load. Until it answers, the app runs
+// single-lane exactly as before - so a client update that arrives before the
+// backend redeploy cannot double the Gemini request rate.
+const AI_LANE_PROBE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+let aiLaneProbeInFlight = null;
+
+function groqLaneAvailable() {
+  return !!String(state.meta?.aiFallbackModel || '');
+}
+
+function availableAiLanes() {
+  return groqLaneAvailable() ? ['gemini', 'groq'] : ['gemini'];
+}
+
+function probeAiLanes() {
+  if (aiLaneProbeInFlight) return aiLaneProbeInFlight;
+  const checkedAt = Date.parse(state.meta?.aiFallbackCheckedAt || '') || 0;
+  if (Date.now() - checkedAt < AI_LANE_PROBE_INTERVAL_MS) return Promise.resolve(groqLaneAvailable());
+  aiLaneProbeInFlight = (async () => {
+    try {
+      const response = await fetchWithTimeout(AI_TAGGER_URL, {method:'GET'}, 15000);
+      if (!response.ok) return groqLaneAvailable();
+      const payload = await response.json();
+      state.meta = state.meta || {};
+      state.meta.aiFallbackModel = String(payload?.fallbackModel || '');
+      state.meta.aiFallbackCheckedAt = nowStamp();
+      saveLocalState({silentUi:true, preserveUpdatedAt:true, driveProfileOnly:true});
+      return groqLaneAvailable();
+    } catch (_) {
+      return groqLaneAvailable();
+    } finally {
+      aiLaneProbeInFlight = null;
+    }
+  })();
+  return aiLaneProbeInFlight;
+}
+
 function pipelineLimiterSnapshot() {
-  return [wikiLimiter, tmdbLimiter, aiLimiter].map(limiter => limiter.snapshot());
+  return [wikiLimiter, tmdbLimiter, aiLimiter, groqLimiter].map(limiter => limiter.snapshot());
 }
 
 const TMDB_FETCH_TIMEOUT_MS = 15 * 1000;
@@ -2069,13 +2134,15 @@ async function normalizeTagCloudWithAi(opts={}) {
   if (!rawCount) return false;
   tagCloudNormalizationInProgress = true;
   tagCloudNormalizationAttemptedCount = rawCount;
+  const normalizeLane = pickAvailableAiLane() || 'gemini';
   try {
-    await reserveAiRequest(AI_REQUEST_DELAY_MS);
+    await reserveAiRequest(AI_REQUEST_DELAY_MS, normalizeLane);
     const response = await runAiRequest(() => fetchWithTimeout(AI_TAGGER_URL, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       body:JSON.stringify({
         task:'normalize-tag-cloud',
+        provider:normalizeLane === 'groq' ? 'groq' : 'gemini',
         items:[],
         normalizeVocabularyOnly:true,
         optimizeVocabulary:true,
@@ -2096,7 +2163,7 @@ async function normalizeTagCloudWithAi(opts={}) {
       const error=new Error(`AI tag normalization HTTP ${response.status}`);
       if (response.status === 429) {
         error.cinelensRateLimited=true;
-        registerAiRateLimit();
+        registerAiRateLimit(normalizeLane);
       }
       throw error;
     }
@@ -2499,11 +2566,15 @@ function purgeAiSensitiveContentExclusions() {
 }
 
 async function postAiTaggerBatch(items, partials, opts={}) {
-  await reserveAiRequest();
-  // v91: admission control lives in aiLimiter, so up to
+  // v152: the lane is chosen by the caller (background tagging alternates them)
+  // or, failing that, by whichever lane is not cooling down. Only when every
+  // lane is blocked does this refuse, and reserveAiRequest still says so.
+  const lane = opts.lane || pickAvailableAiLane() || 'gemini';
+  await reserveAiRequest(AI_REQUEST_DELAY_MS, lane);
+  // v91: admission control lives in the lane limiter, so up to
   // AI_TAG_LANE_CONCURRENCY of these batches are genuinely in flight at once
   // and a 429 halves the lane instead of stopping the app.
-  return runAiRequest(() => postAiTaggerBatchRequest(items, partials, opts));
+  return runAiRequest(admittedLane => postAiTaggerBatchRequest(items, partials, {...opts, lane:admittedLane}), lane);
 }
 
 async function postAiTaggerBatchRequest(items, partials, opts={}) {
@@ -2522,6 +2593,7 @@ async function postAiTaggerBatchRequest(items, partials, opts={}) {
       headers:{'Content-Type':'text/plain;charset=utf-8'},
       signal:controller.signal,
       body:JSON.stringify({
+        provider:opts.lane === 'groq' ? 'groq' : 'gemini',
         items:items.map((movie, index) => {
           const sourceText=aiTagSourceText(movie);
           const partial = partials[String(movie.id)] || {tags:[]};
@@ -2575,7 +2647,7 @@ async function postAiTaggerBatchRequest(items, partials, opts={}) {
     if (response.status === 429 || response.status === 503) {
       error.cinelensRateLimited=true;
       error.retryAfterMs=Number(response.headers.get('retry-after') || 0) * 1000;
-      registerAiRateLimit();
+      registerAiRateLimit(opts.lane);
     }
     throw error;
   }
@@ -2656,7 +2728,7 @@ async function requestAiTagsInner(items, opts={}) {
     const error = new Error(payload.error || 'AI tagging failed');
     if (isExternalRateLimitError(error)) {
       error.cinelensRateLimited=true;
-      registerAiRateLimit();
+      registerAiRateLimit(opts.lane);
     }
     if (String(payload.code || '').toUpperCase() === 'PROHIBITED_CONTENT' || isAiSensitiveContentBlock(error)) {
       error.cinelensSensitiveContentBlock = true;
@@ -2680,7 +2752,7 @@ async function requestAiTagsInner(items, opts={}) {
     }
     throw error;
   }
-  clearAiRateLimitAfterSuccess();
+  clearAiRateLimitAfterSuccess(opts.lane);
   const byId = new Map((payload.results || []).map(result => [String(result.id), result]));
   let tagged = 0;
   let failed = 0;
@@ -2929,7 +3001,8 @@ function finalizeStartupAfterDrive({allowCollection=false}={}) {
       queueDriveSync();
     }
     runStartupMaintenance();
-    scheduleTagCloudNormalization(1800);
+      probeAiLanes();
+  scheduleTagCloudNormalization(1800);
     scheduleReceptionBackfill(4500);
     scheduleTmdbBackfill(4500);
     scheduleMoodBackfill(6000);
@@ -4731,16 +4804,35 @@ function isLocalDailyCapError(error) {
   return !!error?.cinelensLocalDailyCap;
 }
 
-function aiRateLimitRemaining(now=Date.now()) {
-  return Math.max(0,(Number(state.meta?.aiRateLimitUntil || 0) || 0) - now);
+function aiRateLimitRemaining(now=Date.now(), lane='gemini') {
+  return Math.max(0,(Number(state.meta?.[aiLaneConfig(lane).cooldownKey] || 0) || 0) - now);
 }
 
-function effectiveAiCooldownRemaining(now=Date.now()) {
+// The lane to send the next request down: the first one not cooling down.
+// Returns '' only when every lane is blocked, which is the one case a caller
+// still has to fail on.
+function pickAvailableAiLane(now=Date.now()) {
+  return availableAiLanes().find(lane => !aiRateLimitRemaining(now, lane)) || '';
+}
+
+function laneCooldownRemaining(lane, now=Date.now()) {
+  const limiter=aiLaneConfig(lane).limiter;
   return Math.max(
-    aiRateLimitRemaining(now),
-    Math.max(0, Number(aiLimiter.cooldownUntil || 0) - now),
-    aiLimiter.dailyRetryAfter(now)
+    aiRateLimitRemaining(now, lane),
+    Math.max(0, Number(limiter.cooldownUntil || 0) - now),
+    limiter.dailyRetryAfter(now)
   );
+}
+
+// v152: with two lanes the pipeline is only waiting when EVERY lane is waiting,
+// and the wait is the shortest of them. Reporting Gemini's cooldown while Groq
+// is free would stall collection and print "cooling down" over a pipeline that
+// is not.
+function effectiveAiCooldownRemaining(now=Date.now()) {
+  return availableAiLanes().reduce(
+    (shortest, lane) => Math.min(shortest, laneCooldownRemaining(lane, now)),
+    Infinity
+  ) || 0;
 }
 
 function formatDurationShort(milliseconds) {
@@ -4756,14 +4848,15 @@ function aiDailyCapRemaining(now=Date.now()) {
   return aiLimiter.dailyRetryAfter(now);
 }
 
-function aiRateLimitError() {
-  const error=new Error('Gemini rate-limit cooldown active');
+function aiRateLimitError(lane='gemini') {
+  const error=new Error(`${lane === 'groq' ? 'Groq' : 'Gemini'} rate-limit cooldown active`);
   error.cinelensRateLimited=true;
   return error;
 }
 
-function registerAiRateLimit() {
+function registerAiRateLimit(lane='gemini') {
   state.meta=state.meta || {};
+  const config=aiLaneConfig(lane);
   const now=Date.now();
   // v91: aiLimiter's AIMD is now the primary response to a 429 — it halves the
   // lane instantly and pauses it for seconds. This persisted cooldown exists
@@ -4774,23 +4867,24 @@ function registerAiRateLimit() {
   // With several batches in flight a single throttle arrives as a burst of
   // 429s; without this window they would each escalate the counter and turn
   // one blip into the maximum cooldown.
-  if (now - (Date.parse(state.meta.aiRateLimitedAt || '') || 0) > 60 * 1000) {
-    state.meta.aiRateLimitCount=Math.max(0,Number(state.meta.aiRateLimitCount || 0)) + 1;
+  if (now - (Date.parse(state.meta[config.atKey] || '') || 0) > 60 * 1000) {
+    state.meta[config.countKey]=Math.max(0,Number(state.meta[config.countKey] || 0)) + 1;
   }
-  const failures=Math.max(1,Number(state.meta.aiRateLimitCount || 1));
+  const failures=Math.max(1,Number(state.meta[config.countKey] || 1));
   const cooldown=Math.min(10 * 60 * 1000,30 * 1000 * Math.pow(2,Math.min(4,failures - 1)));
-  state.meta.aiRateLimitUntil=now + cooldown;
-  state.meta.aiRateLimitedAt=nowStamp();
+  state.meta[config.cooldownKey]=now + cooldown;
+  state.meta[config.atKey]=nowStamp();
   return cooldown;
 }
 
-function clearAiRateLimitAfterSuccess() {
+function clearAiRateLimitAfterSuccess(lane='gemini') {
   if (!state.meta) return;
+  const config=aiLaneConfig(lane);
   // A request admitted before a sibling hit 429 may finish successfully after
   // the cooldown was registered. That older success must not reopen the lane.
-  if (aiRateLimitRemaining()) return;
-  state.meta.aiRateLimitUntil=0;
-  state.meta.aiRateLimitCount=0;
+  if (aiRateLimitRemaining(Date.now(), lane)) return;
+  state.meta[config.cooldownKey]=0;
+  state.meta[config.countKey]=0;
 }
 
 // v91: this used to be a process-wide promise chain that serialised every
@@ -4798,22 +4892,25 @@ function clearAiRateLimitAfterSuccess() {
 // ceiling that had nothing to do with any real quota. Admission is now
 // aiLimiter's job; this only enforces the persisted cooldown that a genuine
 // upstream 429 sets, and it no longer blocks other callers while doing so.
-async function reserveAiRequest(_requestDelay=AI_REQUEST_DELAY_MS) {
+async function reserveAiRequest(_requestDelay=AI_REQUEST_DELAY_MS, lane='gemini') {
   if (fetchAbortRequested) throw new DOMException('Aborted','AbortError');
-  if (aiRateLimitRemaining()) throw aiRateLimitError();
+  if (aiRateLimitRemaining(Date.now(), lane)) throw aiRateLimitError(lane);
 }
 
-async function runAiRequest(request) {
-  return aiLimiter.run(async () => {
+// `request` receives the lane it was admitted on, so the caller can put the
+// right provider hint in the body without deciding the lane twice.
+async function runAiRequest(request, lane='gemini') {
+  const limiter = aiLaneConfig(lane).limiter;
+  return limiter.run(async () => {
     // Check only after the limiter grants a real start slot. A batch can wait
     // here behind another request that registers a cooldown in the meantime.
-    await reserveAiRequest();
-    const dailyStamp = aiLimiter.recordDailyStart();
+    await reserveAiRequest(AI_REQUEST_DELAY_MS, lane);
+    const dailyStamp = limiter.recordDailyStart();
     try {
-      return await request();
+      return await request(lane);
     } catch (error) {
       if (!isLocalDailyCapError(error) && isExternalRateLimitError(error)) {
-        aiLimiter.refundDailyStart(dailyStamp);
+        limiter.refundDailyStart(dailyStamp);
       }
       throw error;
     }
@@ -7717,12 +7814,13 @@ function scheduleMoodBackfill(delay=5000) {
   }, Math.max(0, Number(delay) || 0));
 }
 
-async function postAiMoodBatch(movies) {
+async function postAiMoodBatch(movies, lane=pickAvailableAiLane() || 'gemini') {
   const response = await fetchWithTimeout(AI_TAGGER_URL, {
     method:'POST',
     headers:{'Content-Type':'text/plain;charset=utf-8'},
     body:JSON.stringify({
       task:'mood-titles',
+      provider:lane === 'groq' ? 'groq' : 'gemini',
       items:movies.map(movie => ({id:movie.id, title:movie.title, storyText:aiTagSourceText(movie)}))
     })
   }, AI_TAGGER_TIMEOUT_MS);
@@ -9425,8 +9523,14 @@ async function runBackgroundAiQueue() {
   backgroundAiTaggingInProgress = true;
   try {
     pipelineStageProgress('gemini', pendingBackgroundAiCount(), `tagging ${batch.length} of them now`);
-    const settled = await Promise.allSettled(batches.map(group => requestAiTags(group, {
+    // v152: deal the batches across every available lane. Two providers now
+    // work the same backlog at the same time against separate quotas, instead
+    // of every batch queuing behind one.
+    const lanes = availableAiLanes().filter(lane => !aiRateLimitRemaining(Date.now(), lane));
+    const dealLanes = lanes.length ? lanes : availableAiLanes();
+    const settled = await Promise.allSettled(batches.map((group, index) => requestAiTags(group, {
       deferUi:true,
+      lane:dealLanes[index % dealLanes.length],
       batchSize:AI_BACKGROUND_BATCH_SIZE,
       requestDelayMs:AI_BACKGROUND_REQUEST_DELAY_MS
     })));
@@ -11625,22 +11729,34 @@ async function generateTasteStory({force=false, rng=Math.random, variationSeed='
   tasteStoryInProgress=true;
   state.tasteStory={...existing, version:TASTE_STORY_VERSION, profileHash:profile.profileHash, status:'writing', error:'', ratingCount:profile.ratingCount};
   renderTasteStoryCard();
+  // v152: THE STORY IS ONE REQUEST AND IT WAS QUEUING BEHIND THE BACKLOG.
+  // reserveAiRequest throws the moment the Gemini cooldown is live, and with a
+  // tagging backlog that cooldown is live most of the time - so pressing "write
+  // a new story" failed on the spot with a rate-limit error and the card showed
+  // an error it had no way to clear. It was never a story bug: it was one
+  // shared quota, and the single most user-visible request was the one most
+  // often standing behind several hundred background batches.
+  //
+  // A story now goes down whichever lane is open, and fails only when every
+  // lane is genuinely cooling.
+  const storyLane = pickAvailableAiLane();
   try {
-    await reserveAiRequest(AI_REQUEST_DELAY_MS);
+    if (!storyLane) throw aiRateLimitError(availableAiLanes()[0] || 'gemini');
+    await reserveAiRequest(AI_REQUEST_DELAY_MS, storyLane);
     const response=await runAiRequest(() => fetchWithTimeout(AI_TAGGER_URL, {
       method:'POST',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify({task:'generate-taste-story', profile:{
+      body:JSON.stringify({task:'generate-taste-story', provider:storyLane === 'groq' ? 'groq' : 'gemini', profile:{
         ...profile,
         previousStoryTitle:tasteStoryTitleHistory(existing)[0] || '',
         previousStoryTitles:tasteStoryTitleHistory(existing)
       }})
-    }, AI_TAGGER_TIMEOUT_MS));
+    }, AI_TAGGER_TIMEOUT_MS), storyLane);
     if (!response.ok) {
       const error=new Error(`Taste story HTTP ${response.status}`);
       if (response.status === 429) {
         error.cinelensRateLimited=true;
-        registerAiRateLimit();
+        registerAiRateLimit(storyLane);
       }
       throw error;
     }
@@ -11648,7 +11764,7 @@ async function generateTasteStory({force=false, rng=Math.random, variationSeed='
     if (!payload.ok) throw new Error(payload.error || 'Taste story generation failed');
     const title=String(payload.title || '').trim();
     const story=String(payload.story || '').trim();
-    if (!title || !story) throw new Error('Gemini returned no usable story');
+    if (!title || !story) throw new Error('The tagger returned no usable story');
     state.tasteStory={
       version:TASTE_STORY_VERSION,
       profileHash:profile.profileHash,

@@ -6097,3 +6097,68 @@ Verified by throwaway probe, not a stored assertion: fetching the served
 `index.html` and reading the badge out of the raw markup — the state the browser
 paints before any script runs — confirms it is empty and hidden, and the live
 page then shows `APP_VERSION` with a matching tooltip.
+
+## 152. Two AI lanes, and the taste story stops queuing behind the backlog
+
+### Why the story "didn't work"
+
+`generateTasteStory` calls `reserveAiRequest`, which **throws the moment the
+Gemini cooldown is live**. With a tagging backlog that cooldown is live most of
+the time, so pressing *write a new story* failed on the spot with a rate-limit
+error and the card showed an error it had no way to clear.
+
+It was never a story bug. It was one shared quota — and the single most
+user-visible request in the app was the one most often standing behind several
+hundred background tagging batches.
+
+### Groq becomes a lane, not a spare tyre
+
+148.1 added Groq as a fallback: same quota lane, used only when Gemini failed.
+Every request still spent one lane's budget and the whole pipeline still stalled
+when that lane cooled.
+
+`groqLimiter` is now a genuinely independent lane — its own `AdaptiveLimiter`,
+its own daily counter, its own cooldown key (`groqRateLimitUntil`). Groq's free
+tier meters differently from Gemini's, so its rpm/rpd are its own numbers rather
+than a copy.
+
+- `runAiRequest(request, lane)` admits on that lane's limiter and hands the lane
+  back to the request, so the body's `provider` hint and the limiter can never
+  disagree.
+- `registerAiRateLimit(lane)` / `clearAiRateLimitAfterSuccess(lane)` /
+  `aiRateLimitRemaining(now, lane)` are all lane-scoped. A Gemini 429 no longer
+  cools Groq.
+- `effectiveAiCooldownRemaining` returns the **shortest** wait across available
+  lanes. The pipeline is stalled only when every lane is stalled, so collection
+  no longer parks — and the deck no longer prints "cooling down" — while a free
+  lane sits idle.
+- Background tagging **deals its batches across the open lanes**, so both
+  providers work the same backlog concurrently against separate quotas.
+- Tag-cloud normalisation, mood batches and the taste story each take whichever
+  lane is open.
+
+Backend: `doPost` records `request.provider` and `callGemini` tries that
+provider first, keeping the other as its fallback in either direction. A Groq
+429 now marks `cinelensRetryable` too, which it did not need to when Groq was
+only ever the last stop.
+
+### The lane cannot be assumed into existence
+
+A client that assumed two lanes against a backend that has no Groq key would
+simply double the Gemini request rate and make the cooldowns worse. `doGet`
+already reports `fallbackModel`, so `probeAiLanes` reads it once a day and
+caches the answer in `meta`. Until it answers, `availableAiLanes()` is
+`['gemini']` and everything behaves exactly as it did in v151 — which is also
+what happens permanently if `GROQ_API_KEY` is never set.
+
+**Requires a redeploy of the Apps Script web app** for the second lane to exist
+at all; the client half is inert without it.
+
+Verified by throwaway probe, not a stored assertion: single-lane behaviour with
+no Groq key including the unchanged cooldown report; two lanes with a key; a
+cooling Gemini routing to Groq while the pipeline reports no stall; independent
+per-lane cooldowns that do not clear each other; every-lane-cooling still
+yielding no pickable lane; and a taste story succeeding down the Groq lane while
+Gemini cools, ending in a `ready` card. The backend routing was exercised
+separately in a VM: provider `groq` and `gemini` each go where asked, and a 429
+on either falls through to the other.
