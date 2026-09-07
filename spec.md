@@ -6308,3 +6308,50 @@ outranking an identically-fitting long one **and showing a higher percentage**
 (100% against 64%, which can only pass if the term is inside `matchScore`); an
 unchecked title demoted with its percentage showing it; the two penalties at
 their stated magnitudes; and `rankScore === predictedRating`.
+
+## 157. The maintenance line says four numbers, and the pipelines stop queuing behind each other
+
+The line read:
+
+> Tagging catch-up · 121 titles need tags · 121 titles awaiting current AI tags ·
+> TMDB refresh running · 777 pending · Mood backfill running · 75 pending ·
+> Drive recovery finished · 6 titles restored from 110 revisions across 11
+> chunks · Drive backed up just now
+
+The same 121 twice in two phrasings, every queue spelling out
+"running · N pending" in prose, and a completion notice for a repair that had
+finished long ago and never went away. The content is four numbers and a Drive
+state; the rest was ceremony.
+
+`maintenanceQueueSummary` renders one list in pipeline order — `tags 121… ·
+TMDB 777 · moods 75` — where an empty queue says nothing at all and an ellipsis
+marks the one currently working, which is the whole of what "running" versus
+"queued" was saying in a clause each. The headline states the mode
+(`Tagging catch-up`) without repeating a count the list already gives.
+`legacyTagRecoveryResultText` is gated on a session flag: a recovery is news in
+the session it happened in, not a permanent banner.
+
+### Three things that were actually slow
+
+- **Moods and tags fought over one lane.** Both called `pickAvailableAiLane()`,
+  which returns the *first* open lane — so with two lanes available both still
+  chose Gemini and queued behind each other while Groq sat idle.
+  `moodBackfillLane()` takes the other lane whenever tagging is running and
+  there is one. With a single lane the behaviour is unchanged.
+- **The mood loop idled 1200ms between batches of 20**, longer than most batches
+  take. The lane limiter is the real pacer and meters far more finely; the delay
+  drops to 250ms.
+- **Moods were not stamped with the catalogue clock.** A v149 gap: moods are
+  catalogue data, so without `touchCatalogueRecord` another device's older copy
+  wins the chunk merge and the entire mood backfill runs again — the exact loop
+  v149 fixed for TMDB refreshes, still live for this one pipeline.
+
+Verified by throwaway probe, not a stored assertion: the rendered line with
+three distinct queue populations, containing no per-subsystem prose and stating
+the tag debt exactly once; a recovery from an earlier session staying silent
+while one from this session reports; the mood lane picking Groq while tagging
+runs, Gemini when idle, Gemini when there is only one lane, and Gemini when Groq
+is cooling; and the new batch delay. The first two assertions failed on their
+first run for a fixture reason — all three queues held the same five titles, so
+"5" appearing three times was correct — which is why the fixture now gives each
+queue a distinct population.

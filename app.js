@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 156;
+const APP_VERSION = 157;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -37,7 +37,10 @@ const MOOD_BACKFILL_BATCH_SIZE = 20;
 // progressing. The lane is rate-limited by AdaptiveLimiter like every other
 // upstream, so the fixed gate was only ever slowing down work the limiter is
 // already pacing correctly.
-const MOOD_BACKFILL_BATCH_DELAY_MS = 1200;
+// v157: was 1200ms between batches of 20, which idled the lane for longer than
+// most batches took. The lane limiter is the real pacer and it meters far more
+// finely than this ever could.
+const MOOD_BACKFILL_BATCH_DELAY_MS = 250;
 const AI_TAG_MIN_CONFIDENCE = 0.55;
 const AI_TAG_MIN_COUNT = 10;
 // After every retry is exhausted, a title that still couldn't reach 10 grounded
@@ -7842,6 +7845,15 @@ function moodBackfillPendingCount() {
   return Object.values(state.movies || {}).filter(movie => movie?.storyText && !hasCurrentMoods(movie)).length;
 }
 
+// Prefer the lane the tagger is least likely to be occupying. With one lane
+// this is the same behaviour as before.
+function moodBackfillLane() {
+  const lanes = availableAiLanes().filter(lane => !aiRateLimitRemaining(Date.now(), lane));
+  if (!lanes.length) return availableAiLanes()[0] || 'gemini';
+  if (lanes.length === 1) return lanes[0];
+  return backgroundAiTaggingInProgress ? lanes[lanes.length - 1] : lanes[0];
+}
+
 function moodBackfillStatusText() {
   const remaining = moodBackfillPendingCount();
   if (!remaining) return '';
@@ -7888,7 +7900,11 @@ async function runMoodBackfill() {
   moodBackfillInProgress = true;
   pipelineStageProgress('moods', moodBackfillPendingCount());
   try {
-    const payload = await postAiMoodBatch(batch);
+    // v157: moods and tags are two AI workloads that both called
+    // pickAvailableAiLane(), which returns the FIRST open lane - so both always
+    // chose Gemini and queued behind each other, with the second lane idle.
+    // Moods take the lane tagging is not on whenever there is one.
+    const payload = await postAiMoodBatch(batch, moodBackfillLane());
     const byId = new Map((payload.results || []).map(result => [String(result.id), result]));
     const changed = [];
     batch.forEach(movie => {
@@ -7900,6 +7916,10 @@ async function runMoodBackfill() {
       movie.moodEvidence = moodResult ? {[mood]: {confidence:Number(moodResult.confidence), evidence:String(moodResult.evidence || '')}} : {};
       movie.moodTagging = {status:'verified', promptVersion:MOOD_PROMPT_VERSION, storyHash:moodStoryHash(movie), taggedAt:nowStamp()};
       touchRecord(movie);
+      // v157: moods are catalogue data. Without the v149 clock another device's
+      // older copy wins the chunk merge and this whole backfill runs again -
+      // exactly the loop v149 fixed for TMDB refreshes.
+      touchCatalogueRecord(movie);
       changed.push(String(movie.id));
     });
     if (changed.length) {
@@ -9468,18 +9488,30 @@ function needsMorePerfectRecommendations() {
   return needsMoreStrongRecommendations();
 }
 
+// One list, one number each, in the order the pipeline actually flows. A queue
+// that is empty says nothing at all, and the one currently working carries an
+// ellipsis - which is the whole of what "running" vs "queued" was saying in
+// prose.
+function maintenanceQueueSummary() {
+  const queues = [
+    ['tags', collectionHealth().tagDebt, backgroundAiTaggingInProgress],
+    ['TMDB', TMDB_API_KEY ? tmdbBackfillPendingCount() : 0, tmdbBackfillInProgress],
+    ['moods', moodBackfillPendingCount(), moodBackfillInProgress],
+    ['wiki repair', receptionBackfillPendingCount(), receptionBackfillInProgress]
+  ];
+  const parts = queues
+    .filter(([, count]) => Number(count) > 0)
+    .map(([name, count, running]) => `${name} ${count}${running ? '…' : ''}`);
+  if (state.settings?.tmdbBackfillPaused && TMDB_API_KEY) parts.push('TMDB paused');
+  return parts.join(' · ');
+}
+
 function updateLibraryHealth() {
   updateDriveStatusLabel();
   const health = collectionHealth();
   const label = document.getElementById('libraryHealthLabel');
   const maintenance = document.getElementById('maintenanceHealth');
   const drive = driveMaintenanceText();
-  const receptionStatus = receptionBackfillStatusText();
-  const receptionSegment = receptionStatus ? ` · ${receptionStatus}` : '';
-  const tmdbStatus = tmdbBackfillStatusText();
-  const tmdbSegment = tmdbStatus ? ` · ${tmdbStatus}` : '';
-  const moodStatus = moodBackfillStatusText();
-  const moodSegment = moodStatus ? ` · ${moodStatus}` : '';
   const recoveryResult = legacyTagRecoveryResultText();
   const recoverySegment = recoveryResult ? ` · ${recoveryResult}` : '';
 
@@ -9487,17 +9519,28 @@ function updateLibraryHealth() {
   if (autoFetchPaused) text = 'Collection paused';
   else if (legacyTagRecoveryInProgress) text = legacyTagRecoveryProgressText();
   else if (poolExpansionInProgress) { const jy = discoveryJourneyYear(); text = `Collecting ${formatStrongMatchCount(strongMatchCountForDisplay(health))}${jy ? ` · fetching ${jy}` : ''}`; }
-  else if (backgroundAiTaggingInProgress) text = `Tagging catch-up · ${health.tagDebt} titles need tags`;
-  else if (aiDailyCapRemaining()) text = `Daily tagging budget spent · ${health.tagDebt} tags waiting ${formatDurationShort(aiDailyCapRemaining())}`;
-  else if (effectiveAiCooldownRemaining()) text = `Gemini cooling down · collection waiting on ${health.tagDebt} tags`;
+  else if (backgroundAiTaggingInProgress) text = 'Tagging catch-up';
+  else if (aiDailyCapRemaining()) text = `Daily tagging budget spent · resumes ${formatDurationShort(aiDailyCapRemaining())}`;
+  else if (effectiveAiCooldownRemaining()) text = 'AI cooling down';
   else if (!libraryWritesUnlocked && state.drive?.enabled) text = 'Collection waiting for Drive reconnect';
-  else if (health.waitingForTags) text = `Tagging catch-up · ${health.tagDebt} titles need tags`;
+  else if (health.waitingForTags) text = 'Tagging catch-up';
   else if (!health.personalized) text = `Building starter pool · ${health.taggedUnseen}/${INITIAL_TAGGED_POOL_FLOOR}`;
   else text = `Collecting while idle · ${formatStrongMatchCount(strongMatchCountForDisplay(health))}`;
 
   if (label) label.textContent = text;
   if (maintenance) {
-    maintenance.textContent = `${text} · ${health.tagDebt} titles awaiting current AI tags${receptionSegment}${tmdbSegment}${moodSegment}${recoverySegment} · ${drive}`;
+    // v157: this line read
+    //   "Tagging catch-up · 121 titles need tags · 121 titles awaiting current
+    //    AI tags · TMDB refresh running · 777 pending · Mood backfill running ·
+    //    75 pending · Drive recovery finished · 6 titles restored from 110
+    //    revisions across 11 chunks · Drive backed up just now"
+    // - the same 121 twice in two phrasings, every queue spelling out
+    // "running · N pending" in prose, and a one-off completion notice from an
+    // event that finished long ago and never went away. The information is
+    // four numbers and a Drive state; everything else was ceremony.
+    maintenance.textContent = [text, maintenanceQueueSummary(), recoverySegment.replace(/^ · /, ''), drive]
+      .filter(Boolean)
+      .join(' · ');
   }
   const tmdbBtn = document.getElementById('tmdbBackfillToggleBtn');
   if (tmdbBtn) {
@@ -13249,6 +13292,8 @@ let driveManifestCache=null;
 let driveProfileDirty=false;
 let driveAllChunksDirty=false;
 let legacyTagRecoveryInProgress=false;
+// Session-scoped: the completion line is news once, not a permanent banner.
+let legacyTagRecoveryRanThisSession=false;
 let legacyTagRecoveryAttemptedThisSession=false;
 let legacyTagRecoveryProgress={phase:'idle',totalChunks:0,completedChunks:0,checkedRevisions:0,recoveredTitles:0,currentChunk:'',startedAt:0,lastActivityAt:0};
 let legacyTagRecoveryPublishedIds=new Set();
@@ -14998,6 +15043,7 @@ async function recoverTagsFromDriveRevisions(opts={},recoveredIds=new Set()) {
 async function recoverMissingTagsFromLegacyBackup(opts={}) {
   if (legacyTagRecoveryInProgress || Number(state.meta?.legacyTagRecoveryVersion || 0) >= LEGACY_TAG_RECOVERY_VERSION) return 0;
   legacyTagRecoveryInProgress=true;
+  legacyTagRecoveryRanThisSession=true;
   legacyTagRecoveryAttemptedThisSession=true;
   legacyTagRecoveryPublishedIds=new Set();
   legacyTagRecoveryProgress={phase:'backup',totalChunks:0,completedChunks:0,checkedRevisions:0,recoveredTitles:0,currentChunk:'',startedAt:Date.now(),lastActivityAt:Date.now()};
@@ -15072,6 +15118,9 @@ function legacyTagRecoveryProgressText(now=Date.now()) {
 }
 
 function legacyTagRecoveryResultText() {
+  // v157: this used to render on every load forever, describing a repair that
+  // may have run weeks ago. It is news for the session it happened in.
+  if (!legacyTagRecoveryRanThisSession) return '';
   if (legacyTagRecoveryInProgress || Number(state.meta?.legacyTagRecoveryVersion || 0) < LEGACY_TAG_RECOVERY_VERSION) return '';
   const recovered=Number(state.meta?.legacyTagRecoveryCount || 0);
   const chunks=Number(state.meta?.legacyTagRecoveryChunks || 0);
