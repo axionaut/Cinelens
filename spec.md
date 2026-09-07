@@ -6388,3 +6388,32 @@ app reports no cap and no pipeline stall; with both spent there is no lane to
 pick and the cap is reported; three consecutive failed passes raise exactly one
 toast; a new window speaks again; and a cooldown is separate news from a cap,
 each naming its own remaining time.
+
+## 159. Every country code resolves, because the browser already knows them all
+
+The availability row read:
+
+> United Kingdom, Australia, Canada, United States, New Zealand, Venezuela,
+> Mexico, Colombia, Ecuador, Argentina, Peru, Chile, **BO, BZ, CR, DO, GG, GT,
+> HN, NI, PA, PY, SV, UY**
+
+`COUNTRY_NAMES` is a hand-curated subset and `countryName` fell through to the
+raw code for anything outside it. A curated list is the wrong shape for this
+job: TMDB can return any ISO 3166-1 region, so the table is guaranteed to be
+short by exactly the ones nobody thought of — here, most of Central America.
+
+`Intl.DisplayNames` is in the browser and knows every region code there is, so
+it is the source now. The table stays as a fallback for an engine without it,
+and the bare code remains the last resort so this can never print nothing.
+
+Two details the implementation has to respect: `Intl.DisplayNames.of()` returns
+the **input unchanged** for a well-formed code it does not recognise (so that
+result is not a name and falls through to the table), and it **throws
+RangeError** for a malformed one rather than returning anything. The instance is
+built once and cached, including the negative case.
+
+Verified by throwaway probe, not a stored assertion: all 24 codes from the
+reported row resolving with none left as raw letters, the twelve that were
+broken now reading Bolivia … Uruguay, the four the table already handled
+unchanged, empty/malformed/lowercase/padded inputs, and the table fallback still
+answering with `Intl` disabled.

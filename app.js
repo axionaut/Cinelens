@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 158;
+const APP_VERSION = 159;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -927,8 +927,43 @@ const COUNTRY_LOCATIONS = {
   TW:[25,121.5], UA:[50.5,30.5], US:[38.9,-77], VE:[10.5,-66.9], VN:[21,-105.8], ZA:[-33.9,18.4]
 };
 let viewerLocation = null;
+// v159: COUNTRY_NAMES below is a hand-curated subset, so every code outside it
+// printed as raw letters - "Argentina, Peru, Chile, BO, BZ, CR, DO, GG, GT, HN,
+// NI, PA, PY, SV, UY". A curated list is the wrong shape for this: TMDB can
+// return any ISO 3166-1 region, so the table is guaranteed to be short by
+// exactly the ones nobody thought of.
+//
+// The browser already ships the complete list. Intl.DisplayNames resolves every
+// region code there is, in one line, with nothing to maintain. The table stays
+// as a fallback for an engine without it, and the bare code remains the last
+// resort so this can never print nothing.
+let countryDisplayNamesCache = null;
+
+function countryDisplayNames() {
+  if (countryDisplayNamesCache !== null) return countryDisplayNamesCache;
+  try {
+    countryDisplayNamesCache = new Intl.DisplayNames(['en'], {type:'region'});
+  } catch (_) {
+    countryDisplayNamesCache = false;
+  }
+  return countryDisplayNamesCache;
+}
+
 function countryName(code) {
-  return COUNTRY_NAMES[String(code || '').toUpperCase()] || String(code || '');
+  const key = String(code || '').trim().toUpperCase();
+  if (!key) return '';
+  const display = countryDisplayNames();
+  if (display) {
+    try {
+      const name = display.of(key);
+      // Intl hands back the input unchanged for a well-formed code it does not
+      // recognise, which is not a name - fall through to the table for those.
+      if (name && name !== key) return name;
+    } catch (_) {
+      // Malformed codes throw RangeError rather than returning anything.
+    }
+  }
+  return COUNTRY_NAMES[key] || key;
 }
 function requestViewerLocation() {
   if (!navigator.geolocation) return;
