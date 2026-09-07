@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 159;
+const APP_VERSION = 160;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -9293,6 +9293,40 @@ function personalizedEnough() {
   return Object.values(state.movies).filter(m => m.rating > 0 && hasUsableStoredTags(m)).length >= 3;
 }
 
+// v160: WHY IS THIS 100% TITLE NOT IN FOR YOU?
+// Search deliberately ignores every filter so a saved title can never look
+// absent, and it prints the same match percentage the recommendation list
+// would. The two together are a contradiction the user is left to solve: a
+// 100% card that is nowhere in a list sorted by that number.
+//
+// Every gate that can hold a title back is checked here, in the order the
+// pipeline applies them, and the FIRST one that fires is named. This is the
+// same set of predicates the recommendation path uses - not a description of
+// them - so it cannot drift out of step with the real behaviour.
+function recommendationExclusionReason(movie) {
+  if (!movie) return '';
+  if (Number(movie.rating || 0) > 0) return 'already rated';
+  if (movie.watchlist) return 'on your watchlist';
+  if (movie.skipped) return 'skipped';
+  if (!scoringTags(movie).length) return 'no usable tags yet';
+  if (!recommendableTitle(movie)) return 'carries a tag or genre you avoid';
+  if (!matchesLanguageFilter(movie)) return 'excluded by the Language filter';
+  if (!matchesGenreFilter(movie)) return 'excluded by the Genre filter';
+  if (!matchesMoodFilter(movie)) return 'excluded by the Mood filter';
+  if (!matchesRatingFilter(movie)) return 'excluded by the Rating filter';
+  if (!matchesContentGuideFilter(movie)) return 'excluded by the Content level filter';
+  if (!matchesWatchPlatformFilter(movie)) return 'not on your selected platforms';
+  if (!matchesSpokenLanguageRule(movie)) return 'not spoken in English or Hindi';
+  if (!meetsYearCutoff(movie)) return 'older than the Since year';
+  // The scorer's own gates last: they are the expensive ones and the least
+  // likely explanation.
+  const model = getTasteModel('', formatClass(movie));
+  const fit = predictTasteFit(movie, model);
+  if (!(fit.posOverlap > 0)) return 'no learned tag overlap yet';
+  if (!(fit.tasteOnlyPredictedRating > Number(model.baseline || 3))) return 'scores below your baseline';
+  return '';
+}
+
 function recommendationCandidates() {
   return scoreMovies().filter(x => matchesTab(x.movie) && matchesGlobalFilters(x.movie) && !x.movie.watchlist && recommendableTitle(x.movie));
 }
@@ -9921,14 +9955,19 @@ function renderGlobalTitleSearch(grid) {
     return;
   }
 
-  renderCardsInto(grid, results.slice(0, limit).map(movie => ({
-    movie,
-    opts:{
-      showEdit:movie.rating > 0,
-      poolView:Number(movie.rating || 0) === 0,
-      contextLabel:movie.rating > 0 ? 'Rated' : 'In Library'
-    }
-  })));
+  renderCardsInto(grid, results.slice(0, limit).map(movie => {
+    // The context label is the one place a search result can say why it is not
+    // in For You, which is exactly the question a 100% card raises here.
+    const excluded = recommendationExclusionReason(movie);
+    return {
+      movie,
+      opts:{
+        showEdit:movie.rating > 0,
+        poolView:Number(movie.rating || 0) === 0,
+        contextLabel:movie.rating > 0 ? 'Rated' : (excluded ? `Not recommended - ${excluded}` : 'In Library')
+      }
+    };
+  }));
 
   if (blocked.length) {
     const blockedBox = document.createElement('div');

@@ -997,8 +997,13 @@ body.movie-modal-open{overflow:hidden}
 .show-card .tag,.show-card .tag-insight-chip,.show-card .tb-tag,.show-card .genre-chip,.show-card .watch-chip{background:var(--show-chip-bg,var(--palette-chip-bg));border-color:var(--show-chip-border,var(--palette-chip-border));color:var(--show-tag-text,var(--tag-text))}
 .film-card .genre-chip.clickable:hover,.film-card .genre-chip.matched{color:var(--film-card-border);border-color:var(--film-card-border);background:color-mix(in srgb,var(--film-card-border) 16%,var(--film-chip-bg))}
 .show-card .genre-chip.clickable:hover,.show-card .genre-chip.matched{color:var(--show-card-border);border-color:var(--show-card-border);background:color-mix(in srgb,var(--show-card-border) 16%,var(--show-chip-bg))}
+/* v160: this capped every grid card at 300px while its column is 1fr, so
+   zooming in widened the columns and left the cards sitting at 300px with the
+   extra space empty - the grid reflowed, the cards did not. The column is
+   already the responsive unit (auto-fit + minmax on --card-min-width); the card
+   fills it. The modal card overrides this separately below. */
 @media(min-width:769px){
-  .movie-card{max-width:300px}
+  .movie-card{max-width:none}
 }
 @media(max-width:768px){
   .movies-grid{grid-template-columns:1fr}

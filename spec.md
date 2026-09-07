@@ -6417,3 +6417,46 @@ reported row resolving with none left as raw letters, the twelve that were
 broken now reading Bolivia … Uruguay, the four the table already handled
 unchanged, empty/malformed/lowercase/padded inputs, and the table fallback still
 answering with `Intl` disabled.
+
+## 160. A 100% card that is nowhere in the list, and cards that ignore zoom
+
+### The contradiction
+
+Search deliberately ignores every filter, so a saved title can never look absent
+— and it prints the same match percentage the recommendation list uses, from the
+same global reference (`matchDisplayReference` is the best score in the whole
+library, not the best in the current view). So a title genuinely can read 100%
+in search and be correctly absent from For You, and nothing on screen says which
+gate held it back. The user is left to solve a contradiction the app created.
+
+`recommendationExclusionReason` walks every gate in pipeline order and names the
+first that fires: already rated, on the watchlist, skipped, no usable tags, an
+avoided tag or genre, each of the six filters by name, the spoken-language rule,
+the Since cutoff, then the scorer's own two gates (no learned tag overlap,
+scores below your baseline). It calls **the same predicates the recommendation
+path calls** rather than describing them, so it cannot drift out of step with
+the behaviour it explains.
+
+Search results now carry it as their context label: *"Not recommended — not on
+your selected platforms"*. With four platforms selected, that is the likely
+answer for a 1995 BBC sitcom, and now the card says so instead of the user
+guessing.
+
+### Zoom did nothing because the card was pinned
+
+`@media(min-width:769px){ .movie-card{max-width:300px} }`.
+
+The grid columns are `repeat(auto-fit, minmax(var(--card-min-width), 1fr))` and
+were reflowing correctly all along — zooming in produced fewer, wider columns.
+The card inside then stopped at 300px and left the rest of its column empty, so
+the *grid* responded and the *cards* did not, which is exactly what it looked
+like. The column is already the responsive unit; the card now fills it
+(`max-width:none`). The modal card sets its own width separately and is
+unaffected.
+
+Verified by throwaway probe, not a stored assertion: a title passing every gate
+reporting no reason and appearing in `recommendationCandidates`; four excluded
+titles each naming the correct gate; the platform-excluded title genuinely
+scoring 95%, which is the whole reason the label is needed; and the desktop rule
+read out of the live stylesheet via CSSOM (the headless window is too narrow to
+activate that media query) confirming `max-width: none`.
