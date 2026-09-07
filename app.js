@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 160;
+const APP_VERSION = 161;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -892,7 +892,10 @@ function languageNameFromCode(code) {
 }
 function normaliseLanguageCodes(list) {
   return [...new Set((list || [])
-    .map(entry => String(entry?.iso_639_1 || entry || '').trim().toLowerCase())
+    .map(entry => {
+      const code = typeof entry === 'string' ? entry : entry?.iso_639_1;
+      return String(code || '').trim().toLowerCase();
+    })
     .filter(Boolean))].sort();
 }
 

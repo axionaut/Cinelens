@@ -128,3 +128,23 @@ change depends on it. `MAX_ITEMS = 20` is the batch ceiling the client targets.
 sections supersede older ones; when correcting stale text, mark the old passage
 as superseded rather than silently rewriting history. Append a numbered section
 for substantive changes.
+
+## AI hand-off
+
+When one AI takes over from another (e.g. Antigravity picking up after Claude
+Code hits a session limit, or Codex resuming after another agent), the incoming
+AI must **read the previous AI's chat history first** — not `CLAUDE.md`,
+`spec.md` or `brief.md`. Those static files may be read only if the latest chat
+explicitly requires them.
+
+Chat history locations:
+
+- **Claude Code**: `~/.claude/projects/<project-slug>/<session-id>.jsonl` —
+  pick the most recently modified `.jsonl` in the project directory.
+- **Antigravity**: `<appDataDir>/brain/<conversation-id>/.system_generated/logs/transcript.jsonl`
+- **Codex**: check `.codex/` in the project root or `~/.codex/` for session logs.
+
+The last few user messages and assistant responses in the transcript tell the
+incoming AI what was being worked on, what was already tried, and what remains.
+Starting from the static docs instead wastes time re-discovering context and
+risks redoing or contradicting work the previous AI already completed.

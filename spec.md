@@ -6460,3 +6460,20 @@ titles each naming the correct gate; the platform-excluded title genuinely
 scoring 95%, which is the whole reason the label is needed; and the desktop rule
 read out of the live stylesheet via CSSOM (the headless window is too narrow to
 activate that media query) confirming `max-width: none`.
+
+## 161. "Not spoken in English or Hindi" for an English film
+
+`normaliseLanguageCodes` extracted ISO 639-1 codes from the TMDB
+`spoken_languages` array. TMDB returns objects like
+`{english_name:'English', iso_639_1:'en', name:'English'}`, but when a
+language entry had an empty `iso_639_1` (empty string or missing key) the
+`||` chain `entry?.iso_639_1 || entry || ''` fell through to `entry` — the
+whole object — and `String(object)` produced `'[object object]'`. That
+string was stored in `spokenLanguages`, so `matchesSpokenLanguageRule` saw a
+code that was not in `ALLOWED_SPOKEN_LANGUAGE_CODES` and excluded the title
+as not spoken in English or Hindi, even when it was.
+
+Fix: check `typeof entry` first. If it is a plain string (a bare code),
+use it directly. Otherwise read `entry?.iso_639_1`. Either way, if the
+result is falsy after trimming, `filter(Boolean)` drops it — so an entry
+with no usable code is silently skipped instead of poisoning the array.
