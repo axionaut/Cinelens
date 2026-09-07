@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 154;
+const APP_VERSION = 155;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -8861,7 +8861,26 @@ function commitmentRankBonus(movie) {
 
 // "3 seasons · 24 episodes · ~9h" / "1h 46m". The card has to show the number
 // the ranking is using, or a short title jumping the queue looks arbitrary.
-function formatCommitmentLabel(movie) {
+//
+// v155: the grid tile takes the compact form. The full breakdown belongs in the
+// opened card, but the tile is where the choice is actually made - a total that
+// only appears after a click cannot help you pick what to watch, which was the
+// whole point of ranking on it.
+function formatCommitmentLabel(movie, {compact=false}={}) {
+  if (compact) {
+    const minutes = titleCommitmentMinutes(movie);
+    if (!minutes) return '';
+    const hours = Math.floor(minutes / 60);
+    const rest = Math.round(minutes % 60);
+    if (!isShow(movie)) return hours ? (rest ? `${hours}h ${rest}m` : `${hours}h`) : `${rest}m`;
+    // A series total is an approximation of a long number; the minutes are
+    // noise at that scale.
+    return hours ? `~${hours}h` : `~${rest}m`;
+  }
+  return formatCommitmentLabelFull(movie);
+}
+
+function formatCommitmentLabelFull(movie) {
   const minutes = titleCommitmentMinutes(movie);
   const asDuration = value => {
     const hours = Math.floor(value / 60);
@@ -10167,6 +10186,7 @@ function cardMarkup(movie, opts={}) {
   const safeId = movie.id.replace(/'/g,"\\'");
   const formatLabel = isShow(movie) ? 'Show' : 'Movie';
   const commitmentLabel = attrSafe(formatCommitmentLabel(movie));
+  const compactCommitmentLabel = attrSafe(formatCommitmentLabel(movie, {compact:true}));
   const wikiUrl = wikiUrlForMovie(movie);
   const googleUrl = googleSearchUrlForMovie(movie);
   const tmdbUrl = tmdbUrlForMovie(movie);
@@ -10183,7 +10203,7 @@ function cardMarkup(movie, opts={}) {
       ${posterSrc ? `<img class="card-poster-img" src="${attrSafe(posterSrc)}" alt="" loading="lazy" decoding="async">` : `<div class="card-poster-inner" style="background:${posterGrad(movie.title)}"></div>`}
       <div class="card-front-copy">
         <div class="card-front-title">${displayTitle}</div>
-        <div class="card-front-meta">${movie.year||'?'} - ${formatLabel}</div>
+        <div class="card-front-meta">${movie.year||'?'} - ${formatLabel}${compactCommitmentLabel ? ` - ${compactCommitmentLabel}` : ''}</div>
         ${!hiddenView ? `<div class="card-front-actions">${renderStars(safeId, movie.rating || 0)}<button class="card-act front-remove" onclick="removeTitlePermanently('${safeId}',event)" title="Remove ${displayTitle}">&#10005;</button></div>` : ''}
       </div>
       <div class="card-type-badge">${formatLabel}</div>

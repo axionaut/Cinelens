@@ -6227,3 +6227,26 @@ show's episodes × length, the sitcom outweighing the long film, both unknown
 shapes staying null, the bonus ordering short film > long film > short series >
 long-running series with unknown at 0, saturation at the short end, and five
 label shapes including singular/plural and the empty label for no data.
+
+## 155. The commitment belongs on the tile, not only inside the card
+
+v154 put the number on `.card-meta`, which lives in `.card-body` — visible only
+after opening a card. The grid tile showed `2024 - Show` and nothing else. That
+defeats the purpose: the tile is where the choice is made, and a total that only
+appears after a click cannot help decide what to watch, which was the whole
+reason for ranking on it.
+
+`formatCommitmentLabel(movie, {compact:true})` is the tile form, appended to the
+existing year/format line: `2024 - Show - ~18h`, `2023 - Movie - 1h 46m`. The
+opened card keeps the full breakdown, `3 seasons · 24 episodes · ~18h`.
+
+A series total is an approximation of a large number, so the compact form drops
+the minutes — `~18h`, not `~18h 0m`. A film keeps them, because 1h 46m and 1h
+58m are a real difference at that scale. No data still means no label on either
+surface.
+
+Verified by throwaway probe, not a stored assertion: five compact shapes
+including a round runtime and the empty case, the full form unchanged for both
+film and show, and a real card rendered into the DOM with both lines read back —
+tile `2024 - Show - ~18h`, body `English - USA - 2024 - 3 seasons · 24 episodes
+· ~18h`.
