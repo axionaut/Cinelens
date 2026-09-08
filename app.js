@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 164;
+const APP_VERSION = 165;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -3114,6 +3114,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   // must never blank an already-loaded library while Google auth or the network
   // is settling; a successful restore can merge and rerender afterward.
   render();
+  window.addEventListener('scroll', onScrollEvent, {passive:true});
   requestViewerLocation();
 
   // A previously connected browser may restore silently. A new browser remains
@@ -3134,7 +3135,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   // authority to start collection. Existing offline-only libraries can still run
   // when Drive was never enabled on that browser.
   finalizeStartupAfterDrive({allowCollection: restored || startupInitialLibraryPresent});
-  window.addEventListener('scroll', onScrollEvent, {passive:true});
 });
 
 // ─────────────────────────────────────────────
@@ -13415,6 +13415,8 @@ const DRIVE_SYNC_RETRY_MAX_MS=5*60*1000;
 const DRIVE_SYNC_DEBOUNCE_MS=1200;
 // Concurrent Drive chunk uploads per sync (see syncDirtyDrive).
 const DRIVE_CHUNK_UPLOAD_CONCURRENCY=5;
+// Concurrent Drive chunk downloads during restore/pull (see loadFromChunkedDrive).
+const DRIVE_CHUNK_DOWNLOAD_CONCURRENCY=5;
 // let, not const: production code never reassigns this, but the test
 // harness temporarily shrinks it to avoid a real 10s+ wall-clock wait when
 // verifying the hard-cap-overrides-deferral behavior (see assert-current.mjs).
@@ -14641,19 +14643,38 @@ async function loadFromChunkedDrive(manifest,{preferDrive=false}={}) {
   // always read it even when a stale local hash claims it is current.
   const mustReadProfile=!!preferDrive || profileChanged;
   if (!manifest.profile?.id) throw new Error('Drive manifest has no profile');
-  const incomingProfile=mustReadProfile ? await readDriveJson(manifest.profile.id) : null;
+  const profilePromise=mustReadProfile ? readDriveJson(manifest.profile.id) : Promise.resolve(null);
   const localPersonalBeforeReplace={};
   Object.entries(state.movies || {}).forEach(([id, movie]) => {
     localPersonalBeforeReplace[id]=personalMovieState(movie);
   });
-  for (const key of changedKeys) {
-    const info=remoteChunks[key];
-    const payload=await readDriveJson(info.id);
-    const incoming=payload.movies || payload || {};
-    // A stable chunk is authoritative only for that segment. Replace records in
-    // that segment, then apply personal overlays after all required chunks exist.
-    Object.keys(state.movies || {}).forEach(id => { if (driveChunkKey(state.movies[id]) === key) delete state.movies[id]; });
-    Object.assign(state.movies,incoming);
+  let incomingProfile=null;
+  if (changedKeys.length) {
+    const pending=changedKeys.slice();
+    const downloadedChunks=[];
+    const downloadWorker=async () => {
+      for (;;) {
+        const key=pending.shift();
+        if (!key) return;
+        const info=remoteChunks[key];
+        const payload=await readDriveJson(info.id);
+        const incoming=payload?.movies || payload || {};
+        downloadedChunks.push({key, incoming});
+      }
+    };
+    await Promise.all([
+      profilePromise.then(profile => { incomingProfile = profile; }),
+      ...Array.from(
+        {length: Math.min(DRIVE_CHUNK_DOWNLOAD_CONCURRENCY, pending.length)},
+        downloadWorker
+      )
+    ]);
+    for (const {key, incoming} of downloadedChunks) {
+      Object.keys(state.movies || {}).forEach(id => { if (driveChunkKey(state.movies[id]) === key) delete state.movies[id]; });
+      Object.assign(state.movies, incoming);
+    }
+  } else {
+    incomingProfile=await profilePromise;
   }
   // Put the device's own personal state back on the replaced records before the
   // profile merge runs, so that merge compares two real overlays.
