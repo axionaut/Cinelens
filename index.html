@@ -7,7 +7,7 @@
 <style>html,body{margin:0;min-height:100%;background:#080808;color:#f2f2f3}</style>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230a0a0a'/%3E%3Ccircle cx='32' cy='32' r='21' fill='none' stroke='%23e5383b' stroke-width='6'/%3E%3Ccircle cx='32' cy='32' r='7' fill='%23e5383b'/%3E%3Cpath d='M32 11v10M32 43v10M11 32h10M43 32h10' stroke='%23e5383b' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=162">
+<link rel="stylesheet" href="styles.css?v=164">
 </head>
 <body>
 
@@ -92,98 +92,122 @@
   </div>
 
   <div class="settings-bar">
-    <label>Since</label>
-    <input class="year-input" type="number" id="minYear" min="1900" max="2026" step="1" value="1970" onchange="updateMinYear(this.value)">
-    <label>Language</label>
-    <div class="genre-control">
-     <select class="platform-select genre-filter-select" id="languageFilter" multiple size="1" onchange="updateLanguageFilter()" aria-label="Languages" title="Show titles in any of these languages">
-     </select>
+    <div class="filter-field">
+      <label for="minYear">Since</label>
+      <input class="year-input" type="number" id="minYear" min="1900" max="2026" step="1" value="1970" onchange="updateMinYear(this.value)">
     </div>
-    <label>Genre</label>
-    <div class="genre-control">
-     <select class="platform-select genre-filter-select" id="genreFilter" multiple size="1" onchange="updateGenreFilter()" aria-label="Genres" title="Select one or more genres">
-      <option value="action">Action</option>
-      <option value="adventure">Adventure</option>
-      <option value="animation">Animation</option>
-      <option value="comedy">Comedy</option>
-      <option value="sitcom">Sitcom</option>
-      <option value="crime">Crime</option>
-      <option value="documentary">Documentary</option>
-      <option value="drama">Drama</option>
-      <option value="family">Family</option>
-      <option value="fantasy">Fantasy</option>
-      <option value="historical">Historical</option>
-      <option value="horror">Horror</option>
-      <option value="kids">Kids</option>
-      <option value="musical">Musical</option>
-      <option value="mystery">Mystery</option>
-      <option value="romance">Romance</option>
-      <option value="science-fiction">Science fiction</option>
-      <option value="sports">Sports</option>
-      <option value="thriller">Thriller</option>
-      <option value="war">War</option>
-      <option value="western">Western</option>
-    </select>
-    <select class="platform-select genre-match-select" id="genreMatchMode" onchange="updateGenreMatchMode(this.value)" aria-label="Genre match mode" title="Match any or all selected genres">
-      <option value="or">OR</option>
-      <option value="and">AND</option>
-    </select>
-     </div>
-    <label>Mood</label>
-    <div class="genre-control">
-     <select class="platform-select genre-filter-select" id="moodFilter" multiple size="1" onchange="updateMoodFilter()" aria-label="Moods" title="Show titles whose mood is any of these">
-      <option value="happy">Happy</option><option value="sad">Sad</option><option value="romantic">Romantic</option><option value="funny">Funny</option><option value="scary">Scary</option><option value="tense">Tense</option><option value="calm">Calm</option><option value="dark">Dark</option>
-     </select>
+    <div class="filter-field">
+      <label for="languageFilter">Language</label>
+      <div class="genre-control">
+       <select class="platform-select genre-filter-select" id="languageFilter" multiple size="1" onchange="updateLanguageFilter()" aria-label="Languages" title="Show titles in any of these languages">
+       </select>
+      </div>
     </div>
-    <label>Format</label>
-    <select class="platform-select" id="formatPreference" onchange="updateFormatPreference(this.value)" aria-label="Format preference" title="How much weight shows carry against movies in recommendations">
-      <option value="balanced">Movies &amp; shows equally</option>
-      <option value="movies-slight">Favour movies</option>
-      <option value="movies-strong">Strongly favour movies</option>
-      <option value="shows-slight">Favour shows</option>
-      <option value="shows-strong">Strongly favour shows</option>
-    </select>
-    <label>Rating</label>
-    <div class="genre-control">
-     <select class="platform-select genre-filter-select" id="ratingFilter" multiple size="1" onchange="updateRatingFilter()" aria-label="Your rating" title="Show titles at any of these ratings">
-      <option value="unrated">Unrated</option>
-      <option value="5">5 stars</option>
-      <option value="4">4 stars</option>
-      <option value="3">3 stars</option>
-      <option value="2">2 stars</option>
-      <option value="1">1 star</option>
-     </select>
+    <div class="filter-field">
+      <label for="genreFilter">Genre</label>
+      <div class="genre-control">
+       <select class="platform-select genre-filter-select" id="genreFilter" multiple size="1" onchange="updateGenreFilter()" aria-label="Genres" title="Select one or more genres">
+        <option value="action">Action</option>
+        <option value="adventure">Adventure</option>
+        <option value="animation">Animation</option>
+        <option value="comedy">Comedy</option>
+        <option value="sitcom">Sitcom</option>
+        <option value="crime">Crime</option>
+        <option value="documentary">Documentary</option>
+        <option value="drama">Drama</option>
+        <option value="family">Family</option>
+        <option value="fantasy">Fantasy</option>
+        <option value="historical">Historical</option>
+        <option value="horror">Horror</option>
+        <option value="kids">Kids</option>
+        <option value="musical">Musical</option>
+        <option value="mystery">Mystery</option>
+        <option value="romance">Romance</option>
+        <option value="science-fiction">Science fiction</option>
+        <option value="sports">Sports</option>
+        <option value="thriller">Thriller</option>
+        <option value="war">War</option>
+        <option value="western">Western</option>
+       </select>
+       <select class="platform-select genre-match-select" id="genreMatchMode" onchange="updateGenreMatchMode(this.value)" aria-label="Genre match mode" title="Match any or all selected genres">
+        <option value="or">OR</option>
+        <option value="and">AND</option>
+       </select>
+      </div>
     </div>
-    <label>Content level</label>
-    <div class="content-filter-control">
-      <select class="platform-select content-level-select" id="sexContentMax" multiple size="1" onchange="updateContentGuideFilter('sex')" aria-label="Sexual content level" title="Sexual content level: show titles at any of these levels, or ? for no evidence"><option value="unknown">S ?</option><option value="0">S 0</option><option value="1">S 1</option><option value="2">S 2</option><option value="3">S 3</option><option value="4">S 4</option><option value="5">S 5</option></select>
-      <select class="platform-select content-level-select" id="violenceContentMax" multiple size="1" onchange="updateContentGuideFilter('violence')" aria-label="Violence level" title="Violence level: show titles at any of these levels, or ? for no evidence"><option value="unknown">V ?</option><option value="0">V 0</option><option value="1">V 1</option><option value="2">V 2</option><option value="3">V 3</option><option value="4">V 4</option><option value="5">V 5</option></select>
-      <select class="platform-select content-level-select" id="languageContentMax" multiple size="1" onchange="updateContentGuideFilter('language')" aria-label="Language level" title="Language level: show titles at any of these levels, or ? for no evidence"><option value="unknown">L ?</option><option value="0">L 0</option><option value="1">L 1</option><option value="2">L 2</option><option value="3">L 3</option><option value="4">L 4</option><option value="5">L 5</option></select>
+    <div class="filter-field">
+      <label for="moodFilter">Mood</label>
+      <div class="genre-control">
+       <select class="platform-select genre-filter-select" id="moodFilter" multiple size="1" onchange="updateMoodFilter()" aria-label="Moods" title="Show titles whose mood is any of these">
+        <option value="happy">Happy</option><option value="sad">Sad</option><option value="romantic">Romantic</option><option value="funny">Funny</option><option value="scary">Scary</option><option value="tense">Tense</option><option value="calm">Calm</option><option value="dark">Dark</option>
+       </select>
+      </div>
     </div>
-    <label>Where to watch</label>
-    <div class="genre-control">
-     <select class="platform-select genre-filter-select" id="watchPlatformFilter" multiple size="1" onchange="updateWatchPlatformFilter()" aria-label="Streaming platforms" title="Show only titles streaming on these platforms (any country — India availability ranks higher)">
-     </select>
+    <div class="filter-field">
+      <label for="formatPreference">Format</label>
+      <select class="platform-select" id="formatPreference" onchange="updateFormatPreference(this.value)" aria-label="Format preference" title="How much weight shows carry against movies in recommendations">
+        <option value="balanced">Movies &amp; shows equally</option>
+        <option value="movies-slight">Favour movies</option>
+        <option value="movies-strong">Strongly favour movies</option>
+        <option value="shows-slight">Favour shows</option>
+        <option value="shows-strong">Strongly favour shows</option>
+      </select>
     </div>
-    <label>Sort</label>
-    <div class="sort-control">
-     <select class="platform-select" id="sortMode" onchange="updateSortMode(this.value)">
-      <option value="recommended">Best match / view default</option>
-      <option value="rating">Your rating</option>
-      <option value="year">Release year</option>
-      <option value="ratedAt">Last rated date</option>
-      <option value="addedAt">Date added to CineLens</option>
-      <option value="title">Title</option>
-      <option value="random">Surprise me</option>
-    </select>
-    <button class="sort-direction-btn" id="sortDirectionBtn" type="button" onclick="toggleSortDirection()" aria-label="Sort descending" title="Sort descending">↓</button>
-    <button class="tb-filter-btn" id="shuffleAgainBtn" onclick="shuffleAgain()" hidden>Shuffle again</button>
-     </div>
-    <label>Search</label>
-    <input class="title-search-input" id="titleSearch" type="search" placeholder="search local + TMDB + Wikipedia" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)">
-    <button class="tb-filter-btn" id="unifiedSearchBtn" onclick="searchWikipediaFromUnifiedInput()">search</button>
-    <button class="tb-filter-btn tag-delete-mode" id="tagDeleteModeBtn" onclick="toggleTagDeleteMode()">Tag clicks: explore</button>
-    <button class="tb-filter-btn clear-filters-btn" id="clearFiltersBtn" onclick="clearAllFilters()" hidden>Clear filters</button>
+    <div class="filter-field">
+      <label for="ratingFilter">Rating</label>
+      <div class="genre-control">
+       <select class="platform-select genre-filter-select" id="ratingFilter" multiple size="1" onchange="updateRatingFilter()" aria-label="Your rating" title="Show titles at any of these ratings">
+        <option value="unrated">Unrated</option>
+        <option value="5">5 stars</option>
+        <option value="4">4 stars</option>
+        <option value="3">3 stars</option>
+        <option value="2">2 stars</option>
+        <option value="1">1 star</option>
+       </select>
+      </div>
+    </div>
+    <div class="filter-field">
+      <label>Content level</label>
+      <div class="content-filter-control">
+        <select class="platform-select content-level-select" id="sexContentMax" multiple size="1" onchange="updateContentGuideFilter('sex')" aria-label="Sexual content level" title="Sexual content level: show titles at any of these levels, or ? for no evidence"><option value="unknown">S ?</option><option value="0">S 0</option><option value="1">S 1</option><option value="2">S 2</option><option value="3">S 3</option><option value="4">S 4</option><option value="5">S 5</option></select>
+        <select class="platform-select content-level-select" id="violenceContentMax" multiple size="1" onchange="updateContentGuideFilter('violence')" aria-label="Violence level" title="Violence level: show titles at any of these levels, or ? for no evidence"><option value="unknown">V ?</option><option value="0">V 0</option><option value="1">V 1</option><option value="2">V 2</option><option value="3">V 3</option><option value="4">V 4</option><option value="5">V 5</option></select>
+        <select class="platform-select content-level-select" id="languageContentMax" multiple size="1" onchange="updateContentGuideFilter('language')" aria-label="Language level" title="Language level: show titles at any of these levels, or ? for no evidence"><option value="unknown">L ?</option><option value="0">L 0</option><option value="1">L 1</option><option value="2">L 2</option><option value="3">L 3</option><option value="4">L 4</option><option value="5">L 5</option></select>
+      </div>
+    </div>
+    <div class="filter-field">
+      <label for="watchPlatformFilter">Where to watch</label>
+      <div class="genre-control">
+       <select class="platform-select genre-filter-select" id="watchPlatformFilter" multiple size="1" onchange="updateWatchPlatformFilter()" aria-label="Streaming platforms" title="Show only titles streaming on these platforms (any country — India availability ranks higher)">
+       </select>
+      </div>
+    </div>
+    <div class="filter-field">
+      <label for="sortMode">Sort</label>
+      <div class="sort-control">
+       <select class="platform-select" id="sortMode" onchange="updateSortMode(this.value)">
+        <option value="recommended">Best match / view default</option>
+        <option value="rating">Your rating</option>
+        <option value="year">Release year</option>
+        <option value="ratedAt">Last rated date</option>
+        <option value="addedAt">Date added to CineLens</option>
+        <option value="title">Title</option>
+        <option value="random">Surprise me</option>
+       </select>
+       <button class="sort-direction-btn" id="sortDirectionBtn" type="button" onclick="toggleSortDirection()" aria-label="Sort descending" title="Sort descending">↓</button>
+       <button class="tb-filter-btn" id="shuffleAgainBtn" onclick="shuffleAgain()" hidden>Shuffle again</button>
+      </div>
+    </div>
+    <div class="filter-field filter-field-search">
+      <label for="titleSearch">Search</label>
+      <div class="title-search-control">
+        <input class="title-search-input" id="titleSearch" type="search" placeholder="search local + TMDB + Wikipedia" oninput="updateTitleSearch(this.value)" onkeydown="handleUnifiedSearchKey(event)">
+        <button class="tb-filter-btn" id="unifiedSearchBtn" onclick="searchWikipediaFromUnifiedInput()">search</button>
+      </div>
+    </div>
+    <div class="filter-actions">
+      <button class="tb-filter-btn tag-delete-mode" id="tagDeleteModeBtn" onclick="toggleTagDeleteMode()">Tag clicks: explore</button>
+      <button class="tb-filter-btn clear-filters-btn" id="clearFiltersBtn" onclick="clearAllFilters()" hidden>Clear filters</button>
+    </div>
   </div>
   <div class="wiki-search-results" id="tmdbSearchResults" hidden></div>
   <div class="wiki-search-results" id="wikiSearchResults" hidden></div>

@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 163;
+const APP_VERSION = 164;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -9653,7 +9653,13 @@ function toggleMaintenancePanel() {
   const panel = document.getElementById('maintenancePanel');
   if (!panel) return;
   panel.open = !panel.open;
-  if (panel.open) updateLibraryHealth();
+  if (panel.open) {
+    if (state.settings.controlDeckCollapsed) {
+      state.settings.controlDeckCollapsed = false;
+      updateControlDeck();
+    }
+    updateLibraryHealth();
+  }
 }
 
 function syncMaintenancePanelPlacement() {
@@ -13610,36 +13616,13 @@ function driveFailureNeedsGesture(error) {
   return /interaction_required|consent_required|login_required|access_denied|timed out|timeout|popup/i.test(code);
 }
 
-// When automatic recovery is spent, the thing standing between the app and a
-// working session is a user gesture - and the user is about to make one, on
-// this page, for some entirely unrelated reason. That click satisfies exactly
-// what Google was asking for, so the next silent request usually succeeds.
-// Listening for it once turns "tap the chip" into "carry on using the app".
-function armDriveGestureRearm() {
-  if (driveGestureRearmArmed || typeof document === 'undefined') return;
-  driveGestureRearmArmed=true;
-  const onGesture=() => {
-    document.removeEventListener('pointerdown', onGesture, true);
-    driveGestureRearmArmed=false;
-    if (!driveAutoRecoveryExhausted || !state.drive?.enabled) return;
-    // One re-armed attempt, not a loop: if it fails the latch closes again and
-    // the chip goes back to asking, which is the honest outcome.
-    driveAutoRecoveryExhausted=false;
-    driveNeedsUserGestureFlag=false;
-    setSilentDriveRenewalBlockUntil(0);
-    driveSilentRenewLastAttemptAt=0;
-    silentlyRenewDriveToken();
-  };
-  document.addEventListener('pointerdown', onGesture, true);
-}
-
 function driveMarkAutoRecoverySpent() {
   state.drive.connected=false;
   state.drive.accessToken='';
   clearStoredDriveToken();
   driveAutoRecoveryExhausted=true;
   driveNeedsUserGestureFlag=true;
-  armDriveGestureRearm();
+  updateDriveStatusLabel();
 }
 
 function scheduleDriveTokenRefresh(expiry=0) {

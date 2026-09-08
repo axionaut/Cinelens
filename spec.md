@@ -6538,3 +6538,56 @@ swallowing the user's gesture instead of reconnecting Drive.
    Drive is disconnected (`!state.drive?.connected`) or when `driveOffersTap()` is
    true immediately triggers `retryDriveConnection()`, opening the interactive
    Google sign-in flow within the user's tap gesture.
+
+## 164. Tablet UI fixes and stop Google sign-in touch loops
+
+### Repeated Google sign-in popup loop on mobile touch
+
+When automatic recovery was marked spent, `armDriveGestureRearm()` previously
+attached a global `pointerdown` listener to `document`. Any touch or tap on
+mobile (scrolling, clicking a movie card) triggered `onGesture()`, which called
+`silentlyRenewDriveToken()`. On mobile browsers without 3rd-party cookies/storage,
+this promptless request flashed or attempted to open a Google OAuth window, failed
+or timed out, called `driveMarkAutoRecoverySpent()`, and immediately re-armed the
+document listener. This caused Google sign-in to flash continuously on every single
+touch of the screen.
+
+Fix: Removed `armDriveGestureRearm` and its document pointer listener. Drive
+authentication is strictly interactive and only initiates when the user explicitly
+taps the "Tap to reconnect Drive" status chip or reconnect button.
+
+### Tablet settings panel collapse and wasted space
+
+On tablet viewports (769px to 1100px), `.control-toggle` was hidden, preventing
+users from collapsing the settings panel. Furthermore, the desktop 2-column layout
+forced the stats bar into the left column and squeezed all filters into a narrow
+right column, leaving a tall empty void below the stats and forcing filters to
+wrap into 12 ragged vertical lines taking up half the screen. Sibling labels and
+dropdowns also split across separate lines.
+
+Fix:
+1. Enabled `.control-toggle` ("Filters & tools") on tablet (`<= 1100px`) and made
+   `.control-deck.collapsed .control-content { display: none !important; }` universal,
+   allowing instant collapse on tablet.
+2. For tablet viewports (769px to 1100px), stacked `.stats-bar` into a compact
+   horizontal header row and gave `.settings-bar` full container width.
+3. Grouped each filter `<label>` and control pair into a `.filter-field` container
+   so labels never separate from inputs across line wraps, condensing the filters
+   into 2–3 compact rows.
+4. If the maintenance panel is opened while the control deck is collapsed, the deck
+   automatically uncollapses.
+
+### Header status text overlapping on tablet
+
+On tablet screen widths, the fixed header height and unconstrained tab bar caused
+tabs to overflow and collide with `.header-right`. The `.library-status` chip also
+displayed both the connection label ("Reconnecting…") and verbose background
+queue text ("Collection waiting for Drive reconnect"), causing text collision
+and overlap with the "Pool" tab.
+
+Fix:
+1. Constrained `.tab-bar` with `min-width: 0; overflow-x: auto; scrollbar-width: none; flex-shrink: 1;`.
+2. On screens `<= 1100px`, hidden `.library-health-label` inside the header status
+   chip, keeping only the clean `driveDot` and `driveLabel` ("Backed up", "Reconnecting…",
+   "Tap to reconnect Drive"). Full background health details remain accessible in the
+   maintenance panel.
