@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 162;
+const APP_VERSION = 163;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -13574,7 +13574,7 @@ function silentlyRenewDriveToken() {
       // graded transient/gesture ladders in requestDriveTokenSilent sat unused
       // behind the latch. Only Google's definitive "a user must act" verdict
       // earns it now; everything else backs off and tries again on its own.
-      if (driveFailureNeedsGesture(e)) {
+      if (driveFailureNeedsGesture(e) || driveSilentRenewFailures >= 1) {
         driveMarkAutoRecoverySpent();
       } else {
         state.drive.connected=false;
@@ -13607,7 +13607,7 @@ function driveFailureNeedsGesture(error) {
   if (!error) return false;
   if (error.cinelensSilentRenewBlocked) return driveNeedsUserGestureFlag;
   const code=String(error?.error || error?.message || '');
-  return /interaction_required|consent_required|login_required|access_denied/i.test(code);
+  return /interaction_required|consent_required|login_required|access_denied|timed out|timeout|popup/i.test(code);
 }
 
 // When automatic recovery is spent, the thing standing between the app and a
@@ -14027,7 +14027,7 @@ function formatRelativeTime(timestamp) {
 }
 
 function handleLibraryStatusClick() {
-  if (driveOffersTap()) {
+  if (!state.drive?.connected || driveOffersTap()) {
     retryDriveConnection();
     return;
   }
@@ -14158,8 +14158,7 @@ async function requestDriveTokenSilent(opts={}) {
     // silently, and giving those the same 10-minute persisted block was
     // converting every slow-network moment on mobile into a guaranteed
     // manual "Tap Drive to reconnect".
-    const code=String(e?.error || e?.message || '');
-    const needsGesture=/interaction_required|consent_required|login_required|access_denied/i.test(code);
+    const needsGesture=driveFailureNeedsGesture(e);
     driveNeedsUserGestureFlag=needsGesture;
     const ladder=needsGesture ? DRIVE_SILENT_RENEW_GESTURE_BACKOFF_MS : DRIVE_SILENT_RENEW_TRANSIENT_BACKOFF_MS;
     const step=ladder[Math.min(driveSilentRenewFailures, ladder.length - 1)];

@@ -6503,3 +6503,38 @@ Fix: restored `.movie-card{max-width:300px}` on desktop so sparse cards stay
 proportional and never balloon into oversized posters. The modal dialog card
 retains its separate `max-width: none` override. Also bumped stylesheet cache
 version in `index.html` to `?v=162`.
+
+## 163. Fix mobile Drive reconnecting loop
+
+### The reconnecting loop on mobile
+
+On mobile browsers (such as iOS Safari and Android Chrome), third-party storage
+and cookies are restricted or partitioned, preventing promptless GIS token
+requests (`prompt: 'none'`) from succeeding silently. These requests consistently
+timed out after 8000ms with `Error('Drive silent sign-in timed out')`.
+
+Previously, `driveFailureNeedsGesture` only inspected errors for
+`interaction_required`, `consent_required`, `login_required`, and `access_denied`.
+Because timeout and popup errors did not match, `driveFailureNeedsGesture` returned
+`false`. As a result, `driveMarkAutoRecoverySpent()` was not called,
+`driveNeedsUserGestureFlag` remained `false`, and the app scheduled rapid transient
+backoff retries alongside the 10-second watchdog. This created an infinite loop
+where the status chip remained stuck on "Reconnecting…" indefinitely.
+
+Furthermore, when the user tapped the status chip while it displayed "Reconnecting…",
+`handleLibraryStatusClick` checked `driveOffersTap()`, which returned `false`.
+Consequently, tapping the status chip fell through to `toggleMaintenancePanel()`,
+swallowing the user's gesture instead of reconnecting Drive.
+
+### Fix
+
+1. Extended `driveFailureNeedsGesture` to recognize timeouts and popup failures
+   (`/interaction_required|consent_required|login_required|access_denied|timed out|timeout|popup/i`),
+   and unified `requestDriveTokenSilent` to delegate to `driveFailureNeedsGesture`.
+2. In `silentlyRenewDriveToken`, marked automatic recovery spent if gesture is
+   required or after an initial silent failure (`driveSilentRenewFailures >= 1`),
+   allowing the status chip to promptly switch to "Tap to reconnect Drive".
+3. In `handleLibraryStatusClick`, ensured that tapping the status chip whenever
+   Drive is disconnected (`!state.drive?.connected`) or when `driveOffersTap()` is
+   true immediately triggers `retryDriveConnection()`, opening the interactive
+   Google sign-in flow within the user's tap gesture.
