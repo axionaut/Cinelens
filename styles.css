@@ -365,7 +365,6 @@
   header{background:rgba(8,8,8,.9);border-bottom:1px solid rgba(var(--accent-rgb),.13);box-shadow:0 14px 38px rgba(0,0,0,.26)}
   .logo{color:var(--accent);text-shadow:0 0 24px rgba(var(--accent-rgb),.14)}
   .container{width:100%;max-width:calc(100vw - 56px);padding:0 28px}
-  @media(min-width:1900px){.container{max-width:1840px}}
   .control-deck{background:linear-gradient(180deg,#191919,#111);border-color:#303030;box-shadow:0 22px 70px rgba(0,0,0,.32)}
   .control-deck{position:sticky;top:72px;z-index:90}
   .stats-bar{border-bottom-color:rgba(var(--accent-rgb),.13);gap:34px}
@@ -997,13 +996,11 @@ body.movie-modal-open{overflow:hidden}
 .show-card .tag,.show-card .tag-insight-chip,.show-card .tb-tag,.show-card .genre-chip,.show-card .watch-chip{background:var(--show-chip-bg,var(--palette-chip-bg));border-color:var(--show-chip-border,var(--palette-chip-border));color:var(--show-tag-text,var(--tag-text))}
 .film-card .genre-chip.clickable:hover,.film-card .genre-chip.matched{color:var(--film-card-border);border-color:var(--film-card-border);background:color-mix(in srgb,var(--film-card-border) 16%,var(--film-chip-bg))}
 .show-card .genre-chip.clickable:hover,.show-card .genre-chip.matched{color:var(--show-card-border);border-color:var(--show-card-border);background:color-mix(in srgb,var(--show-card-border) 16%,var(--show-chip-bg))}
-/* v160: this capped every grid card at 300px while its column is 1fr, so
-   zooming in widened the columns and left the cards sitting at 300px with the
-   extra space empty - the grid reflowed, the cards did not. The column is
-   already the responsive unit (auto-fit + minmax on --card-min-width); the card
-   fills it. The modal card overrides this separately below. */
+/* Cap sparse cards (single search hits, 1-2 filtered titles) so they don't
+   balloon to fill an entire 1fr column across the screen. The modal card
+   overrides this separately below. */
 @media(min-width:769px){
-  .movie-card{max-width:none}
+  .movie-card{max-width:300px}
 }
 @media(max-width:768px){
   .movies-grid{grid-template-columns:1fr}

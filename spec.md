@@ -6477,3 +6477,29 @@ Fix: check `typeof entry` first. If it is a plain string (a bare code),
 use it directly. Otherwise read `entry?.iso_639_1`. Either way, if the
 result is falsy after trimming, `filter(Boolean)` drops it — so an entry
 with no usable code is silently skipped instead of poisoning the array.
+
+## 162. Container uncapped on zoom-out, and sparse cards capped
+
+### The zoom-out empty space
+
+Zooming out in the browser on desktop increases the effective viewport
+width beyond 1900px. An old rule `@media(min-width:1900px){.container{max-width:1840px}}`
+pinned the main content container to 1840px in the center of the screen,
+leaving large black voids on both sides rather than letting the cards
+expand responsively to fill the wider viewport with more columns.
+
+Fix: removed the 1840px max-width cap so `.container` fills `calc(100vw - 56px)`
+at wide and zoomed-out viewports, allowing the CSS grid to naturally create
+additional columns and populate the full width.
+
+### Sparse cards ballooning
+
+In v160, removing `.movie-card{max-width:300px}` caused sparse card views
+(such as a single search hit or 1–2 filtered recommendations) in an `auto-fit`
+grid to expand across the full width of the column, inflating a single poster
+to 1800px wide and ~2000px tall.
+
+Fix: restored `.movie-card{max-width:300px}` on desktop so sparse cards stay
+proportional and never balloon into oversized posters. The modal dialog card
+retains its separate `max-width: none` override. Also bumped stylesheet cache
+version in `index.html` to `?v=162`.
