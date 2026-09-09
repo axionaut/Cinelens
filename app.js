@@ -28,7 +28,7 @@ const DISCOVERY_SOURCE_TEMPLATES = {
   ]
 };
 const AI_TAGGER_URL = 'https://script.google.com/macros/s/AKfycbyN5QBVU3YS2Nmp9-xEduGkOQOAVxkmAzsrzPfQSDX7HfSYxYJvusuZbpLXQk5k-EsWtg/exec';
-const APP_VERSION = 165;
+const APP_VERSION = 166;
 const AI_TAG_PROMPT_VERSION = 'cinelens-tags-v3';
 const MOOD_PROMPT_VERSION = 'cinelens-moods-v2';
 const MOOD_BACKFILL_BATCH_SIZE = 20;
@@ -8324,8 +8324,9 @@ function updateControlDeck() {
   const titleSearch=document.getElementById('titleSearch');
   if (titleSearch && titleSearch.value !== (state.settings.titleSearch || '')) titleSearch.value=state.settings.titleSearch || '';
   syncUnifiedSearchClearButton();
+  const isSmallScreen = typeof window !== 'undefined' && window.innerWidth <= 1100;
   const deck=document.querySelector('.control-deck');
-  if (deck) deck.classList.toggle('collapsed', !!state.settings.controlDeckCollapsed);
+  if (deck) deck.classList.toggle('collapsed', isSmallScreen && !!state.settings.controlDeckCollapsed);
   const toggle=document.getElementById('controlToggle');
   if (toggle) toggle.textContent = state.settings.controlDeckCollapsed ? 'Show filters & tools' : 'Hide filters & tools';
   const watchPlatformFilter=document.getElementById('watchPlatformFilter');
@@ -13856,6 +13857,7 @@ async function restoreDriveSession(showFailure=false, opts={}) {
     saveLocalState({preserveUpdatedAt:true,skipDriveDirty:true});
     setDriveStatus('connected');
     scheduleLegacyTagRecovery();
+    recoverRatingsFromDriveRevisions({showToastNotice:false});
     scheduleDrivePullPoll();
     return true;
   } catch(e) {
@@ -14234,6 +14236,11 @@ function personalMovieState(movie) {
     manualAdded:!!movie?.manualAdded,
     topTenCount:topTenTenureCount(movie),
     topTenFirstAt:movie?.topTenFirstAt || '',
+    title:movie?.title || '',
+    year:movie?.year || '',
+    wikiPageId:movie?.wikiPageId || '',
+    tmdbId:movie?.tmdbId || '',
+    format:movie?.format || '',
     // Catalogue chunks intentionally omit _updatedAt. Never manufacture a
     // fresh timestamp for that blank personal overlay: doing so can beat a
     // real Drive rating during restore and reset it to zero.
@@ -14300,17 +14307,19 @@ function applyDriveProfile(profile,{merge=true,preferDrive=false}={}) {
   state.discoveryCursor=mergeDiscoveryCursor(state.discoveryCursor,profile.discoveryCursor || {}).merged;
   state.discoveryLedger=mergeRecordMap(state.discoveryLedger,profile.discoveryLedger || {});
   Object.entries(profile.personalTitles || {}).forEach(([id,remotePersonal]) => {
-    const movie=state.movies?.[id];
+    let movie=state.movies?.[id];
+    if (!movie) movie = findExistingMovieByIdentity(remotePersonal);
     if (!movie) return;
     const localPersonal=personalMovieState(movie);
     const remoteStamp=Date.parse(personalOverlayRatedAt(remotePersonal) || '') || 0;
     const localStamp=Date.parse(personalOverlayRatedAt(localPersonal) || '') || 0;
     const remoteHasRating=Number(remotePersonal.rating || 0) > 0;
     const localHasRating=Number(localPersonal.rating || 0) > 0;
-    // During startup restore, Drive is the canonical personal profile. On
-    // later background convergence, retain the newer genuine personal edit.
+    // A positive rating ALWAYS beats unrated across devices:
     let chosen = localPersonal;
-    if (preferDrive && (remoteStamp || !localHasRating)) chosen = remotePersonal;
+    if (remoteHasRating && !localHasRating) chosen = remotePersonal;
+    else if (localHasRating && !remoteHasRating) chosen = localPersonal;
+    else if (preferDrive && (remoteStamp || !localHasRating)) chosen = remotePersonal;
     else if (remoteStamp > localStamp) chosen = remotePersonal;
     else if (!localHasRating && remoteHasRating && remoteStamp === localStamp) chosen = remotePersonal;
     movie.rating=Number(chosen.rating || 0);
@@ -14860,8 +14869,16 @@ async function syncDirtyDrive() {
     const profile=exportDriveProfile();
     const hash=driveHash(profile);
     if (manifest.profile.hash !== hash) {
-      await uploadDriveJson(manifest.profile.id,profile);
-      manifest.profile={...manifest.profile,hash,updatedAt:nowStamp()};
+      try {
+        const remote=await readDriveJson(manifest.profile.id);
+        applyDriveProfile(remote,{merge:true});
+      } catch(e) {
+        console.warn('Pre-merge remote profile failed in syncDirtyDrive', e);
+      }
+      const merged=exportDriveProfile();
+      const mergedHash=driveHash(merged);
+      await uploadDriveJson(manifest.profile.id,merged);
+      manifest.profile={...manifest.profile,hash:mergedHash,updatedAt:nowStamp()};
       changed=true;
     }
   }
@@ -14980,8 +14997,16 @@ async function syncChunkedDrive(manual=false,attempt=0) {
       await uploadDriveJson(remoteProfile.id,merged);
       manifest.profile={...remoteProfile,hash:mergedHash,updatedAt:nowStamp()};
     } else if (localChanged && localProfileHash !== remoteProfile.hash) {
-      await uploadDriveJson(remoteProfile.id,localProfile);
-      manifest.profile={...remoteProfile,hash:localProfileHash,updatedAt:nowStamp()};
+      try {
+        const remote=await readDriveJson(remoteProfile.id);
+        applyDriveProfile(remote,{merge:true});
+      } catch(e) {
+        console.warn('Pre-merge remote profile failed in syncChunkedDrive', e);
+      }
+      const merged=exportDriveProfile();
+      const mergedHash=driveHash(merged);
+      await uploadDriveJson(remoteProfile.id,merged);
+      manifest.profile={...remoteProfile,hash:mergedHash,updatedAt:nowStamp()};
     }
   }
   // The chunk loop above ran before this sync had read the remote profile, so a
@@ -15039,13 +15064,13 @@ async function readDriveDataset(fileId) {
   return normaliseIncomingData(await response.json());
 }
 
-async function listDriveFileRevisions(fileId) {
+async function listDriveFileRevisions(fileId, maxRevisions=DRIVE_TAG_RECOVERY_MAX_REVISIONS) {
   const response=await driveFetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/revisions?pageSize=100&fields=revisions(id,modifiedTime,size,keepForever)`);
   if (!response.ok) throw new Error(`Drive revision listing failed (${response.status})`);
   const revisions=(await response.json()).revisions || [];
   return revisions
     .sort((a,b)=>(Date.parse(b.modifiedTime || '') || 0) - (Date.parse(a.modifiedTime || '') || 0))
-    .slice(0,DRIVE_TAG_RECOVERY_MAX_REVISIONS);
+    .slice(0,maxRevisions);
 }
 
 async function readDriveFileRevision(fileId,revisionId) {
@@ -15258,6 +15283,90 @@ function legacyTagRecoveryPending() {
 function scheduleLegacyTagRecovery(delay=1200) {
   if (Number(state.meta?.legacyTagRecoveryVersion || 0) >= LEGACY_TAG_RECOVERY_VERSION) return;
   setTimeout(() => recoverMissingTagsFromLegacyBackup(),Math.max(0,Number(delay)||0));
+}
+
+let driveRatingsRecoveryInProgress = false;
+
+async function recoverRatingsFromDriveRevisions({showToastNotice=true}={}) {
+  if (driveRatingsRecoveryInProgress) return 0;
+  if (!state.drive?.enabled || (!state.drive.connected && !state.drive.accessToken)) return 0;
+  driveRatingsRecoveryInProgress = true;
+  let recoveredCount = 0;
+  try {
+    const manifest = driveManifestCache || (state.drive.manifestFileId ? await readDriveJson(state.drive.manifestFileId).catch(()=>null) : null);
+    const profileId = manifest?.profile?.id;
+    if (profileId) {
+      try {
+        const revisions = await listDriveFileRevisions(profileId, 30);
+        for (const rev of revisions) {
+          try {
+            const payload = await readDriveFileRevision(profileId, rev.id);
+            const personal = payload?.personalTitles || payload?.movies || {};
+            Object.entries(personal).forEach(([id, record]) => {
+              const rating = Number(record?.rating || 0);
+              if (rating <= 0) return;
+              let movie = state.movies?.[id] || findExistingMovieByIdentity(record);
+              if (movie && Number(movie.rating || 0) === 0) {
+                movie.rating = rating;
+                movie.ratedAt = record.ratedAt || record.updatedAt || nowStamp();
+                if (record.watchlist) movie.watchlist = true;
+                touchRecord(movie);
+                recoveredCount++;
+              }
+            });
+          } catch(err) {
+            console.warn('Skipping unreadable profile revision', profileId, rev.id, err);
+          }
+        }
+      } catch(err) {
+        console.warn('Could not list profile revisions', profileId, err);
+      }
+    }
+
+    // Secondary fallback: check legacy full-file revisions if available
+    const legacyFileId = state.drive.fileId || (await findDriveFile().catch(()=>null));
+    if (legacyFileId) {
+      try {
+        const legacyRevisions = await listDriveFileRevisions(legacyFileId, 10);
+        for (const rev of legacyRevisions) {
+          try {
+            const payload = await readDriveFileRevision(legacyFileId, rev.id);
+            const movies = payload?.movies || {};
+            Object.entries(movies).forEach(([id, record]) => {
+              const rating = Number(record?.rating || 0);
+              if (rating <= 0) return;
+              let movie = state.movies?.[id] || findExistingMovieByIdentity(record);
+              if (movie && Number(movie.rating || 0) === 0) {
+                movie.rating = rating;
+                movie.ratedAt = record.ratedAt || record.updatedAt || nowStamp();
+                touchRecord(movie);
+                recoveredCount++;
+              }
+            });
+          } catch(e) {}
+        }
+      } catch(e) {}
+    }
+
+    if (recoveredCount > 0) {
+      invalidateTasteModel();
+      computeTagWeights();
+      saveLocalState({preserveUpdatedAt:true});
+      markDriveDirty();
+      queueDriveSync(0);
+      render();
+      if (showToastNotice) {
+        showToast(`Restored ${recoveredCount} movie ratings from Drive backup`, 'success');
+      }
+    } else if (showToastNotice) {
+      showToast('All existing ratings are already up to date.', '');
+    }
+  } catch(error) {
+    console.warn('Drive ratings recovery failed', error);
+  } finally {
+    driveRatingsRecoveryInProgress = false;
+  }
+  return recoveredCount;
 }
 
 async function findDriveFile() {

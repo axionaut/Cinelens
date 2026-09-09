@@ -451,8 +451,10 @@
   body.pipeline-active .go-top-btn{bottom:calc(76px + env(safe-area-inset-bottom))}
 
   /* COLLAPSIBLE CONTROL DECK & FILTER FIELDS */
-  .control-deck.collapsed .control-content{display:none!important}
-  .control-deck.collapsed{padding-bottom:10px;margin-bottom:16px}
+  @media(max-width:1100px){
+    .control-deck.collapsed .control-content{display:none!important}
+    .control-deck.collapsed{padding-bottom:10px;margin-bottom:16px}
+  }
   .filter-field{display:inline-flex;align-items:center;gap:6px;min-width:0}
   .filter-field label{font-size:11px;color:var(--muted);white-space:nowrap;margin:0}
   .filter-actions{display:inline-flex;align-items:center;gap:8px}
@@ -529,6 +531,7 @@
   /* DESKTOP (>= 1101px) */
   @media(min-width:1101px){
     .control-deck{padding:12px 18px;gap:10px}
+    .control-deck.collapsed .control-content{display:grid!important}
     .control-content{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:10px 18px;align-items:start}
     .stats-bar{grid-column:1;grid-row:1;display:grid;grid-template-columns:repeat(5,auto);gap:22px;align-items:center;border-bottom:0;margin:0;padding:0 18px 0 0;border-right:1px solid rgba(var(--accent-rgb),.13)}
     .stat-val{font-size:26px}

@@ -6611,3 +6611,27 @@ The scroll event listener (`window.addEventListener('scroll', onScrollEvent, {pa
 
 Fix:
 1. Registered `window.addEventListener('scroll', onScrollEvent, {passive:true})` immediately after the initial cache `render()`, ensuring instantaneous, smooth scrolling from the moment local data is displayed.
+
+## 166. Fix PC filter deck collapse and cross-device ratings sync recovery
+
+### PC filter deck empty bar
+
+In v164, `.control-deck.collapsed .control-content{display:none!important}` was introduced globally. When the user collapsed the settings deck on mobile/tablet, `state.settings.controlDeckCollapsed` synced to Drive profile. When opened on desktop PC (`>= 1101px`), the desktop layout had `.control-toggle` hidden (`display:none`), but `.control-deck` inherited `.collapsed`, causing `.control-content` to hide with `!important`. This rendered an empty dark bar with no stats, no filters, and no toggle button.
+
+Fix:
+1. Scoped `.control-deck.collapsed .control-content{display:none!important}` strictly to `@media(max-width:1100px)`.
+2. On desktop (`@media(min-width:1101px)`), explicitly enforced `.control-content{display:grid!important}`, ensuring stats and filters are always fully visible on PC.
+3. In `updateControlDeck()`, restricted the application of `.collapsed` to screen widths `<= 1100px`.
+
+### Cross-device ratings sync protection and revision recovery
+
+Across multiple devices (PC, mobile, tablet), ratings were vulnerable to being overwritten or surfacing as unrated:
+1. In `syncDirtyDrive()` and `syncChunkedDrive()`, when uploading a dirty profile (`driveProfileDirty`), the local profile was uploaded directly without merging the remote profile if the remote hash differed, clobbering ratings that other devices had submitted.
+2. In `applyDriveProfile()`, when reconciling `remotePersonal` and `localPersonal`, if `localPersonal` had an updated timestamp from local maintenance, `localStamp > remoteStamp` would cause an unrated local record to beat and wipe out a real remote rating.
+3. When titles were matched by ID, any discrepancy between Wikipedia and TMDB IDs prevented matching ratings in `personalTitles`.
+
+Fix:
+1. **Positive ratings always beat unrated:** Updated `applyDriveProfile` so `remoteHasRating && !localHasRating` always adopts `remotePersonal`, and `localHasRating && !remoteHasRating` retains `localPersonal`. A positive rating cannot be overwritten by an unrated record.
+2. **Fallback identity matching:** In `applyDriveProfile`, if `state.movies[id]` is missing, matches by `findExistingMovieByIdentity(remotePersonal)`. Included `title`, `year`, `wikiPageId`, `tmdbId` in `personalMovieState`.
+3. **Pre-merge before upload:** In both `syncDirtyDrive()` and `syncChunkedDrive()`, if `manifest.profile.hash` has moved, the remote profile is fetched and merged via `applyDriveProfile` before any profile upload.
+4. **Ratings recovery from Drive revisions:** Implemented `recoverRatingsFromDriveRevisions()`, which inspects past revisions of `manifest.profile.id` and legacy full-file revisions on Google Drive. If any revision contains a title with `rating > 0` that is currently unrated, it restores the rating. Invoked automatically on Drive connection and available via "Recover ratings from Drive backup" in the Library maintenance panel.
